@@ -30,8 +30,8 @@ migration verifies the surface end-to-end. API freezes at `v1.0.0`.
 | 2     | Namespaced state management | `v0.0.3` |
 | 3     | UI primitives (panel + winbar + section) | `v0.0.4` |
 | 4a    | `fs.path` + `git.repo` | `v0.0.5` |
-| 4b    | `fs.watch` + `git.status` | `v0.0.6` ← here |
-| 4c    | `fs.tree` + canonical `git.worktree` | `v0.0.7` |
+| 4b    | `fs.watch` + `git.status` | `v0.0.6` |
+| 4c    | `fs.tree` + canonical `git.worktree` | `v0.0.7` ← here |
 | 5     | Agent task queue + channel | `v0.0.8` |
 | 6     | Float helpers + highlights | `v0.0.9` |
 | 7     | Logger + health | `v0.0.10` |

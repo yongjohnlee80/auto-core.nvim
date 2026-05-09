@@ -84,8 +84,8 @@ end
 ok("M.version is a semver string",
   type(core.version) == "string" and core.version:match("^%d+%.%d+%.%d+$") ~= nil,
   tostring(core.version))
-ok("M.version is 0.0.6 (Phase 4b fs.watch + git.status tag)",
-  select(1, eq(core.version, "0.0.6")))
+ok("M.version is 0.0.7 (Phase 4c fs.tree + git.worktree tag)",
+  select(1, eq(core.version, "0.0.7")))
 ok("M.api_version is 0.0 (pre-stable surface)",
   select(1, eq(core.api_version, "0.0")))
 ok("M.setup is a function", type(core.setup) == "function")
@@ -1030,6 +1030,258 @@ pcall(vim.fn.delete, non_git, "rf")
 
 pcall(vim.fn.delete, git_root, "rf")
 events_mod._reset_for_tests()
+
+-- ─────────────────────── 28. fs.tree — directory walker ─────────────────────────
+print("\n[28] fs.tree — walk, walk_dirs, walk_files, exclude defaults")
+local tree = require("auto-core.fs.tree")
+
+-- Stage a tree:
+--   <root>/
+--     a.txt
+--     sub/
+--       b.txt
+--     .git/
+--       HEAD
+--     .bare/
+--       HEAD
+--     node_modules/
+--       skip-me.txt
+--     .hidden        (a dotfile — skipped unless include_hidden)
+local tree_root = vim.fn.tempname() .. "-fs-tree"
+vim.fn.mkdir(tree_root, "p")
+vim.fn.mkdir(tree_root .. "/sub", "p")
+vim.fn.mkdir(tree_root .. "/.git", "p")
+vim.fn.mkdir(tree_root .. "/.bare", "p")
+vim.fn.mkdir(tree_root .. "/node_modules", "p")
+vim.fn.writefile({ "x" }, tree_root .. "/a.txt")
+vim.fn.writefile({ "x" }, tree_root .. "/sub/b.txt")
+vim.fn.writefile({ "x" }, tree_root .. "/.git/HEAD")
+vim.fn.writefile({ "x" }, tree_root .. "/.bare/HEAD")
+vim.fn.writefile({ "x" }, tree_root .. "/node_modules/skip-me.txt")
+vim.fn.writefile({ "x" }, tree_root .. "/.hidden")
+
+local entries = tree.walk(tree_root)
+local function find_path(es, suffix)
+  for _, e in ipairs(es) do
+    if e.path:sub(-#suffix) == suffix then return e end
+  end
+  return nil
+end
+
+ok("walk includes a.txt", find_path(entries, "/a.txt") ~= nil)
+ok("walk includes sub/", find_path(entries, "/sub") ~= nil)
+ok("walk includes sub/b.txt (recursive)", find_path(entries, "/sub/b.txt") ~= nil)
+ok("walk excludes .git subtree by default",
+  find_path(entries, "/.git") == nil
+    and find_path(entries, "/.git/HEAD") == nil)
+ok("walk excludes .bare subtree by default",
+  find_path(entries, "/.bare") == nil
+    and find_path(entries, "/.bare/HEAD") == nil)
+ok("walk excludes node_modules subtree by default",
+  find_path(entries, "/node_modules") == nil)
+ok("walk excludes dotfiles by default",
+  find_path(entries, "/.hidden") == nil)
+
+local with_hidden = tree.walk(tree_root, { include_hidden = true })
+ok("walk with include_hidden surfaces .hidden",
+  find_path(with_hidden, "/.hidden") ~= nil)
+-- include_hidden does NOT override the .git/.bare exclusion patterns
+-- because those are matched as full-path patterns, not hidden-name
+-- exclusions.
+ok("include_hidden still excludes .git subtree",
+  find_path(with_hidden, "/.git/HEAD") == nil)
+
+local depth0 = tree.walk(tree_root, { depth = 0 })
+ok("depth=0 returns only root's direct children",
+  find_path(depth0, "/sub") ~= nil
+    and find_path(depth0, "/a.txt") ~= nil
+    and find_path(depth0, "/sub/b.txt") == nil)
+
+local dirs = tree.walk_dirs(tree_root)
+ok("walk_dirs returns only directories",
+  (function()
+    for _, e in ipairs(dirs) do
+      if e.type ~= "directory" then return false end
+    end
+    return #dirs > 0
+  end)())
+
+local files = tree.walk_files(tree_root)
+ok("walk_files returns only files",
+  (function()
+    for _, e in ipairs(files) do
+      if e.type ~= "file" then return false end
+    end
+    return #files > 0
+  end)())
+
+-- Negative case: non-existent root.
+ok("walk on non-existent path returns empty",
+  #tree.walk("/definitely/not/anywhere") == 0)
+
+pcall(vim.fn.delete, tree_root, "rf")
+
+-- ─────────────────────── 29. git.worktree — porcelain parser + queries ─────────────────────────
+print("\n[29] git.worktree — parse_porcelain, list, branches, helpers")
+local wt = require("auto-core.git.worktree")
+events_mod._reset_for_tests()
+wt._reset_for_tests()
+
+-- 29a. parse_porcelain — pure function tests
+local sample = {
+  "worktree /home/u/repo",
+  "HEAD abc1234567890",
+  "branch refs/heads/main",
+  "",
+  "worktree /home/u/repo-feature",
+  "HEAD def4567890abc",
+  "branch refs/heads/feature",
+  "",
+  "worktree /home/u/repo-detached",
+  "HEAD 0123456789ab",
+  "detached",
+  "",
+  "worktree /home/u/repo/.bare",
+  "bare",
+}
+local parsed = wt.parse_porcelain(sample)
+ok("parse_porcelain returns 4 entries", #parsed == 4,
+  vim.inspect(parsed))
+-- Note: parse_porcelain extracts head as line:sub(6, 13) = 8 chars
+-- (verbatim from upstream worktree.nvim/git.lua). Git's "short HEAD"
+-- length is configurable; 8 covers most repos comfortably.
+ok("first entry has main branch + 8-char head",
+  parsed[1].path == "/home/u/repo"
+    and parsed[1].branch == "main"
+    and parsed[1].head == "abc12345",
+  vim.inspect(parsed[1]))
+ok("feature entry has branch stripped of refs/heads/",
+  parsed[2].branch == "feature")
+ok("detached entry flagged",
+  parsed[3].detached == true and parsed[3].branch == nil)
+ok("bare entry flagged",
+  parsed[4].bare == true and parsed[4].path == "/home/u/repo/.bare")
+
+-- 29b. list — against this auto-core repo (we know it has worktrees)
+local self_root = require("auto-core.git.repo").root()
+ok("repo root resolved", type(self_root) == "string")
+local listed = wt.list(self_root)
+ok("list returns a table", type(listed) == "table")
+ok("list has at least one entry", #listed >= 1, vim.inspect(listed))
+ok("list entries include the auto-core path",
+  (function()
+    for _, e in ipairs(listed) do
+      if e.path:find("auto%-core") then return true end
+    end
+    return false
+  end)())
+
+-- 29c. list_branches — main/master should float to top
+local branches = wt.list_branches(self_root)
+ok("list_branches returns a table with main first (or master)",
+  #branches >= 1
+    and (branches[1] == "main" or branches[1] == "master"
+         or #branches == 0),
+  vim.inspect(branches))
+
+-- 29d. local_branch_exists / worktree_for_branch
+ok("local_branch_exists true on default branch",
+  wt.local_branch_exists(self_root, wt.default_branch(self_root)))
+ok("local_branch_exists false on bogus branch",
+  wt.local_branch_exists(self_root,
+    "definitely-no-such-branch-xyz") == false)
+
+-- 29e. default_branch
+local def = wt.default_branch(self_root)
+ok("default_branch returns a non-empty string",
+  type(def) == "string" and #def > 0, tostring(def))
+
+-- 29f. repo_name_from_url — pure function
+ok("repo_name from ssh url",
+  wt.repo_name_from_url("git@github.com:foo/bar.git") == "bar")
+ok("repo_name from https url with .git",
+  wt.repo_name_from_url("https://github.com/foo/bar.git") == "bar")
+ok("repo_name from https url without .git",
+  wt.repo_name_from_url("https://github.com/foo/bar") == "bar")
+ok("repo_name from local path",
+  wt.repo_name_from_url("/path/to/myrepo") == "myrepo")
+
+-- 29g. repo_container — parent of common dir
+ok("repo_container of /foo/repo/.bare → /foo/repo",
+  wt.repo_container("/foo/repo/.bare") == "/foo/repo")
+ok("repo_container of /foo/repo.git → /foo",
+  wt.repo_container("/foo/repo.git") == "/foo")
+
+-- 29h. negative case: non-git path
+local none = vim.fn.tempname() .. "-no-git"
+vim.fn.mkdir(none, "p")
+local entries_none, err_none = wt.list(none)
+ok("list returns nil + err on non-git path",
+  entries_none == nil and type(err_none) == "string", tostring(err_none))
+pcall(vim.fn.delete, none, "rf")
+
+-- ─────────────────────── 30. git.worktree — workspace memory + events ─────────────────────────
+print("\n[30] git.worktree — set/get active + workspace_root + events")
+events_mod._reset_for_tests()
+wt._reset_for_tests()
+
+-- Capture published events.
+local active_events = {}
+local root_events = {}
+events_mod.subscribe("core.active_worktree:changed", function(payload)
+  active_events[#active_events + 1] = payload
+end)
+events_mod.subscribe("core.workspace_root:changed", function(payload)
+  root_events[#root_events + 1] = payload
+end)
+
+ok("get_active starts as nil after reset",
+  wt.get_active() == nil)
+
+wt.set_active("/tmp/some-wt")
+ok("get_active returns the path after set",
+  wt.get_active() == "/tmp/some-wt")
+ok("core.active_worktree:changed fired with from=nil to=/tmp/some-wt",
+  #active_events == 1
+    and active_events[1].from == nil
+    and active_events[1].to == "/tmp/some-wt"
+    and type(active_events[1].cwd) == "string",
+  vim.inspect(active_events))
+
+wt.set_active("/tmp/another-wt")
+ok("event fires with from=previous, to=new",
+  #active_events == 2
+    and active_events[2].from == "/tmp/some-wt"
+    and active_events[2].to == "/tmp/another-wt")
+
+-- Idempotent set should NOT republish.
+wt.set_active("/tmp/another-wt")
+ok("idempotent set does NOT republish",
+  #active_events == 2)
+
+wt.set_active(nil)
+ok("set_active(nil) clears + publishes",
+  wt.get_active() == nil
+    and #active_events == 3
+    and active_events[3].to == nil,
+  string.format("get_active=%s #events=%d events=%s",
+    tostring(wt.get_active()), #active_events,
+    vim.inspect(active_events)))
+
+-- workspace_root parallel test
+ok("get_workspace_root starts as nil",
+  wt.get_workspace_root() == nil)
+
+wt.set_workspace_root("/home/u/Source/Projects")
+ok("get_workspace_root returns set value",
+  wt.get_workspace_root() == "/home/u/Source/Projects")
+ok("core.workspace_root:changed fired",
+  #root_events == 1
+    and root_events[1].from == nil
+    and root_events[1].to == "/home/u/Source/Projects")
+
+events_mod._reset_for_tests()
+wt._reset_for_tests()
 
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
