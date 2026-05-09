@@ -35,11 +35,24 @@ M.version     = v.version
 M.api_version = v.api_version
 
 ---@class AutoCoreConfig
----@field events { fire_autocmds: boolean }?  -- opt-in vim-native autocmd-fire compatibility shim (default false)
+---@field events { fire_autocmds: boolean?, strict_topics: boolean?, trace_capacity: integer? }?
 ---@field log    { level: string }?           -- "error" | "warn" | "info" | "debug" | "trace"
 ---@field state  { persist_dir: string }?     -- override the default persist root (~/.config/nvim/.auto-core/)
 M.defaults = {
-  events = { fire_autocmds = false },
+  events = {
+    -- Opt-in compatibility shim per ADR §6: when true, `publish(topic)`
+    -- ALSO fires `:autocmd User AutoCore_<flattened_topic>` so legacy
+    -- autocmd-style subscribers can listen. Default off — the publish
+    -- path stays lean.
+    fire_autocmds  = false,
+    -- When true, publishing a topic that isn't in events/topics.lua
+    -- emits a one-time warn-level notification. Default off — unknown
+    -- topics are allowed at runtime; strict mode is for development.
+    strict_topics  = false,
+    -- Ring-buffer capacity for `:AutoCoreEventTrace`. 200 ≈ 16 KB of
+    -- entries; raise for noisy debugging sessions.
+    trace_capacity = 200,
+  },
   log    = { level = "info" },
   state  = { persist_dir = nil },
 }
@@ -49,12 +62,26 @@ M.config = vim.deepcopy(M.defaults)
 
 M._initialized = false
 
----Initialize auto-core. Idempotent — re-calling re-applies opts.
----Phase 0: no subsystems wired yet; setup just merges config and
----records initialization for `:checkhealth`.
+-- ── subsystems (lazy-required so Phase-N code only loads when used) ──
+-- Phase 1: events (pub/sub bus). Subsequent phases attach further
+-- subsystems on this table the same way.
+M.events = require("auto-core.events")
+
+---Initialize auto-core. Idempotent — re-calling re-applies opts and
+---propagates the relevant subset to each subsystem.
 ---@param opts AutoCoreConfig?
 function M.setup(opts)
   M.config = vim.tbl_deep_extend("force", vim.deepcopy(M.defaults), opts or {})
+
+  -- Forward events config to the events module. Done on every setup
+  -- call so a re-setup with new opts (e.g. flipping fire_autocmds on
+  -- mid-session) takes effect immediately.
+  M.events.configure({
+    fire_autocmds  = M.config.events and M.config.events.fire_autocmds,
+    strict_topics  = M.config.events and M.config.events.strict_topics,
+    trace_capacity = M.config.events and M.config.events.trace_capacity,
+  })
+
   M._initialized = true
 end
 
