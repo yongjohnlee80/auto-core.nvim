@@ -1,0 +1,11 @@
+*.swp
+*.swo
+*.luac
+.DS_Store
+.luarc.json
+.luarc.local.json
+.tests/
+# Per-project CLAUDE.md is auto-injected by auto-agents into the agent's
+# cwd. When the plugin is developed in-place inside this repo, that
+# CLAUDE.md lands here — environment-specific, not part of the release.
+CLAUDE.md
