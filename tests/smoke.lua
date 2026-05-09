@@ -84,8 +84,8 @@ end
 ok("M.version is a semver string",
   type(core.version) == "string" and core.version:match("^%d+%.%d+%.%d+$") ~= nil,
   tostring(core.version))
-ok("M.version is 0.0.3 (Phase 2 state tag)",
-  select(1, eq(core.version, "0.0.3")))
+ok("M.version is 0.0.4 (Phase 3 UI primitives tag)",
+  select(1, eq(core.version, "0.0.4")))
 ok("M.api_version is 0.0 (pre-stable surface)",
   select(1, eq(core.api_version, "0.0")))
 ok("M.setup is a function", type(core.setup) == "function")
@@ -124,13 +124,16 @@ core.setup({ events = { fire_autocmds = false } })
 ok("re-setup re-merges from defaults",
   core.config.events.fire_autocmds == false)
 
--- Phase 1 wires events; Phase 2 wires state.
+-- Phase 1 wires events; Phase 2 wires state; Phase 3 wires ui.
 ok("M.events is a table (Phase 1)",
   type(core.events) == "table")
 ok("M.state is a table (Phase 2)",
   type(core.state) == "table")
-ok("M.ui is nil at this phase (lands in Phase 3)",
-  core.ui == nil)
+ok("M.ui is a table with panel/winbar/section (Phase 3)",
+  type(core.ui) == "table"
+    and type(core.ui.panel) == "table"
+    and type(core.ui.winbar) == "table"
+    and type(core.ui.section) == "table")
 
 -- ─────────────────────── 3. events: subscribe/publish ────────
 print("\n[3] events.subscribe + publish + unsubscribe")
@@ -468,6 +471,200 @@ ns4:set("b", 2)
 ns4:clear()
 ok("clear() with no key removes all user-set values",
   ns4:get("a") == nil and ns4:get("b") == nil)
+
+-- ─────────────────────── 17. ui.winbar.render (pure) ────────
+print("\n[17] ui.winbar.render — three modes by available width")
+local winbar = core.ui.winbar
+local sections_def = {
+  { number = 0, name = "config" },
+  { number = 1, name = "files"  },
+  { number = 2, name = "repos"  },
+}
+local full = winbar.render(1, sections_def, 80)
+ok("winbar(80, focused=1) contains '0: config' (full label)",
+  full:find("0: config", 1, true) ~= nil, full)
+ok("winbar contains the focused active highlight wrap",
+  full:find("AutoCoreSectionActive", 1, true) ~= nil, full)
+ok("winbar contains a clickable region for section 1",
+  full:find("%%1@v:lua%.require'auto%-core%.ui%.winbar'%.click@") ~= nil)
+
+local narrow = winbar.render(1, sections_def, 12)
+ok("winbar(narrow=12) drops the unfocused labels",
+  narrow:find("config", 1, true) == nil, narrow)
+ok("winbar(narrow) keeps the focused label '[1: files]' or '[1]'",
+  narrow:find("[1", 1, true) ~= nil, narrow)
+
+-- ─────────────────────── 18. ui.panel singleton + open/close ─
+print("\n[18] ui.panel — open / close / singleton-marker adoption")
+local Panel = core.ui.panel
+Panel._reset_for_tests()
+events._reset_for_tests()
+
+local panel = Panel.new({
+  name  = "test-panel",
+  side  = "left",
+  width = { default = 30, min = 20, max = 80 },
+  filetype = "auto-core-test",
+})
+ok("Panel.new returns a table with open/close/toggle/focus/resize",
+  type(panel.open) == "function" and type(panel.close) == "function"
+    and type(panel.toggle) == "function" and type(panel.focus) == "function"
+    and type(panel.resize) == "function")
+
+-- Pre-open: subscribe to panel:opened so we can verify the event.
+local opened_payload = nil
+core.events.subscribe("panel:opened", function(p) opened_payload = p end)
+
+local winid = panel:open(true)
+ok("panel:open() returns a valid winid",
+  winid and vim.api.nvim_win_is_valid(winid))
+ok("panel.winid was set",
+  panel.winid == winid)
+ok("panel:opened event fired with name + winid",
+  opened_payload and opened_payload.name == "test-panel"
+    and opened_payload.winid == winid,
+  vim.inspect(opened_payload))
+
+ok("panel window has winfixwidth set",
+  vim.wo[winid].winfixwidth == true)
+ok("panel window has winfixbuf set",
+  vim.wo[winid].winfixbuf == true)
+ok("panel window stamped w:test-panel_panel = 1",
+  (function()
+    local ok_get, m = pcall(vim.api.nvim_win_get_var, winid, "test_panel_panel")
+    return ok_get and m == 1
+  end)())
+ok("panel window stamped w:auto_core_panel_name = 'test-panel'",
+  (function()
+    local ok_get, n = pcall(vim.api.nvim_win_get_var, winid, "auto_core_panel_name")
+    return ok_get and n == "test-panel"
+  end)())
+
+-- Singleton-marker adoption: drop the cached winid (simulate
+-- :Lazy reload), call open() again, expect adoption rather than
+-- a duplicate.
+local pre_count = #vim.api.nvim_tabpage_list_wins(0)
+panel.winid = nil
+local re_winid = panel:open(true)
+ok("re-open with cleared state ADOPTS the marked window",
+  re_winid == winid, "got " .. tostring(re_winid) .. " expected " .. tostring(winid))
+ok("no duplicate window created",
+  #vim.api.nvim_tabpage_list_wins(0) == pre_count)
+
+-- ─────────────────────── 19. ui.panel resize + pin ──────────
+print("\n[19] ui.panel resize + reset_width")
+panel:resize(50)
+ok("panel:resize(50) pins user_width", panel.user_width == 50)
+ok("panel window width == 50 after resize",
+  vim.api.nvim_win_get_width(winid) == 50,
+  "got " .. vim.api.nvim_win_get_width(winid))
+
+panel:reset_width()
+ok("panel:reset_width() clears user_width", panel.user_width == nil)
+-- After reset, width returns to the default (30).
+ok("panel window width back to default (30)",
+  vim.api.nvim_win_get_width(winid) == 30,
+  "got " .. vim.api.nvim_win_get_width(winid))
+
+-- ─────────────────────── 20. ui.panel close + event ─────────
+print("\n[20] ui.panel close fires panel:closed")
+local closed_payload = nil
+core.events.subscribe("panel:closed", function(p) closed_payload = p end)
+panel:close()
+ok("panel.winid cleared after close", panel.winid == nil)
+ok("panel:closed event fired with name",
+  closed_payload and closed_payload.name == "test-panel",
+  vim.inspect(closed_payload))
+
+Panel._reset_for_tests()
+events._reset_for_tests()
+
+-- ─────────────────────── 21. ui.section attach + focus ──────
+print("\n[21] ui.section — attach + focus + buffer-local q keymap")
+local panel2 = Panel.new({
+  name  = "test-sections",
+  side  = "left",
+  width = { default = 30, min = 20, max = 80 },
+})
+panel2:open(true)
+
+-- Two simple sections, each builds a scratch buffer with a name.
+local mk_buf = function(label)
+  return function(_panel)
+    local b = vim.api.nvim_create_buf(false, true)
+    vim.bo[b].buftype = "nofile"
+    vim.api.nvim_buf_set_lines(b, 0, -1, false, { "section: " .. label })
+    return b
+  end
+end
+local Section = core.ui.section
+local registry = Section.attach(panel2, {
+  { number = 0, name = "config", get_buffer = mk_buf("config") },
+  { number = 1, name = "files",  get_buffer = mk_buf("files")  },
+}, { default = 0 })
+
+ok("Section.attach returns a registry with focus/add/remove",
+  type(registry.focus) == "function" and type(registry.add) == "function"
+    and type(registry.remove) == "function")
+
+local ok_focus = registry:focus(0)
+ok("registry:focus(0) returns true", ok_focus)
+ok("active section == 0", registry.active == 0)
+ok("panel buffer holds 'section: config'",
+  (function()
+    local b = vim.api.nvim_win_get_buf(panel2.winid)
+    local first = vim.api.nvim_buf_get_lines(b, 0, 1, false)[1]
+    return first == "section: config"
+  end)())
+
+ok("section bufnr cached after first focus",
+  registry._bufs[0] ~= nil)
+
+registry:focus(1)
+ok("active section == 1 after focus(1)", registry.active == 1)
+ok("panel buffer holds 'section: files' after focus(1)",
+  (function()
+    local b = vim.api.nvim_win_get_buf(panel2.winid)
+    local first = vim.api.nvim_buf_get_lines(b, 0, 1, false)[1]
+    return first == "section: files"
+  end)())
+
+-- Buffer-local 0..9 keymap and q keymap should be bound.
+local map = vim.fn.maparg("q", "n", false, true)
+ok("q is bound buffer-locally on the section buffer",
+  type(map) == "table" and map.buffer == 1
+    and (map.desc or ""):find("close panel") ~= nil,
+  vim.inspect(map))
+local map0 = vim.fn.maparg("0", "n", false, true)
+ok("0 is bound buffer-locally for section switch",
+  type(map0) == "table" and map0.buffer == 1
+    and (map0.desc or ""):find("focus section") ~= nil)
+
+-- Add a runtime section.
+registry:add({ number = 2, name = "repos", get_buffer = mk_buf("repos") })
+ok("registry:add appends new section",
+  #registry.sections == 3 and registry.sections[3].name == "repos")
+
+registry:focus(2)
+ok("focus(new section) works",
+  registry.active == 2)
+
+-- Remove a section — its on_close hook should fire and bufnr drop.
+local on_close_hits = 0
+registry:add({ number = 3, name = "logs",
+  get_buffer = mk_buf("logs"),
+  on_close = function() on_close_hits = on_close_hits + 1 end })
+registry:focus(3)  -- materialize the buffer first
+ok("section 3 (logs) bufnr cached", registry._bufs[3] ~= nil)
+local removed = registry:remove(3)
+ok("registry:remove returns true", removed)
+ok("on_close hook fired", on_close_hits == 1)
+ok("bufnr cache cleared after remove", registry._bufs[3] == nil)
+
+panel2:close()
+registry:dispose()
+Panel._reset_for_tests()
+events._reset_for_tests()
 
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))

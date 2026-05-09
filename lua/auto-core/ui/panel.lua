@@ -1,0 +1,381 @@
+---Singleton vsplit panel host for the AutoVim plugin family.
+---
+---Lifts the panel pattern from `auto-agents/init.lua:ensure_main_window`
+---and `auto-finder/panel/host.lua` into one canonical implementation
+---per ADR 0006 §3 + the iteration patterns in
+---`<auto-agents-kb>/shared/synthesis/nvim-plugin-iteration-patterns.md`.
+---
+---A panel is:
+---  - a vsplit anchored to one side ("left" or "right")
+---  - identified by a window-local marker (`w:<name>_panel = 1`)
+---    so the singleton-guard can adopt an orphan window after lazy
+---    reload / session restore / `:Lazy reload`
+---  - protected by `winfixwidth` (layout ops can't squash) and
+---    `winfixbuf` (`:edit` / `:b` / bufferline-clicks bounce off)
+---  - sized via a `width = { default, percentage, min, max }` spec
+---    with optional user pin (`panel:resize(N)`) that survives
+---    `:VimResized`
+---  - publishes `panel:opened`, `panel:closed`, `panel:focused` on
+---    the auto-core events bus so siblings can react
+---
+---Hard rules from ADR 0006 §3 + the iteration patterns:
+---  1. Never `require` a family plugin. Pure infrastructure.
+---  2. The marker pattern is the singleton guarantee — DON'T rely
+---     on `state.panel_winid` alone. Always re-discover via the
+---     marker before creating a new vsplit.
+---  3. `with_unfixed_buf` wraps any legitimate buffer swap so our
+---     own internal mounts don't bounce off `winfixbuf`.
+---@module 'auto-core.ui.panel'
+
+local events = require("auto-core.events")
+local winbar_mod = require("auto-core.ui.winbar")
+
+local M = {}
+
+-- ── module-level registry of live panels ─────────────────────
+-- Keyed by panel name. Used by ui.section + the winbar click
+-- router to resolve a panel by its name without the consumer
+-- having to thread the instance through.
+---@type table<string, AutoCorePanel>
+local _registry = {}
+
+---Look up a panel by name. Returns nil if not registered.
+---@param name string
+---@return AutoCorePanel?
+function M.get(name)
+  return _registry[name]
+end
+
+---List every registered panel name (registration order not
+---preserved — Lua pairs is unordered).
+---@return string[]
+function M.list()
+  local out = {}
+  for name in pairs(_registry) do out[#out + 1] = name end
+  return out
+end
+
+-- ── width resolution ────────────────────────────────────────
+
+---@param spec { default: integer?, percentage: number?, min: integer, max: integer }
+---@param cols integer
+---@return integer
+local function resolve_width(spec, cols)
+  local n
+  if spec.default ~= nil then
+    n = spec.default
+  elseif spec.percentage ~= nil and cols and cols > 0 then
+    n = math.floor(spec.percentage * cols + 0.5)
+  else
+    n = spec.min
+  end
+  if n < spec.min then n = spec.min end
+  if n > spec.max then n = spec.max end
+  -- Defensive: if the terminal is too narrow, drop to leave at
+  -- least 10 cols for the editor side.
+  if cols and cols > 0 and n + 10 > cols then
+    n = math.max(spec.min, math.max(1, cols - 10))
+  end
+  return n
+end
+
+-- ── the Panel class ────────────────────────────────────────
+
+---@class AutoCorePanelOpts
+---@field name string                  -- unique; used for the marker var + click routing
+---@field side "left"|"right"?         -- default "left"
+---@field width { default: integer?, percentage: number?, min: integer, max: integer }
+---@field filetype string?             -- consumer-owned filetype set on the host buffer's first mount
+---@field on_open fun(winid: integer)?
+---@field on_close fun(winid: integer)?
+---@field on_focus fun(winid: integer)?
+
+---@class AutoCorePanel
+---@field opts AutoCorePanelOpts
+---@field winid integer?
+---@field user_width integer?           -- sticky pin set by :resize(N); cleared by :reset_width
+---@field _marker_var string            -- e.g. "auto_finder_panel"
+local Panel = {}
+Panel.__index = Panel
+
+---Stamp the marker on a window. Window-local var, dies with window.
+---@private
+function Panel:_stamp(winid)
+  pcall(vim.api.nvim_win_set_var, winid, self._marker_var, 1)
+  -- Also stamp the panel name for the winbar click router.
+  pcall(vim.api.nvim_win_set_var, winid, "auto_core_panel_name", self.opts.name)
+end
+
+---Scan the current tabpage for an existing window carrying our
+---marker. The cure for the orphan-duplicate bug — see
+---`<auto-agents-kb>/shared/synthesis/nvim-plugin-iteration-patterns.md`
+---("Singleton windows need a window-local marker").
+---@private
+---@return integer?
+function Panel:_find_existing_in_tab()
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if vim.api.nvim_win_is_valid(w) then
+      local ok, marker = pcall(vim.api.nvim_win_get_var, w, self._marker_var)
+      if ok and marker == 1 then return w end
+    end
+  end
+  return nil
+end
+
+---@private
+function Panel:_is_open()
+  return self.winid ~= nil
+    and vim.api.nvim_win_is_valid(self.winid)
+end
+
+---Resolve the column count this panel should sit at — honouring the
+---user pin if set, otherwise the configured width spec.
+---@private
+---@return integer
+function Panel:_resolved_width()
+  if self.user_width and self.user_width > 0 then return self.user_width end
+  return resolve_width(self.opts.width, vim.o.columns)
+end
+
+---Run `fn` with our `winfixbuf` temporarily disabled. Used by
+---consumers' section-mount paths so their own legitimate buffer
+---swaps aren't bounced off the same protection that keeps external
+---hijacks out.
+---@param fn fun(): any
+---@return boolean ok, any result_or_err
+function Panel:with_unfixed_buf(fn)
+  if not self:_is_open() then return pcall(fn) end
+  local was = vim.wo[self.winid].winfixbuf
+  if was then vim.wo[self.winid].winfixbuf = false end
+  local ok, result = pcall(fn)
+  if was and vim.api.nvim_win_is_valid(self.winid) then
+    vim.wo[self.winid].winfixbuf = true
+  end
+  return ok, result
+end
+
+---Open the panel. If a window with the marker already exists in
+---the current tabpage, adopt it instead of creating a duplicate
+---(the orphan-duplicate guard).
+---@param force boolean?  -- bypass min-width check
+---@return integer? winid
+function Panel:open(force)
+  -- Marker-based discovery first (singleton guard). Wins even if
+  -- self.winid has gone stale via :Lazy reload / session restore.
+  local existing = self:_find_existing_in_tab()
+  if existing then
+    self.winid = existing
+    return existing
+  end
+
+  local cols = vim.o.columns
+  if not force and cols < (self.opts.width.min + 10) then
+    vim.notify(
+      "auto-core.ui.panel: terminal width " .. cols ..
+        " too narrow; force=true to bypass",
+      vim.log.levels.WARN)
+    return nil
+  end
+
+  local width = self:_resolved_width()
+  local placement = (self.opts.side == "right") and "botright" or "topleft"
+
+  -- Suppress autocmds during the split so the inherited buffer
+  -- doesn't fire BufWinEnter handlers inside our half-built panel.
+  -- We immediately swap in a private scratch buffer to break
+  -- inheritance. Same protection auto-agents and auto-finder both
+  -- evolved independently.
+  local saved_eventignore = vim.o.eventignore
+  vim.o.eventignore = "all"
+  local ok_cmd = pcall(vim.cmd, placement .. " " .. width .. "vsplit")
+  local winid = vim.api.nvim_get_current_win()
+  if ok_cmd then
+    local scratch = vim.api.nvim_create_buf(false, true)
+    vim.bo[scratch].bufhidden = "wipe"
+    vim.bo[scratch].buftype   = "nofile"
+    vim.bo[scratch].swapfile  = false
+    if self.opts.filetype then
+      vim.bo[scratch].filetype = self.opts.filetype
+    end
+    pcall(vim.api.nvim_win_set_buf, winid, scratch)
+  end
+  vim.o.eventignore = saved_eventignore
+  if not ok_cmd then
+    vim.notify("auto-core.ui.panel: failed to open '" .. self.opts.name .. "'",
+      vim.log.levels.ERROR)
+    return nil
+  end
+
+  self.winid = winid
+  self:_stamp(winid)
+
+  -- Window-local appearance: drop signs/numbers/foldcolumn — panel
+  -- contents are usually trees / repls, none of those add value.
+  vim.api.nvim_set_option_value("number",        false, { win = winid })
+  vim.api.nvim_set_option_value("relativenumber",false, { win = winid })
+  vim.api.nvim_set_option_value("signcolumn",    "no",  { win = winid })
+  vim.api.nvim_set_option_value("foldcolumn",    "0",   { win = winid })
+  vim.api.nvim_set_option_value("winfixwidth",   true,  { win = winid })
+  vim.api.nvim_set_option_value("winfixbuf",     true,  { win = winid })
+
+  events.publish("panel:opened", { name = self.opts.name, winid = winid })
+  if self.opts.on_open then pcall(self.opts.on_open, winid) end
+
+  return winid
+end
+
+---Close the panel. Section-cached buffers (managed by ui.section)
+---are torn down via the section module's `on_close` hooks; this
+---method just closes the window and clears state.
+function Panel:close()
+  local winid = self.winid
+  if winid and vim.api.nvim_win_is_valid(winid) then
+    pcall(vim.api.nvim_win_close, winid, true)
+  end
+  self.winid = nil
+  events.publish("panel:closed",
+    { name = self.opts.name, winid = winid or -1 })
+  if self.opts.on_close then pcall(self.opts.on_close, winid or -1) end
+end
+
+---Toggle: close if open, open otherwise.
+---@param force boolean?
+function Panel:toggle(force)
+  if self:_is_open() then self:close() else self:open(force) end
+end
+
+---Focus the panel (no-op if not open).
+function Panel:focus()
+  if not self:_is_open() then return end
+  pcall(vim.api.nvim_set_current_win, self.winid)
+  events.publish("panel:focused", { name = self.opts.name, winid = self.winid })
+  if self.opts.on_focus then pcall(self.opts.on_focus, self.winid) end
+end
+
+---Pin the panel to N columns. Survives :VimResized; clear via
+---`reset_width`.
+---@param n integer
+function Panel:resize(n)
+  local w = self.opts.width
+  if type(n) ~= "number" or n < 1 then
+    vim.notify("auto-core.ui.panel: resize N must be a positive integer",
+      vim.log.levels.ERROR)
+    return
+  end
+  if n < w.min or n > w.max then
+    vim.notify(string.format(
+      "auto-core.ui.panel: resize %d out of range [%d..%d]", n, w.min, w.max),
+      vim.log.levels.ERROR)
+    return
+  end
+  self.user_width = n
+  if self:_is_open() then
+    pcall(vim.api.nvim_win_set_width, self.winid, n)
+  end
+end
+
+---Drop the user pin. Width reverts to spec on next refresh.
+function Panel:reset_width()
+  self.user_width = nil
+  if self:_is_open() then
+    pcall(vim.api.nvim_win_set_width, self.winid, self:_resolved_width())
+  end
+end
+
+---Refresh the resolved width — e.g. after `:VimResized`. Honors
+---the user pin if set; otherwise re-resolves from spec + current
+---`vim.o.columns`.
+function Panel:refresh_width()
+  if not self:_is_open() then return end
+  pcall(vim.api.nvim_win_set_width, self.winid, self:_resolved_width())
+end
+
+---Re-clamp the panel back to the user pin if anyone (notably a
+---`:wincmd =` from a sibling plugin) grew it past the pin. Hooked
+---to `WinResized` by the panel's own autocmd group.
+function Panel:enforce_pin()
+  if not self:_is_open() then return end
+  if not (self.user_width and self.user_width > 0) then return end
+  local live = vim.api.nvim_win_get_width(self.winid)
+  if live ~= self.user_width then
+    pcall(vim.api.nvim_win_set_width, self.winid, self.user_width)
+  end
+end
+
+---Render the winbar to the panel window. `sections` is a list of
+---`{ number, name }` entries; `focused` is the active number.
+---Idempotent — safe to call after every section switch / config
+---change.
+---@param sections AutoCoreSection[]
+---@param focused integer
+function Panel:set_winbar(sections, focused)
+  if not self:_is_open() then return end
+  winbar_mod.ensure_highlights()
+  local w = vim.api.nvim_win_get_width(self.winid)
+  pcall(vim.api.nvim_set_option_value, "winbar",
+    winbar_mod.render(focused, sections, w),
+    { win = self.winid })
+end
+
+---Tear down. Removes the panel from the registry and unregisters
+---its winbar click router. Closes the window if still open.
+function Panel:dispose()
+  self:close()
+  winbar_mod.unregister_click_router(self.opts.name)
+  _registry[self.opts.name] = nil
+end
+
+-- ── public constructor ────────────────────────────────────
+
+---@param opts AutoCorePanelOpts
+---@return AutoCorePanel
+function M.new(opts)
+  assert(type(opts) == "table" and type(opts.name) == "string" and #opts.name > 0,
+    "auto-core.ui.panel.new: opts.name is required")
+  assert(type(opts.width) == "table" and type(opts.width.min) == "number"
+    and type(opts.width.max) == "number",
+    "auto-core.ui.panel.new: opts.width = { default?, percentage?, min, max } required")
+
+  if _registry[opts.name] then
+    -- Idempotent: re-calling .new for an existing name returns the
+    -- same instance (after a non-destructive opts merge so consumers
+    -- can adjust callbacks without touching the live winid).
+    local existing = _registry[opts.name]
+    existing.opts = vim.tbl_deep_extend("force", existing.opts, opts)
+    return existing
+  end
+
+  local p = setmetatable({
+    opts         = opts,
+    winid        = nil,
+    user_width   = nil,
+    _marker_var  = opts.name:gsub("[^%w_]", "_") .. "_panel",
+  }, Panel)
+
+  -- Set up auto-pin enforcement at module level. Cheap (the
+  -- callback is a no-op when no pin is set or panel is closed).
+  local group = vim.api.nvim_create_augroup(
+    "AutoCorePanel_" .. p._marker_var, { clear = true })
+  vim.api.nvim_create_autocmd("WinResized", {
+    group = group,
+    callback = function() p:enforce_pin() end,
+  })
+  vim.api.nvim_create_autocmd("VimResized", {
+    group = group,
+    callback = function() p:refresh_width() end,
+  })
+
+  _registry[opts.name] = p
+  return p
+end
+
+---Test-only: blow away the registry. Production code never calls
+---this.
+function M._reset_for_tests()
+  for _, p in pairs(_registry) do
+    pcall(p.dispose, p)
+  end
+  _registry = {}
+end
+
+return M

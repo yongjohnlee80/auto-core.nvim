@@ -65,10 +65,12 @@ M._initialized = false
 -- ── subsystems (lazy-required so Phase-N code only loads when used) ──
 -- Phase 1: events (pub/sub bus).
 -- Phase 2: state  (namespaced store).
+-- Phase 3: ui     (panel + winbar + section primitives).
 -- Subsequent phases attach further subsystems on this table the same
 -- way.
 M.events = require("auto-core.events")
 M.state  = require("auto-core.state")
+M.ui     = require("auto-core.ui")
 
 ---Initialize auto-core. Idempotent — re-calling re-applies opts and
 ---propagates the relevant subset to each subsystem.
