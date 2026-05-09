@@ -66,11 +66,15 @@ M._initialized = false
 -- Phase 1: events (pub/sub bus).
 -- Phase 2: state  (namespaced store).
 -- Phase 3: ui     (panel + winbar + section primitives).
+-- Phase 4a: fs    (path utilities; watch + tree to follow in 4b/4c).
+-- Phase 4a: git   (repo introspection; status + worktree in 4b/4c).
 -- Subsequent phases attach further subsystems on this table the same
 -- way.
 M.events = require("auto-core.events")
 M.state  = require("auto-core.state")
 M.ui     = require("auto-core.ui")
+M.fs     = require("auto-core.fs")
+M.git    = require("auto-core.git")
 
 ---Initialize auto-core. Idempotent — re-calling re-applies opts and
 ---propagates the relevant subset to each subsystem.

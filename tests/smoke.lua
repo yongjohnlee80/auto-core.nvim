@@ -84,8 +84,8 @@ end
 ok("M.version is a semver string",
   type(core.version) == "string" and core.version:match("^%d+%.%d+%.%d+$") ~= nil,
   tostring(core.version))
-ok("M.version is 0.0.4 (Phase 3 UI primitives tag)",
-  select(1, eq(core.version, "0.0.4")))
+ok("M.version is 0.0.5 (Phase 4a fs.path + git.repo tag)",
+  select(1, eq(core.version, "0.0.5")))
 ok("M.api_version is 0.0 (pre-stable surface)",
   select(1, eq(core.api_version, "0.0")))
 ok("M.setup is a function", type(core.setup) == "function")
@@ -134,6 +134,10 @@ ok("M.ui is a table with panel/winbar/section (Phase 3)",
     and type(core.ui.panel) == "table"
     and type(core.ui.winbar) == "table"
     and type(core.ui.section) == "table")
+ok("M.fs is a table with path (Phase 4a)",
+  type(core.fs) == "table" and type(core.fs.path) == "table")
+ok("M.git is a table with repo (Phase 4a)",
+  type(core.git) == "table" and type(core.git.repo) == "table")
 
 -- ─────────────────────── 3. events: subscribe/publish ────────
 print("\n[3] events.subscribe + publish + unsubscribe")
@@ -665,6 +669,130 @@ panel2:close()
 registry:dispose()
 Panel._reset_for_tests()
 events._reset_for_tests()
+
+-- ─────────────────────── 22. fs.path normalize/join/parent ───────
+print("\n[22] fs.path — normalize, join, parent, basename, relative")
+local p = core.fs.path
+
+ok("normalize collapses trailing slash",
+  p.normalize("/tmp/foo/")  == "/tmp/foo")
+ok("normalize resolves ~",
+  p.normalize("~/x"):sub(1, 1) == "/")  -- should be absolute
+ok("normalize resolves '..'",
+  p.normalize("/tmp/foo/../bar") == "/tmp/bar")
+ok("normalize on empty returns empty",
+  p.normalize("") == "")
+
+ok("join concatenates two with /",
+  p.join("/tmp", "foo") == "/tmp/foo")
+ok("join handles trailing slash on first arg",
+  p.join("/tmp/", "foo") == "/tmp/foo")
+ok("join skips empty components",
+  p.join("/tmp", "", "foo") == "/tmp/foo")
+ok("join with abs middle component resets",
+  p.join("/tmp", "/etc", "passwd") == "/etc/passwd")
+
+ok("parent returns dirname",
+  p.parent("/tmp/foo/bar.lua") == "/tmp/foo")
+ok("basename returns filename",
+  p.basename("/tmp/foo/bar.lua") == "bar.lua")
+
+ok("relative under base", p.relative("/a/b/c", "/a") == "b/c")
+ok("relative same path is .", p.relative("/a/b", "/a/b") == ".")
+ok("relative not under returns nil",
+  p.relative("/a/b", "/x") == nil)
+ok("relative doesn't false-positive prefix",
+  p.relative("/foobar", "/foo") == nil)
+
+-- ─────────────────────── 23. fs.path is_under / type checks ─────
+print("\n[23] fs.path — is_under, exists, is_dir, is_file")
+ok("is_under true for child",
+  p.is_under("/tmp/foo/bar", "/tmp/foo") == true)
+ok("is_under true for self",
+  p.is_under("/tmp/foo", "/tmp/foo") == true)
+ok("is_under false for sibling",
+  p.is_under("/tmp/foobar", "/tmp/foo") == false)
+
+local td = vim.fn.tempname()
+vim.fn.mkdir(td, "p")
+ok("is_dir true on a real dir", p.is_dir(td))
+ok("exists true on a real dir", p.exists(td))
+ok("is_file false on a dir", p.is_file(td) == false)
+
+local tf = td .. "/sample.txt"
+vim.fn.writefile({ "hello" }, tf)
+ok("is_file true on a real file", p.is_file(tf))
+ok("exists true on a real file", p.exists(tf))
+ok("is_dir false on a file", p.is_dir(tf) == false)
+ok("exists false on a non-existent path",
+  p.exists(td .. "/nope") == false)
+
+-- ─────────────────────── 24. fs.path root resolvers ─────────────
+print("\n[24] fs.path — project_root / git_root / workspace_root")
+-- Build a fake worktree-style layout under a tempdir.
+local repo = td .. "/proj-fake"
+vim.fn.mkdir(repo .. "/.git", "p")
+vim.fn.writefile({ "" }, repo .. "/go.mod")
+local sub = repo .. "/internal/pkg"
+vim.fn.mkdir(sub, "p")
+
+ok("project_root finds the .git ancestor",
+  p.project_root({ start = sub }) == repo)
+ok("git_root finds the .git ancestor",
+  p.git_root({ start = sub }) == repo)
+ok("project_root respects custom markers (go.mod alone)",
+  p.project_root({ start = sub, markers = { "go.mod" } }) == repo)
+ok("project_root returns nil when no marker found",
+  p.project_root({ start = "/", markers = { "definitely-not-here.x" } }) == nil)
+
+-- workspace_root: parent of the .git ancestor
+ok("workspace_root falls back to parent of git_root",
+  p.workspace_root({ start = sub }) == td)
+
+-- workspace_root with a `.bare` marker prefers the container
+local ws = td .. "/multi-repo"
+vim.fn.mkdir(ws .. "/.bare", "p")
+vim.fn.mkdir(ws .. "/branch-a/.git", "p")
+ok("workspace_root with .bare picks the container directly",
+  p.workspace_root({ start = ws .. "/branch-a" }) == ws)
+
+-- Cleanup
+pcall(vim.fn.delete, td, "rf")
+
+-- ─────────────────────── 25. git.repo — is_git / root / dirs ────
+print("\n[25] git.repo — is_git / root / git_dir / common_dir / is_bare")
+-- This test depends on the auto-core repo itself being a git repo
+-- (we're running in-tree).
+local repo_mod = core.git.repo
+local self_root = repo_mod.root()
+ok("git.repo.root returns a non-nil string when run inside a repo",
+  type(self_root) == "string" and #self_root > 0,
+  tostring(self_root))
+
+ok("git.repo.is_git true on the repo root",
+  repo_mod.is_git(self_root) == true)
+ok("git.repo.is_git true on a sub-path of the repo",
+  repo_mod.is_git(self_root .. "/lua") == true)
+
+local gd = repo_mod.git_dir(self_root)
+ok("git.repo.git_dir returns an absolute path",
+  type(gd) == "string" and gd:sub(1, 1) == "/", tostring(gd))
+
+local cd = repo_mod.common_dir(self_root)
+ok("git.repo.common_dir returns an absolute path",
+  type(cd) == "string" and cd:sub(1, 1) == "/", tostring(cd))
+
+ok("git.repo.is_bare false on the auto-core working tree",
+  repo_mod.is_bare(self_root) == false)
+
+-- Negative cases — a known-non-git path.
+local non_git = vim.fn.tempname() .. "-no-git"
+vim.fn.mkdir(non_git, "p")
+ok("git.repo.is_git false on a fresh empty dir",
+  repo_mod.is_git(non_git) == false)
+ok("git.repo.root nil on a fresh empty dir",
+  repo_mod.root(non_git) == nil)
+pcall(vim.fn.delete, non_git, "rf")
 
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
