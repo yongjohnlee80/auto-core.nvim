@@ -60,6 +60,30 @@ vim.api.nvim_create_user_command("AutoCoreEventTraceClear", function()
   vim.notify("auto-core: event trace cleared", vim.log.levels.INFO)
 end, { desc = "Clear the auto-core event trace ring buffer" })
 
+-- :AutoCoreChannel [open|close|toggle] — control the channel panel.
+-- No arg → toggle.
+vim.api.nvim_create_user_command("AutoCoreChannel", function(opts)
+  local ui = require("auto-core").tasks.ui
+  local sub = opts.fargs[1] or "toggle"
+  if sub == "open" then
+    ui.open()
+  elseif sub == "close" then
+    ui.close()
+  elseif sub == "toggle" then
+    ui.toggle()
+  elseif sub == "refresh" then
+    ui.refresh()
+  else
+    vim.notify("AutoCoreChannel: unknown subcommand '" .. sub
+      .. "' — expected open|close|toggle|refresh",
+      vim.log.levels.ERROR)
+  end
+end, {
+  nargs = "?",
+  complete = function() return { "open", "close", "toggle", "refresh" } end,
+  desc = "Open/close/toggle/refresh the auto-core channel panel",
+})
+
 -- The auto-core module itself is required lazily on first use by a
 -- consumer plugin. We do NOT call setup() here — consumers install
 -- via lazy.nvim's `dependencies = { "yongjohnlee80/auto-core.nvim" }`

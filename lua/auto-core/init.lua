@@ -75,6 +75,7 @@ M.state  = require("auto-core.state")
 M.ui     = require("auto-core.ui")
 M.fs     = require("auto-core.fs")
 M.git    = require("auto-core.git")
+M.tasks  = require("auto-core.tasks")
 
 ---Initialize auto-core. Idempotent — re-calling re-applies opts and
 ---propagates the relevant subset to each subsystem.

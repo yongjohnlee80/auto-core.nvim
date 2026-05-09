@@ -84,8 +84,8 @@ end
 ok("M.version is a semver string",
   type(core.version) == "string" and core.version:match("^%d+%.%d+%.%d+$") ~= nil,
   tostring(core.version))
-ok("M.version is 0.0.7 (Phase 4c fs.tree + git.worktree tag)",
-  select(1, eq(core.version, "0.0.7")))
+ok("M.version is 0.0.8 (Phase 5 tasks queue/channel/status/ui tag)",
+  select(1, eq(core.version, "0.0.8")))
 ok("M.api_version is 0.0 (pre-stable surface)",
   select(1, eq(core.api_version, "0.0")))
 ok("M.setup is a function", type(core.setup) == "function")
@@ -1282,6 +1282,291 @@ ok("core.workspace_root:changed fired",
 
 events_mod._reset_for_tests()
 wt._reset_for_tests()
+
+-- ─────────────────────── 31. tasks.queue — FIFO + priority dispatch ─────────────────────────
+print("\n[31] tasks.queue — enqueue / claim / peek / complete / priority")
+local queue = require("auto-core.tasks.queue")
+events_mod._reset_for_tests()
+queue._reset_for_tests()
+
+-- Capture events.
+local q_events = { queued = {}, claimed = {}, completed = {} }
+events_mod.subscribe("agent.task:queued",    function(p) q_events.queued[#q_events.queued + 1]       = p end)
+events_mod.subscribe("agent.task:claimed",   function(p) q_events.claimed[#q_events.claimed + 1]     = p end)
+events_mod.subscribe("agent.task:completed", function(p) q_events.completed[#q_events.completed + 1] = p end)
+
+local t1 = queue.enqueue("jarvis", { payload = "first",  priority = "normal" })
+local t2 = queue.enqueue("jarvis", { payload = "urgent", priority = "urgent" })
+local t3 = queue.enqueue("jarvis", { payload = "high",   priority = "high"   })
+local t4 = queue.enqueue("jarvis", { payload = "low",    priority = "low"    })
+
+ok("enqueue returns task with id + status='queued'",
+  t1.id ~= nil and t1.status == "queued" and t1.priority == "normal")
+ok("4 queued events fired",
+  #q_events.queued == 4
+    and q_events.queued[2].priority == "urgent")
+
+-- Peek picks the highest-priority queued task.
+local peeked = queue.peek("jarvis")
+ok("peek returns the urgent task first",
+  peeked ~= nil and peeked.id == t2.id,
+  "got id=" .. tostring(peeked and peeked.id))
+
+ok("peek does NOT transition status",
+  t2.status == "queued"
+    and #q_events.claimed == 0)
+
+-- Claim — should return urgent first, then high, then normal, then low.
+local c1 = queue.claim("jarvis")
+ok("claim 1 → urgent (priority order)",
+  c1 ~= nil and c1.id == t2.id and c1.status == "claimed")
+ok("claimed event fired with id",
+  #q_events.claimed == 1 and q_events.claimed[1].id == t2.id)
+
+local c2 = queue.claim("jarvis")
+ok("claim 2 → high",
+  c2 ~= nil and c2.id == t3.id)
+
+local c3 = queue.claim("jarvis")
+ok("claim 3 → normal (FIFO across priorities)",
+  c3 ~= nil and c3.id == t1.id)
+
+local c4 = queue.claim("jarvis")
+ok("claim 4 → low",
+  c4 ~= nil and c4.id == t4.id)
+
+local c5 = queue.claim("jarvis")
+ok("claim 5 → nil (empty)", c5 == nil)
+
+-- Complete one — verify event + removal from active list.
+ok("complete returns true on claimed task",
+  queue.complete(t1.id, { ok = true }))
+ok("completed event fired with result",
+  #q_events.completed == 1
+    and q_events.completed[1].id == t1.id
+    and q_events.completed[1].result.ok == true)
+ok("complete returns false on already-completed",
+  queue.complete(t1.id) == false)
+
+-- FIFO within same priority. Enqueue two normal tasks; claim order
+-- should match insertion order.
+queue.clear("jarvis")
+queue.enqueue("jarvis", { payload = "a", priority = "normal" })
+queue.enqueue("jarvis", { payload = "b", priority = "normal" })
+local first  = queue.claim("jarvis")
+local second = queue.claim("jarvis")
+ok("FIFO within same priority — first-in claims first",
+  first.payload == "a" and second.payload == "b")
+
+-- Per-agent isolation.
+queue.clear()
+queue.enqueue("jarvis", { payload = "for-jarvis" })
+queue.enqueue("vision", { payload = "for-vision" })
+ok("list(agent) returns only that agent's tasks",
+  #queue.list("jarvis") == 1
+    and queue.list("jarvis")[1].payload == "for-jarvis")
+ok("list() returns every agent's tasks",
+  #queue.list() == 2)
+
+queue._reset_for_tests()
+events_mod._reset_for_tests()
+
+-- ─────────────────────── 32. tasks.channel — append-only message log ─────────────────────────
+print("\n[32] tasks.channel — send / list / filter / recent / events")
+local ch = require("auto-core.tasks.channel")
+events_mod._reset_for_tests()
+ch._reset_for_tests()
+
+local m_events = {}
+events_mod.subscribe("agent.message:sent",
+  function(p) m_events[#m_events + 1] = p end)
+
+local m1 = ch.send({ from = "jarvis", to = "vision",
+  body = "ping",          kind = "info" })
+local m2 = ch.send({ from = "vision",
+  body = "broadcast hi",  kind = "info" })
+local m3 = ch.send({ from = "jarvis", to = "vision",
+  body = "again",         kind = "warn" })
+
+ok("send returns message with id + iso timestamp",
+  m1.id ~= nil
+    and type(m1.sent_at) == "number"
+    and type(m1.sent_at_iso) == "string"
+    and m1.sent_at_iso:match("^%d%d%d%d%-"))
+ok("ids are monotonic across sends",
+  m2.id == m1.id + 1 and m3.id == m2.id + 1)
+ok("3 sent events fired",
+  #m_events == 3 and m_events[2].body == "broadcast hi")
+
+-- list — no filter
+local all = ch.list()
+ok("list() returns all 3 messages", #all == 3)
+
+-- filter: from
+local from_jarvis = ch.list({ from = "jarvis" })
+ok("filter by from='jarvis' returns 2",
+  #from_jarvis == 2,
+  vim.inspect(from_jarvis))
+
+-- filter: to (specific agent)
+local to_vision = ch.list({ to = "vision" })
+ok("filter by to='vision' returns 2 (the directed messages)",
+  #to_vision == 2)
+
+-- filter: to="" (broadcast-only)
+local broadcasts = ch.list({ to = "" })
+ok("filter by to='' returns broadcasts only (1)",
+  #broadcasts == 1 and broadcasts[1].body == "broadcast hi")
+
+-- filter: kind
+local warns = ch.list({ kind = "warn" })
+ok("filter by kind='warn' returns 1", #warns == 1)
+
+-- filter: since
+local mid_ts = m2.sent_at
+local since_mid = ch.list({ since = mid_ts })
+ok("filter by since returns messages at or after the timestamp",
+  #since_mid >= 1
+    and (function()
+      for _, m in ipairs(since_mid) do
+        if m.sent_at < mid_ts then return false end
+      end
+      return true
+    end)())
+
+-- recent(n)
+ok("recent(2) returns the 2 most recent",
+  #ch.recent(2) == 2 and ch.recent(2)[2].body == "again")
+ok("recent() default 100 returns all 3",
+  #ch.recent() == 3)
+
+-- clear
+ch.clear()
+ok("clear() empties the log", #ch.list() == 0)
+
+-- after clear, ids should still be monotonic (don't restart)
+local m_after_clear = ch.send({ from = "jarvis", body = "post-clear" })
+ok("ids remain monotonic after clear",
+  m_after_clear.id > m3.id,
+  string.format("got %d, expected > %d", m_after_clear.id, m3.id))
+
+ch._reset_for_tests()
+events_mod._reset_for_tests()
+
+-- ─────────────────────── 33. tasks.status — per-agent state surface ─────────────────────────
+print("\n[33] tasks.status — set / get / list / transitions / events")
+local stat = require("auto-core.tasks.status")
+events_mod._reset_for_tests()
+stat._reset_for_tests()
+
+local s_events = {}
+events_mod.subscribe("agent.status:changed",
+  function(p) s_events[#s_events + 1] = p end)
+
+ok("get on unknown agent returns nil", stat.get("jarvis") == nil)
+
+stat.set("jarvis", "working")
+ok("set+get round-trip", stat.get("jarvis") == "working")
+ok("first set fires changed event with from=nil",
+  #s_events == 1
+    and s_events[1].agent == "jarvis"
+    and s_events[1].from == nil
+    and s_events[1].to == "working")
+
+stat.set("jarvis", "idle")
+ok("transition fires event with from=working to=idle",
+  #s_events == 2
+    and s_events[2].from == "working"
+    and s_events[2].to == "idle")
+
+-- Idempotent set.
+stat.set("jarvis", "idle")
+ok("idempotent set does NOT republish", #s_events == 2)
+
+-- Multi-agent.
+stat.set("vision", "waiting")
+local snapshot = stat.list()
+ok("list() returns map with both agents",
+  snapshot.jarvis == "idle" and snapshot.vision == "waiting")
+
+-- Invalid state
+local invalid_ok = pcall(stat.set, "jarvis", "exploded")
+ok("set rejects invalid state with error", not invalid_ok)
+
+-- Clear single
+stat.clear("vision")
+ok("clear(agent) removes that agent's state",
+  stat.get("vision") == nil)
+ok("clear publishes a changed event with to=nil",
+  s_events[#s_events].agent == "vision"
+    and s_events[#s_events].to == nil)
+
+stat._reset_for_tests()
+events_mod._reset_for_tests()
+
+-- ─────────────────────── 34. tasks.ui — :AutoCoreChannel panel ─────────────────────────
+print("\n[34] tasks.ui — open / sections / refresh on event / close")
+local ui = require("auto-core.tasks.ui")
+events_mod._reset_for_tests()
+ch._reset_for_tests()
+stat._reset_for_tests()
+queue._reset_for_tests()
+ui._reset_for_tests()
+
+-- Seed some data so the rendered buffers have content.
+ch.send({ from = "jarvis", body = "channel-test message" })
+stat.set("jarvis", "working")
+queue.enqueue("jarvis", { payload = "ui-test-task" })
+
+ui.open()
+
+-- Panel should be live + have a window.
+local panel_mod = require("auto-core.ui.panel")
+local panel = panel_mod.get("auto-core-channel")
+ok("ui.open creates the auto-core-channel panel",
+  panel ~= nil and panel.winid ~= nil
+    and vim.api.nvim_win_is_valid(panel.winid))
+
+-- The active section should be 0 (messages) and its buffer should
+-- contain the seeded message.
+local active_buf = vim.api.nvim_win_get_buf(panel.winid)
+ok("active buffer has filetype 'auto-core-channel'",
+  vim.bo[active_buf].filetype == "auto-core-channel")
+
+local lines = vim.api.nvim_buf_get_lines(active_buf, 0, -1, false)
+local saw_message = false
+for _, l in ipairs(lines) do
+  if l:find("channel%-test message") then saw_message = true end
+end
+ok("messages section renders the seeded message", saw_message,
+  vim.inspect(lines))
+
+-- Send a new message — refresh subscriber should re-render.
+ch.send({ from = "vision", body = "live-refresh-check" })
+-- refresh is synchronous via subscribe → fire — no vim.wait needed.
+local lines2 = vim.api.nvim_buf_get_lines(active_buf, 0, -1, false)
+local saw_new = false
+for _, l in ipairs(lines2) do
+  if l:find("live%-refresh%-check") then saw_new = true end
+end
+ok("new message triggers panel refresh", saw_new,
+  vim.inspect(lines2))
+
+-- Close + reopen idempotency.
+ui.close()
+ok("ui.close closes the panel",
+  panel.winid == nil
+    or not vim.api.nvim_win_is_valid(panel.winid))
+
+ui.open()
+ok("ui.open after close re-opens cleanly",
+  panel.winid ~= nil and vim.api.nvim_win_is_valid(panel.winid))
+
+ui._reset_for_tests()
+queue._reset_for_tests()
+stat._reset_for_tests()
+ch._reset_for_tests()
+events_mod._reset_for_tests()
 
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))

@@ -82,6 +82,33 @@ local M = {
     payload = "{ path = string, change = 'deleted', buf = integer? }",
     publishers = { "auto-core" },
   },
+
+  -- ── agent task queue + channel + status (Phase 5) ─────────────
+  ["agent.task:queued"] = {
+    doc = "A task was enqueued for an agent (auto-core.tasks.queue).",
+    payload = "{ id = integer, agent = string, priority = string }",
+    publishers = { "auto-core", "auto-agents.nvim" },
+  },
+  ["agent.task:claimed"] = {
+    doc = "A queued task was claimed (transitioned to in-progress).",
+    payload = "{ id = integer, agent = string }",
+    publishers = { "auto-core", "auto-agents.nvim" },
+  },
+  ["agent.task:completed"] = {
+    doc = "A claimed task finished. `result` is opaque per consumer.",
+    payload = "{ id = integer, agent = string, result = any? }",
+    publishers = { "auto-core", "auto-agents.nvim" },
+  },
+  ["agent.message:sent"] = {
+    doc = "A message was appended to the inter-agent channel log.",
+    payload = "{ id, from, to?, body, kind, sent_at, sent_at_iso }",
+    publishers = { "auto-core" },
+  },
+  ["agent.status:changed"] = {
+    doc = "An agent's idle/waiting/working state transitioned.",
+    payload = "{ agent = string, from = string?, to = string? }",
+    publishers = { "auto-core", "auto-agents.nvim" },
+  },
 }
 
 return M
