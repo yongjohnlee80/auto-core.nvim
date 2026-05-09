@@ -20,21 +20,22 @@ introspection, and an agent task-queue infrastructure.
 ## Status
 
 **Pre-1.0 (`v0.0.x`).** Surface is unstable; pin via exact version
-during the iteration phases. The first stable line opens at `v0.1.0`
-(end of Phase 2 — events + state + first consumer migration). API
-freezes at `v1.0.0`.
+during the iteration phases. `v0.1.0` opens once the first consumer
+migration verifies the surface end-to-end. API freezes at `v1.0.0`.
 
 | Phase | Subsystem | Ship as |
 |-------|-----------|---------|
-| 0     | Scaffold + smoke harness | `v0.0.1` ← here |
-| 1     | Pub/sub event bus | `v0.0.x` |
-| 2     | Namespaced state management + first consumer migration (auto-agents) | `v0.1.0` |
-| 3     | UI primitives (panel + winbar + section) | `v0.2.0` |
-| 4     | fs.watch + git.worktree (canonical worktree implementation) | `v0.3.0` |
-| 5     | Agent task queue + channel | `v0.4.0` |
-| 6     | Float helpers | `v0.5.0` |
-| 7     | Logger + health | `v0.6.0` |
-| 8     | Family-wide cleanup | `v0.7.0` |
+| 0     | Scaffold + smoke harness | `v0.0.1` |
+| 1     | Pub/sub event bus | `v0.0.2` |
+| 2     | Namespaced state management | `v0.0.3` |
+| 3     | UI primitives (panel + winbar + section) | `v0.0.4` |
+| 4a    | `fs.path` + `git.repo` | `v0.0.5` |
+| 4b    | `fs.watch` + `git.status` | `v0.0.6` ← here |
+| 4c    | `fs.tree` + canonical `git.worktree` | `v0.0.7` |
+| 5     | Agent task queue + channel | `v0.0.8` |
+| 6     | Float helpers + highlights | `v0.0.9` |
+| 7     | Logger + health | `v0.0.10` |
+| 8     | Family-wide cleanup | `v0.0.11` |
 | 9     | API freeze | `v1.0.0` |
 
 See ADR 0006 in the project's auto-agents kb for the full

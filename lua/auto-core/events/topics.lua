@@ -63,10 +63,23 @@ local M = {
     publishers = { "auto-agents.nvim", "auto-finder.nvim" },
   },
 
-  -- ── filesystem (lands fully in Phase 4) ───────────────────────
+  -- ── filesystem (Phase 4b — fs.watch ships these) ──────────────
+  -- Three discrete topics so subscribers can filter by change-kind
+  -- (e.g. `core.file:deleted` for cleanup-only handlers). Use the
+  -- wildcard `core.file:*` to subscribe to all three.
+  ["core.file:created"] = {
+    doc = "A file or directory was created under a watched dir.",
+    payload = "{ path = string, change = 'created', buf = integer? }",
+    publishers = { "auto-core" },
+  },
   ["core.file:modified"] = {
-    doc = "A file under a watched dir was created/modified/deleted.",
-    payload = "{ path = string, change = 'created'|'modified'|'deleted', buf = integer? }",
+    doc = "A file under a watched dir was modified (content change).",
+    payload = "{ path = string, change = 'modified', buf = integer? }",
+    publishers = { "auto-core" },
+  },
+  ["core.file:deleted"] = {
+    doc = "A file or directory was deleted under a watched dir.",
+    payload = "{ path = string, change = 'deleted', buf = integer? }",
     publishers = { "auto-core" },
   },
 }

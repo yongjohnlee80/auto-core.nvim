@@ -84,8 +84,8 @@ end
 ok("M.version is a semver string",
   type(core.version) == "string" and core.version:match("^%d+%.%d+%.%d+$") ~= nil,
   tostring(core.version))
-ok("M.version is 0.0.5 (Phase 4a fs.path + git.repo tag)",
-  select(1, eq(core.version, "0.0.5")))
+ok("M.version is 0.0.6 (Phase 4b fs.watch + git.status tag)",
+  select(1, eq(core.version, "0.0.6")))
 ok("M.api_version is 0.0 (pre-stable surface)",
   select(1, eq(core.api_version, "0.0")))
 ok("M.setup is a function", type(core.setup) == "function")
@@ -793,6 +793,243 @@ ok("git.repo.is_git false on a fresh empty dir",
 ok("git.repo.root nil on a fresh empty dir",
   repo_mod.root(non_git) == nil)
 pcall(vim.fn.delete, non_git, "rf")
+
+-- ─────────────────────── 26. fs.watch — libuv watcher + events ──────────────
+print("\n[26] fs.watch — start/stop, events, debounce, ignore, max_handles")
+local watch = require("auto-core.fs.watch")
+local events_mod = require("auto-core.events")
+events_mod._reset_for_tests()
+watch._reset_for_tests()
+
+ok("fs.watch.start returns nil on a non-directory",
+  (function()
+    local h, err = watch.start("/definitely/not/a/path/to/anywhere")
+    return h == nil and type(err) == "string"
+  end)())
+
+-- Build a tmp tree:  <root>/   {a.txt, sub/, .git/HEAD, sub/b.txt}
+local tmp_root = vim.fn.tempname() .. "-fs-watch"
+vim.fn.mkdir(tmp_root, "p")
+vim.fn.mkdir(tmp_root .. "/sub", "p")
+vim.fn.mkdir(tmp_root .. "/.git", "p")  -- should be ignored by default
+vim.fn.writefile({ "stamp" }, tmp_root .. "/.git/HEAD")
+
+-- Capture events for assertion. Subscriber records into a list.
+local seen = {}
+events_mod.subscribe("core.file:*", function(payload, topic)
+  seen[#seen + 1] = { topic = topic, path = payload.path, change = payload.change }
+end)
+
+local handle, err = watch.start(tmp_root)
+ok("watch.start succeeds on real dir",
+  handle ~= nil and handle.id ~= nil, tostring(err))
+ok("watch.list reports one handle",
+  #watch.list() == 1)
+
+-- Trigger a create. Use writefile (synchronous) then vim.wait to
+-- drain the libuv event loop into our subscriber.
+vim.fn.writefile({ "hello" }, tmp_root .. "/a.txt")
+vim.wait(300, function()
+  for _, e in ipairs(seen) do
+    if e.path:sub(-#"/a.txt") == "/a.txt" then return true end
+  end
+  return false
+end)
+local saw_a = false
+local saw_kind = nil
+for _, e in ipairs(seen) do
+  if e.path:sub(-#"/a.txt") == "/a.txt" then
+    saw_a = true
+    saw_kind = e.change
+    break
+  end
+  end
+ok("create-event fired for new file", saw_a, vim.inspect(seen))
+ok("create-event change kind is 'created' or 'modified'",
+  saw_kind == "created" or saw_kind == "modified",
+  "got " .. tostring(saw_kind))
+
+-- Modify the same file. Wait long enough for the debounce window
+-- (default 100 ms) to clear.
+local pre_modify_count = #seen
+vim.wait(150)
+vim.fn.writefile({ "hello", "again" }, tmp_root .. "/a.txt")
+vim.wait(300, function()
+  for i = pre_modify_count + 1, #seen do
+    if seen[i].path:sub(-#"/a.txt") == "/a.txt" then return true end
+  end
+  return false
+end)
+local saw_modify = false
+for i = pre_modify_count + 1, #seen do
+  if seen[i].path:sub(-#"/a.txt") == "/a.txt" then saw_modify = true end
+end
+ok("modify-event fired on subsequent write", saw_modify,
+  vim.inspect({ before = pre_modify_count, total = #seen, last = seen[#seen] }))
+
+-- Delete it.
+local pre_delete_count = #seen
+vim.wait(150)
+vim.fn.delete(tmp_root .. "/a.txt")
+vim.wait(300, function()
+  for i = pre_delete_count + 1, #seen do
+    if seen[i].path:sub(-#"/a.txt") == "/a.txt"
+        and seen[i].change == "deleted" then
+      return true
+    end
+  end
+  return false
+end)
+local saw_delete = false
+for i = pre_delete_count + 1, #seen do
+  if seen[i].path:sub(-#"/a.txt") == "/a.txt" and seen[i].change == "deleted" then
+    saw_delete = true
+  end
+end
+ok("delete-event fired with change='deleted'", saw_delete,
+  vim.inspect({ before = pre_delete_count, total = #seen, last = seen[#seen] }))
+
+-- Ignore filter: writes under .git/ should produce NO events.
+local before_ignore = #seen
+vim.fn.writefile({ "ref" }, tmp_root .. "/.git/HEAD")
+vim.wait(200)
+local saw_git_event = false
+for i = before_ignore + 1, #seen do
+  if seen[i].path:find("/%.git/") then saw_git_event = true end
+end
+ok("ignore filter: no events under .git/ subtree", not saw_git_event,
+  vim.inspect({ added = #seen - before_ignore }))
+
+-- Debounce coalescing: a burst of writes within 100 ms should
+-- produce at most one event for that path.
+local before_burst = #seen
+vim.wait(150)  -- clear any debounce window from prior writes
+local burst_path = tmp_root .. "/burst.txt"
+for i = 1, 5 do
+  vim.fn.writefile({ tostring(i) }, burst_path)
+end
+vim.wait(300)
+local burst_event_count = 0
+for i = before_burst + 1, #seen do
+  if seen[i].path:sub(-#"/burst.txt") == "/burst.txt" then
+    burst_event_count = burst_event_count + 1
+  end
+end
+ok("debounce coalesces rapid writes (<= 2 events for burst of 5)",
+  burst_event_count >= 1 and burst_event_count <= 2,
+  "got " .. tostring(burst_event_count))
+
+-- Stop and verify list is empty.
+watch.stop(handle)
+ok("watch.stop drops the handle from list",
+  #watch.list() == 0)
+
+-- max_handles cap. Setting a tiny cap should refuse the start when
+-- the recursive walk would exceed it.
+vim.fn.mkdir(tmp_root .. "/d1", "p")
+vim.fn.mkdir(tmp_root .. "/d2", "p")
+vim.fn.mkdir(tmp_root .. "/d3", "p")
+local capped, cap_err = watch.start(tmp_root, { max_handles = 1 })
+ok("max_handles cap refuses oversized recursive watch",
+  capped == nil and type(cap_err) == "string"
+    and cap_err:find("max_handles"),
+  tostring(cap_err))
+
+-- Cleanup.
+watch.stop_all()
+events_mod._reset_for_tests()
+pcall(vim.fn.delete, tmp_root, "rf")
+
+-- ─────────────────────── 27. git.status — cached porcelain ──────────────
+print("\n[27] git.status — cache, parse, invalidate-on-event")
+local status_mod = require("auto-core.git.status")
+events_mod._reset_for_tests()
+status_mod._reset_for_tests()
+
+-- Build a fresh git repo with one untracked file.
+local git_root = vim.fn.tempname() .. "-status"
+vim.fn.mkdir(git_root, "p")
+local function sh(cmd, cwd)
+  local r = vim.system(cmd, { cwd = cwd, text = true }):wait()
+  return r.code == 0, r.stdout, r.stderr
+end
+local init_ok = sh({ "git", "init", "-q", "-b", "main", git_root })
+ok("test repo initialized", init_ok)
+-- Local user.* config so commits / status work in isolated env.
+sh({ "git", "config", "user.email", "smoke@auto-core.test" }, git_root)
+sh({ "git", "config", "user.name",  "Smoke Test"             }, git_root)
+vim.fn.writefile({ "first" }, git_root .. "/untracked.txt")
+
+local entries, ts = status_mod.get(git_root)
+ok("status.get returns entries on repo with untracked file",
+  type(entries) == "table" and #entries >= 1,
+  vim.inspect(entries))
+ok("status.get cached_at returned (number)", type(ts) == "number")
+ok("entry has shape { path, status_x, status_y }",
+  entries[1] ~= nil
+    and type(entries[1].path) == "string"
+    and type(entries[1].status_x) == "string"
+    and type(entries[1].status_y) == "string",
+  vim.inspect(entries[1]))
+local untracked = nil
+for _, e in ipairs(entries) do
+  if e.path == "untracked.txt" then untracked = e end
+end
+ok("untracked file appears with status_y = '?'",
+  untracked ~= nil and untracked.status_y == "?",
+  vim.inspect(untracked))
+
+ok("status.is_cached true after first get",
+  status_mod.is_cached(git_root) == true)
+
+-- Second get returns the SAME cached_at (cache hit, no re-shell).
+local _, ts2 = status_mod.get(git_root)
+ok("second get returns same cached_at (cache hit)",
+  ts == ts2,
+  string.format("first=%s second=%s", tostring(ts), tostring(ts2)))
+
+-- Invalidate manually.
+status_mod.invalidate(git_root)
+ok("status.is_cached false after invalidate",
+  status_mod.is_cached(git_root) == false)
+
+-- Re-populate, then publish a core.file:modified for a path under
+-- the repo. The auto-wired subscriber should drop the cache.
+status_mod.get(git_root)
+ok("re-populated cache before invalidation-by-event",
+  status_mod.is_cached(git_root) == true)
+events_mod.publish("core.file:modified", {
+  path   = git_root .. "/untracked.txt",
+  change = "modified",
+})
+-- Subscriber dispatches synchronously — no vim.wait needed.
+ok("cache invalidated by core.file:modified event",
+  status_mod.is_cached(git_root) == false)
+
+-- Events for paths OUTSIDE the repo do NOT invalidate.
+status_mod.get(git_root)
+events_mod.publish("core.file:modified", {
+  path   = "/tmp/some-other-place/x.txt",
+  change = "modified",
+})
+ok("cache survives event for path outside repo",
+  status_mod.is_cached(git_root) == true)
+
+-- invalidate_all wipes everything.
+status_mod.invalidate_all()
+ok("invalidate_all wipes the cache",
+  status_mod.is_cached(git_root) == false)
+
+-- Negative case: not in a git repo.
+local non_git = vim.fn.tempname() .. "-no-git-status"
+vim.fn.mkdir(non_git, "p")
+local none, none_err = status_mod.get(non_git)
+ok("status.get nil + err on non-git path",
+  none == nil and type(none_err) == "string", tostring(none_err))
+pcall(vim.fn.delete, non_git, "rf")
+
+pcall(vim.fn.delete, git_root, "rf")
+events_mod._reset_for_tests()
 
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
