@@ -33,8 +33,8 @@ migration verifies the surface end-to-end. API freezes at `v1.0.0`.
 | 4b    | `fs.watch` + `git.status` | `v0.0.6` |
 | 4c    | `fs.tree` + canonical `git.worktree` | `v0.0.7` |
 | 5     | Tasks: queue + channel + status + `:AutoCoreChannel` | `v0.0.8` |
-| 6     | `ui.float` (help_overlay/ghost/confirm) + `ui.highlights` | `v0.0.9` ← here |
-| 7     | Logger + health | `v0.0.10` |
+| 6     | `ui.float` (help_overlay/ghost/confirm) + `ui.highlights` | `v0.0.9` |
+| 7     | `log` + `health` (`:checkhealth auto-core`) | `v0.0.10` ← here |
 | 8     | Family-wide cleanup | `v0.0.11` |
 | 9     | API freeze | `v1.0.0` |
 

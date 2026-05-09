@@ -76,6 +76,8 @@ M.ui     = require("auto-core.ui")
 M.fs     = require("auto-core.fs")
 M.git    = require("auto-core.git")
 M.tasks  = require("auto-core.tasks")
+M.log    = require("auto-core.log")
+M.health = require("auto-core.health")
 
 ---Initialize auto-core. Idempotent — re-calling re-applies opts and
 ---propagates the relevant subset to each subsystem.
@@ -99,6 +101,12 @@ function M.setup(opts)
   -- consumer plugins).
   M.state.configure({
     persist_dir = M.config.state and M.config.state.persist_dir,
+  })
+
+  -- Forward log config. `level` accepts "error"|"warn"|"info"|"debug"
+  -- |"trace" or a numeric `M.log.levels.<NAME>`.
+  M.log.configure({
+    level = M.config.log and M.config.log.level,
   })
 
   M._initialized = true

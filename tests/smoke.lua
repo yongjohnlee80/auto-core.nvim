@@ -84,8 +84,8 @@ end
 ok("M.version is a semver string",
   type(core.version) == "string" and core.version:match("^%d+%.%d+%.%d+$") ~= nil,
   tostring(core.version))
-ok("M.version is 0.0.9 (Phase 6 ui.float + ui.highlights tag)",
-  select(1, eq(core.version, "0.0.9")))
+ok("M.version is 0.0.10 (Phase 7 log + health tag)",
+  select(1, eq(core.version, "0.0.10")))
 ok("M.api_version is 0.0 (pre-stable surface)",
   select(1, eq(core.api_version, "0.0")))
 ok("M.setup is a function", type(core.setup) == "function")
@@ -1748,6 +1748,217 @@ ok("confirm forwards custom choice",
 -- Restore vim.ui.select.
 vim.ui.select = orig_select
 events_mod._reset_for_tests()
+
+-- ─────────────────────── 39. log — levels, ring, namespace, notify ─────────────────────────
+print("\n[39] log — levels, ring buffer, namespace, notify mirror")
+local log = require("auto-core.log")
+log._reset_for_tests()
+
+-- Stub vim.notify so tests don't spam stderr; capture calls.
+local orig_notify = vim.notify
+local notify_calls = {}
+vim.notify = function(msg, level, opts)
+  notify_calls[#notify_calls + 1] = { msg = msg, level = level, opts = opts }
+end
+
+-- Stub nvim_echo too — we don't want INFO spam in test output.
+local orig_echo = vim.api.nvim_echo
+vim.api.nvim_echo = function() end
+
+-- Default level is INFO; calls at INFO+ land in ring + notify; DEBUG/TRACE drop.
+log.error("comp", "boom")
+log.warn("comp", "watch out")
+log.info("comp", "fyi")
+log.debug("comp", "internal")  -- below default level; should NOT record
+log.trace("comp", "deep")      -- below default level; should NOT record
+
+-- vim.schedule is used for the notify side-effect; drain.
+vim.wait(20)
+
+local recent = log.recent()
+ok("default level INFO records error+warn+info (3)",
+  #recent == 3, vim.inspect(recent))
+ok("ring entries carry component + level_name",
+  recent[1].component == "comp"
+    and recent[1].level_name == "ERROR"
+    and recent[2].level_name == "WARN"
+    and recent[3].level_name == "INFO")
+ok("ERROR + WARN went to vim.notify; INFO went to nvim_echo",
+  #notify_calls == 2
+    and notify_calls[1].level == vim.log.levels.ERROR
+    and notify_calls[2].level == vim.log.levels.WARN)
+ok("notify message includes [AutoCore] prefix",
+  notify_calls[1].msg:find("%[AutoCore%]") ~= nil)
+ok("notify message includes component bracket",
+  notify_calls[1].msg:find("%[comp%]") ~= nil)
+
+-- is_level_enabled
+ok("is_level_enabled('error') true at default INFO", log.is_level_enabled("error"))
+ok("is_level_enabled('debug') false at default INFO", not log.is_level_enabled("debug"))
+
+-- Lower level → DEBUG passes through.
+log.configure({ level = "debug" })
+log.debug("comp", "now visible")
+ok("after configure(debug), debug entries record",
+  (function()
+    for _, e in ipairs(log.recent()) do
+      if e.level_name == "DEBUG" then return true end
+    end
+    return false
+  end)())
+
+-- Numeric level (reset FIRST, then configure — _reset_for_tests
+-- restores defaults so the order matters).
+vim.wait(30)  -- drain pending notify schedules from prior assertions
+log._reset_for_tests()
+log.configure({ level = log.levels.WARN })
+log.error("c", "e1")
+log.warn("c", "w1")
+log.info("c", "i1")
+vim.wait(30)  -- drain
+ok("level=WARN drops INFO",
+  #log.recent() == 2,
+  string.format("got %d entries", #log.recent()))
+
+-- Notify off (same order — drain + reset, then configure).
+vim.wait(30)
+log._reset_for_tests()
+notify_calls = {}
+log.configure({ notify = false })
+log.error("c", "silent")
+vim.wait(30)
+ok("notify=false suppresses vim.notify",
+  #notify_calls == 0
+    and #log.recent() == 1,
+  string.format("notify_calls=%d log.recent=%d",
+    #notify_calls, #log.recent()))
+
+-- Ring capacity behavior
+log._reset_for_tests()
+log.configure({ ring_capacity = 5, level = log.levels.TRACE, notify = false })
+for i = 1, 12 do log.info("c", "msg-" .. i) end
+local r = log.recent()
+ok("ring capped at 5 (FIFO eviction)",
+  #r == 5)
+ok("ring contents are the last 5 entries (oldest first)",
+  r[1].message:find("msg%-8")  ~= nil
+    and r[5].message:find("msg%-12") ~= nil,
+  string.format("first=%s last=%s", r[1].message, r[5].message))
+
+-- recent(n)
+local r3 = log.recent(3)
+ok("recent(n) returns last n",
+  #r3 == 3 and r3[3].message:find("msg%-12") ~= nil)
+
+-- namespace handle
+log._reset_for_tests()
+log.configure({ notify = false })
+local h = log.namespace("watcher")
+h.error("boom")
+h.info("hello")
+local nrh = log.recent()
+ok("namespace handle pre-binds component",
+  #nrh == 2
+    and nrh[1].component == "watcher"
+    and nrh[2].component == "watcher")
+
+-- inspect
+local snap = log.inspect()
+ok("inspect returns config snapshot",
+  type(snap) == "table"
+    and snap.ring_capacity ~= nil
+    and snap.notify == false
+    and type(snap.count) == "number")
+
+-- Restore stubs.
+vim.notify = orig_notify
+vim.api.nvim_echo = orig_echo
+log._reset_for_tests()
+
+-- ─────────────────────── 40. health — :checkhealth subsystem checks ─────────────────────────
+print("\n[40] health — checkhealth runs without error, reports each subsystem")
+local health = require("auto-core.health")
+
+-- Stub vim.health.* to capture calls.
+local orig_health = vim.health
+local health_calls = { start = {}, ok = {}, info = {}, warn = {}, err = {} }
+vim.health = {
+  start = function(name) health_calls.start[#health_calls.start + 1] = name end,
+  ok    = function(msg)  health_calls.ok[#health_calls.ok + 1] = msg end,
+  info  = function(msg)  health_calls.info[#health_calls.info + 1] = msg end,
+  warn  = function(msg)  health_calls.warn[#health_calls.warn + 1] = msg end,
+  error = function(msg, advice)
+    health_calls.err[#health_calls.err + 1] = { msg = msg, advice = advice }
+  end,
+}
+
+local check_ok = pcall(health.check)
+ok("health.check runs without error", check_ok)
+
+ok("health.start invoked with 'auto-core'",
+  #health_calls.start == 1 and health_calls.start[1] == "auto-core")
+
+ok("at least one ok report (e.g. plenary or events bus)",
+  #health_calls.ok >= 1, vim.inspect(health_calls.ok))
+
+ok("info reports include version line",
+  (function()
+    for _, m in ipairs(health_calls.info) do
+      if m:find("version") then return true end
+    end
+    return false
+  end)(),
+  vim.inspect(health_calls.info))
+
+ok("info reports include log status",
+  (function()
+    for _, m in ipairs(health_calls.info) do
+      if m:find("^log:") then return true end
+    end
+    return false
+  end)(),
+  vim.inspect(health_calls.info))
+
+ok("info reports include fs.watch status",
+  (function()
+    for _, m in ipairs(health_calls.info) do
+      if m:find("fs%.watch") then return true end
+    end
+    return false
+  end)())
+
+ok("topic registry check produces ok or warn",
+  (function()
+    for _, m in ipairs(health_calls.ok) do
+      if m:find("topic registry") then return true end
+    end
+    for _, m in ipairs(health_calls.warn) do
+      if m:find("topic registry") then return true end
+    end
+    return false
+  end)())
+
+ok("events bus probe produced ok status",
+  (function()
+    for _, m in ipairs(health_calls.ok) do
+      if m:find("events bus dispatch responsive") then return true end
+    end
+    return false
+  end)())
+
+-- Restore.
+vim.health = orig_health
+
+-- ─────────────────────── 41. setup() forwards log config ─────────────────────────
+print("\n[41] setup() forwards log config to log.configure")
+core.setup({ log = { level = "error" } })
+local snap_after_setup = log.inspect()
+ok("setup({log.level='error'}) lowers level to ERROR",
+  snap_after_setup.level == log.levels.ERROR,
+  vim.inspect(snap_after_setup))
+
+-- Restore default.
+core.setup({})
 
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
