@@ -140,14 +140,12 @@ function M.render(focused, sections, available_width)
   return table.concat(parts, " ")
 end
 
----Ensure default highlight links exist. Idempotent. Consumers may
----override `AutoCoreSectionActive` in their own theme/colorscheme
----hook.
+---Ensure default highlight links exist. Idempotent. Delegates to
+---the canonical `auto-core.ui.highlights` registry (Phase 6) which
+---owns every AutoCore* highlight group. Consumers should call
+---`auto-core.ui.highlights.theme_override(name, attrs)` to restyle.
 function M.ensure_highlights()
-  if vim.fn.hlexists("AutoCoreSectionActive") == 0 then
-    vim.api.nvim_set_hl(0, "AutoCoreSectionActive",
-      { link = "Title", default = true })
-  end
+  require("auto-core.ui.highlights").ensure()
 end
 
 return M

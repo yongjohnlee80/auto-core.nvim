@@ -109,6 +109,18 @@ local M = {
     payload = "{ agent = string, from = string?, to = string? }",
     publishers = { "auto-core", "auto-agents.nvim" },
   },
+
+  -- ── float lifecycle (Phase 6 — auto-core.ui.float) ───────────
+  ["float:opened"] = {
+    doc = "An auto-core.ui.float (help_overlay / ghost / etc) just opened.",
+    payload = "{ kind = string, buf = integer, win = integer }",
+    publishers = { "auto-core" },
+  },
+  ["float:closed"] = {
+    doc = "An auto-core.ui.float closed (dismissed / focus lost / explicit).",
+    payload = "{ kind = string, buf = integer, win = integer }",
+    publishers = { "auto-core" },
+  },
 }
 
 return M

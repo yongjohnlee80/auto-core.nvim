@@ -84,8 +84,8 @@ end
 ok("M.version is a semver string",
   type(core.version) == "string" and core.version:match("^%d+%.%d+%.%d+$") ~= nil,
   tostring(core.version))
-ok("M.version is 0.0.8 (Phase 5 tasks queue/channel/status/ui tag)",
-  select(1, eq(core.version, "0.0.8")))
+ok("M.version is 0.0.9 (Phase 6 ui.float + ui.highlights tag)",
+  select(1, eq(core.version, "0.0.9")))
 ok("M.api_version is 0.0 (pre-stable surface)",
   select(1, eq(core.api_version, "0.0")))
 ok("M.setup is a function", type(core.setup) == "function")
@@ -1566,6 +1566,187 @@ ui._reset_for_tests()
 queue._reset_for_tests()
 stat._reset_for_tests()
 ch._reset_for_tests()
+events_mod._reset_for_tests()
+
+-- ─────────────────────── 35. ui.highlights — registry + theme_override ─────────────────────────
+print("\n[35] ui.highlights — defaults + theme_override")
+local highlights = require("auto-core.ui.highlights")
+highlights._reset_for_tests()
+
+-- Defaults catalog matches the documented set.
+local listed = highlights.list()
+local function listed_has(name)
+  for _, n in ipairs(listed) do if n == name then return true end end
+  return false
+end
+ok("DEFAULTS includes AutoCoreSectionActive",  listed_has("AutoCoreSectionActive"))
+ok("DEFAULTS includes AutoCoreFloatNormal",    listed_has("AutoCoreFloatNormal"))
+ok("DEFAULTS includes AutoCoreFloatBorder",    listed_has("AutoCoreFloatBorder"))
+ok("DEFAULTS includes AutoCoreHelpKey",        listed_has("AutoCoreHelpKey"))
+
+highlights.ensure()
+ok("ensure registers AutoCoreSectionActive",
+  vim.fn.hlexists("AutoCoreSectionActive") == 1)
+ok("ensure registers AutoCoreFloatNormal",
+  vim.fn.hlexists("AutoCoreFloatNormal") == 1)
+
+-- Idempotent: second ensure call doesn't re-register (no-op).
+highlights.ensure()
+ok("ensure is idempotent (still registered)",
+  vim.fn.hlexists("AutoCoreSectionActive") == 1)
+
+-- theme_override should bypass `default = true` so it overrides
+-- whatever was registered at ensure-time.
+highlights.theme_override("AutoCoreFloatNormal", { bg = "#112233", fg = "#ffeedd" })
+local hl_attrs = vim.api.nvim_get_hl(0, { name = "AutoCoreFloatNormal" })
+ok("theme_override applies fg",
+  hl_attrs.fg ~= nil,
+  vim.inspect(hl_attrs))
+ok("theme_override applies bg",
+  hl_attrs.bg ~= nil,
+  vim.inspect(hl_attrs))
+
+-- Reset + restore link semantics by re-running ensure.
+pcall(vim.api.nvim_set_hl, 0, "AutoCoreFloatNormal", { link = "NormalFloat", default = true })
+
+-- ─────────────────────── 36. ui.float.help_overlay ─────────────────────────
+print("\n[36] ui.float.help_overlay — open / dismiss / events")
+local float = require("auto-core.ui.float")
+events_mod._reset_for_tests()
+
+local f_events = { opened = {}, closed = {} }
+events_mod.subscribe("float:opened", function(p) f_events.opened[#f_events.opened + 1] = p end)
+events_mod.subscribe("float:closed", function(p) f_events.closed[#f_events.closed + 1] = p end)
+
+local handle = float.help_overlay({
+  { "?",       "show help" },
+  { "q",       "close" },
+  { "<cr>",    "confirm" },
+  "Free-form line",
+  { key = "x", desc = "named-pair entry" },
+}, { title = "test help" })
+
+ok("help_overlay returns handle with buf+win+close",
+  type(handle) == "table"
+    and handle.buf ~= nil
+    and handle.win ~= nil
+    and type(handle.close) == "function")
+ok("help_overlay window is valid",
+  vim.api.nvim_win_is_valid(handle.win))
+ok("help_overlay buffer has filetype 'auto-core-help'",
+  vim.bo[handle.buf].filetype == "auto-core-help")
+ok("help_overlay buffer is non-modifiable",
+  vim.bo[handle.buf].modifiable == false)
+ok("float:opened event fired with kind='help_overlay'",
+  #f_events.opened == 1
+    and f_events.opened[1].kind == "help_overlay"
+    and f_events.opened[1].buf == handle.buf)
+
+-- Lines should include the rendered key/desc pairs.
+local lines = vim.api.nvim_buf_get_lines(handle.buf, 0, -1, false)
+local function has_substr(lst, s)
+  for _, l in ipairs(lst) do if l:find(s) then return true end end
+  return false
+end
+ok("help_overlay rendered '?' key entry",
+  has_substr(lines, "show help"))
+ok("help_overlay rendered free-form line",
+  has_substr(lines, "Free%-form line"))
+ok("help_overlay rendered named-pair entry",
+  has_substr(lines, "named%-pair entry"))
+
+-- Close via the explicit handle.
+handle.close()
+ok("help_overlay close() dismisses the window",
+  not vim.api.nvim_win_is_valid(handle.win))
+ok("float:closed event fired",
+  #f_events.closed == 1
+    and f_events.closed[1].kind == "help_overlay")
+
+-- close() is idempotent — second call doesn't republish.
+handle.close()
+ok("close() is idempotent (no double-publish)",
+  #f_events.closed == 1)
+
+-- on_close hook fires on explicit close.
+local on_close_fired = false
+local h2 = float.help_overlay({ "x" },
+  { on_close = function() on_close_fired = true end })
+h2.close()
+ok("on_close hook fires on dismiss",
+  on_close_fired)
+
+-- ─────────────────────── 37. ui.float.ghost ─────────────────────────
+print("\n[37] ui.float.ghost — invisible 1×1 absorber")
+events_mod._reset_for_tests()
+f_events = { opened = {}, closed = {} }
+events_mod.subscribe("float:opened", function(p) f_events.opened[#f_events.opened + 1] = p end)
+events_mod.subscribe("float:closed", function(p) f_events.closed[#f_events.closed + 1] = p end)
+
+local g = float.ghost()
+ok("ghost returns a handle with buf+win+close",
+  type(g) == "table"
+    and g.buf ~= nil and g.win ~= nil
+    and type(g.close) == "function")
+ok("ghost window is 1×1",
+  vim.api.nvim_win_get_width(g.win) == 1
+    and vim.api.nvim_win_get_height(g.win) == 1)
+ok("ghost buffer has filetype 'auto-core-ghost'",
+  vim.bo[g.buf].filetype == "auto-core-ghost")
+ok("float:opened event fired with kind='ghost'",
+  #f_events.opened >= 1
+    and f_events.opened[#f_events.opened].kind == "ghost")
+
+g.close()
+ok("ghost.close() closes the window",
+  not vim.api.nvim_win_is_valid(g.win))
+ok("float:closed event fired with kind='ghost'",
+  #f_events.closed >= 1
+    and f_events.closed[#f_events.closed].kind == "ghost")
+
+-- ─────────────────────── 38. ui.float.confirm ─────────────────────────
+print("\n[38] ui.float.confirm — vim.ui.select wrapper")
+
+-- Stub vim.ui.select to capture the call without blocking.
+local orig_select = vim.ui.select
+local select_calls = {}
+local stub_choice = "yes"
+vim.ui.select = function(items, opts, on_choice)
+  select_calls[#select_calls + 1] = { items = items, prompt = opts.prompt }
+  if on_choice then on_choice(stub_choice) end
+end
+
+local choice_received = nil
+float.confirm("Proceed?", {
+  on_choice = function(c) choice_received = c end,
+})
+
+ok("confirm calls vim.ui.select once",
+  #select_calls == 1)
+ok("confirm passes prompt to vim.ui.select",
+  select_calls[1].prompt == "Proceed?")
+ok("confirm default items are { yes, no }",
+  #select_calls[1].items == 2
+    and select_calls[1].items[1] == "yes"
+    and select_calls[1].items[2] == "no")
+ok("confirm forwards choice to on_choice",
+  choice_received == "yes")
+
+-- Custom items override the default.
+select_calls = {}
+choice_received = nil
+stub_choice = "abort"
+float.confirm("Pick action:", {
+  items = { "save", "discard", "abort" },
+  on_choice = function(c) choice_received = c end,
+})
+ok("confirm respects custom items",
+  #select_calls[1].items == 3 and select_calls[1].items[3] == "abort")
+ok("confirm forwards custom choice",
+  choice_received == "abort")
+
+-- Restore vim.ui.select.
+vim.ui.select = orig_select
 events_mod._reset_for_tests()
 
 -- ─────────────────────── summary ─────────────────────────
