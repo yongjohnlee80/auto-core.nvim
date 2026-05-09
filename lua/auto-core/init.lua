@@ -63,9 +63,12 @@ M.config = vim.deepcopy(M.defaults)
 M._initialized = false
 
 -- ── subsystems (lazy-required so Phase-N code only loads when used) ──
--- Phase 1: events (pub/sub bus). Subsequent phases attach further
--- subsystems on this table the same way.
+-- Phase 1: events (pub/sub bus).
+-- Phase 2: state  (namespaced store).
+-- Subsequent phases attach further subsystems on this table the same
+-- way.
 M.events = require("auto-core.events")
+M.state  = require("auto-core.state")
 
 ---Initialize auto-core. Idempotent — re-calling re-applies opts and
 ---propagates the relevant subset to each subsystem.
@@ -73,13 +76,22 @@ M.events = require("auto-core.events")
 function M.setup(opts)
   M.config = vim.tbl_deep_extend("force", vim.deepcopy(M.defaults), opts or {})
 
-  -- Forward events config to the events module. Done on every setup
-  -- call so a re-setup with new opts (e.g. flipping fire_autocmds on
-  -- mid-session) takes effect immediately.
+  -- Forward events config. Done on every setup so a re-setup with
+  -- new opts (e.g. flipping fire_autocmds on mid-session) takes
+  -- effect immediately.
   M.events.configure({
     fire_autocmds  = M.config.events and M.config.events.fire_autocmds,
     strict_topics  = M.config.events and M.config.events.strict_topics,
     trace_capacity = M.config.events and M.config.events.trace_capacity,
+  })
+
+  -- Forward state config. The persist_dir override (when set)
+  -- redirects every namespace's on-disk file. NB: this only takes
+  -- effect for namespaces claimed AFTER setup; pre-claimed ones
+  -- keep their resolved paths (rare in practice — setup runs before
+  -- consumer plugins).
+  M.state.configure({
+    persist_dir = M.config.state and M.config.state.persist_dir,
   })
 
   M._initialized = true

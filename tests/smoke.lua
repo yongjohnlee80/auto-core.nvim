@@ -84,8 +84,8 @@ end
 ok("M.version is a semver string",
   type(core.version) == "string" and core.version:match("^%d+%.%d+%.%d+$") ~= nil,
   tostring(core.version))
-ok("M.version is 0.0.2 (Phase 1 events tag)",
-  select(1, eq(core.version, "0.0.2")))
+ok("M.version is 0.0.3 (Phase 2 state tag)",
+  select(1, eq(core.version, "0.0.3")))
 ok("M.api_version is 0.0 (pre-stable surface)",
   select(1, eq(core.api_version, "0.0")))
 ok("M.setup is a function", type(core.setup) == "function")
@@ -124,11 +124,11 @@ core.setup({ events = { fire_autocmds = false } })
 ok("re-setup re-merges from defaults",
   core.config.events.fire_autocmds == false)
 
--- Phase 1 wires events; subsequent subsystems still nil at this point.
+-- Phase 1 wires events; Phase 2 wires state.
 ok("M.events is a table (Phase 1)",
   type(core.events) == "table")
-ok("M.state is nil at this phase (lands in Phase 2)",
-  core.state == nil)
+ok("M.state is a table (Phase 2)",
+  type(core.state) == "table")
 ok("M.ui is nil at this phase (lands in Phase 3)",
   core.ui == nil)
 
@@ -269,6 +269,205 @@ ok("with fire_autocmds=true, the User autocmd fires",
 vim.api.nvim_del_augroup_by_id(group)
 events.configure({ fire_autocmds = false })
 events._reset_for_tests()
+
+-- ─────────────────────── 10. state: namespace + get/set/defaults ───
+print("\n[10] state.namespace — claim, defaults fallthrough, set/get")
+local state = core.state
+state._reset_for_tests()
+events._reset_for_tests()
+
+-- Use ephemeral so this test never touches disk.
+local s = state.namespace("auto-test", {
+  defaults = { panel = { width = 38, mode = "auto" }, count = 5 },
+  persist  = "ephemeral",
+})
+
+ok("namespace returns an object with get/set/watch",
+  type(s.get) == "function" and type(s.set) == "function"
+    and type(s.watch) == "function")
+ok("get returns the default when no value has been set",
+  s:get("panel.width") == 38, "got " .. tostring(s:get("panel.width")))
+ok("get returns nil for an unknown key not in defaults",
+  s:get("nope.unknown") == nil)
+
+s:set("panel.width", 50)
+ok("set + get round-trips the value",
+  s:get("panel.width") == 50, "got " .. tostring(s:get("panel.width")))
+ok("set on one path doesn't disturb another",
+  s:get("panel.mode") == "auto" and s:get("count") == 5)
+
+ok("get_all returns defaults + sets layered",
+  (function()
+    local all = s:get_all()
+    return all.panel.width == 50 and all.panel.mode == "auto" and all.count == 5
+  end)())
+
+-- ─────────────────────── 11. state: change events ───────────────
+print("\n[11] state set auto-publishes a change event")
+state._reset_for_tests()
+events._reset_for_tests()
+local ns = state.namespace("auto-test", { persist = "ephemeral",
+  defaults = { panel = { user_width = nil } } })
+
+local event_hits = {}
+core.events.subscribe("state.auto-test:panel.user_width:changed", function(p)
+  table.insert(event_hits, p)
+end)
+
+ns:set("panel.user_width", 42)
+ok("set fires state.<ns>:<key>:changed with new+old payload",
+  #event_hits == 1
+    and event_hits[1].namespace == "auto-test"
+    and event_hits[1].key == "panel.user_width"
+    and event_hits[1].new == 42
+    and event_hits[1].old == nil,
+  vim.inspect(event_hits))
+
+ns:set("panel.user_width", 42)  -- same value
+ok("setting same value does NOT re-fire the change event",
+  #event_hits == 1, "extra hits=" .. (#event_hits - 1))
+
+ns:set("panel.user_width", 60)
+ok("changing the value fires another event with old=42",
+  #event_hits == 2 and event_hits[2].old == 42 and event_hits[2].new == 60)
+
+-- ─────────────────────── 12. state.watch convenience ────────────
+print("\n[12] state:watch is sugar over events.subscribe")
+state._reset_for_tests()
+events._reset_for_tests()
+local ns2 = state.namespace("auto-test", { persist = "ephemeral" })
+
+local watch_hits = 0
+local h = ns2:watch("foo.bar", function() watch_hits = watch_hits + 1 end)
+ns2:set("foo.bar", 1)
+ok("watch fires on the matching change event", watch_hits == 1)
+ns2:unwatch(h)
+ns2:set("foo.bar", 2)
+ok("unwatch stops further fires", watch_hits == 1)
+
+-- Wildcard via events bus
+local wild_hits = 0
+ns2:watch("foo.*", function() wild_hits = wild_hits + 1 end)
+ns2:set("foo.bar", 3)
+ns2:set("foo.baz", 1)
+ok("watch('foo.*') fires for any matching child key",
+  wild_hits == 2, "wild_hits=" .. wild_hits)
+
+-- ─────────────────────── 13. state isolation across namespaces ──
+print("\n[13] state isolation — auto-agents and auto-finder don't collide")
+state._reset_for_tests()
+events._reset_for_tests()
+local agents = state.namespace("auto-agents", {
+  defaults = { panel = { slot_count = 5 } },
+  persist  = "ephemeral",
+})
+local finder = state.namespace("auto-finder", {
+  defaults = { panel = { user_width = 38 } },
+  persist  = "ephemeral",
+})
+
+agents:set("panel.slot_count", 7)
+ok("auto-agents.panel.slot_count = 7", agents:get("panel.slot_count") == 7)
+ok("auto-finder.panel.user_width still default",
+  finder:get("panel.user_width") == 38)
+ok("auto-finder doesn't see the auto-agents key (different namespace)",
+  finder:get("panel.slot_count") == nil)
+
+finder:set("panel.user_width", 42)
+ok("auto-finder.panel.user_width = 42", finder:get("panel.user_width") == 42)
+ok("auto-agents.panel.user_width still nil (different namespace)",
+  agents:get("panel.user_width") == nil)
+
+ok("agents fires its own change events, NOT auto-finder's",
+  (function()
+    local agents_hits = 0
+    state._reset_for_tests()
+    events._reset_for_tests()
+    local a = state.namespace("auto-agents", { persist = "ephemeral",
+      defaults = { panel = { slot_count = 5 } } })
+    local f = state.namespace("auto-finder", { persist = "ephemeral",
+      defaults = { panel = { user_width = 38 } } })
+    core.events.subscribe("state.auto-agents:panel.slot_count:changed",
+      function() agents_hits = agents_hits + 1 end)
+    f:set("panel.user_width", 99)  -- writing to finder
+    a:set("panel.slot_count", 7)   -- writing to agents
+    return agents_hits == 1
+  end)())
+
+-- ─────────────────────── 14. state idempotent claim ──────────────
+print("\n[14] state.namespace is idempotent (singleton per name)")
+state._reset_for_tests()
+events._reset_for_tests()
+local first = state.namespace("auto-test", { persist = "ephemeral",
+  defaults = { a = 1 } })
+first:set("a", 99)
+local second = state.namespace("auto-test", { persist = "ephemeral",
+  defaults = { b = 2 } })  -- additional defaults merged
+ok("second claim returns the same instance",
+  first == second, "first ~= second")
+ok("user-set value preserved across re-claim",
+  second:get("a") == 99)
+ok("additional defaults merged in",
+  second:get("b") == 2)
+
+-- ─────────────────────── 15. state: json persist round-trip ─────
+print("\n[15] state json persist — write + reload round-trip")
+state._reset_for_tests()
+events._reset_for_tests()
+
+-- Use a tempdir specifically for this test so we don't pollute the
+-- user's actual ~/.local/state/nvim/auto-core/.
+local persist_dir = vim.fn.tempname()
+vim.fn.mkdir(persist_dir, "p")
+state.configure({ persist_dir = persist_dir })
+
+local ns3 = state.namespace("persist-test", {
+  defaults = { panel = { width = 38 } },
+  persist  = "json",
+})
+ns3:set("panel.width", 77)
+ns3:set("flag", true)
+ns3:persist_now()  -- flush synchronously so the test can read the file
+
+local persist_path = persist_dir .. "/persist-test.json"
+ok("json file written at the expected path",
+  vim.fn.filereadable(persist_path) == 1, persist_path)
+
+-- Reset registry + reload to simulate restart
+state._reset_for_tests()
+local reloaded = state.namespace("persist-test", {
+  defaults = { panel = { width = 38 } },
+  persist  = "json",
+})
+ok("persisted panel.width survives reload",
+  reloaded:get("panel.width") == 77)
+ok("persisted flag survives reload",
+  reloaded:get("flag") == true)
+ok("default still falls through for non-persisted keys",
+  reloaded:get("never_set") == nil)
+
+-- Cleanup the tempdir.
+state._reset_for_tests()
+state.configure({ persist_dir = nil })  -- back to default
+pcall(vim.fn.delete, persist_dir, "rf")
+
+-- ─────────────────────── 16. state.clear ────────────────────────
+print("\n[16] state:clear")
+state._reset_for_tests()
+events._reset_for_tests()
+local ns4 = state.namespace("auto-test", { persist = "ephemeral",
+  defaults = { x = 10 } })
+ns4:set("x", 99)
+ok("get returns user-set value before clear", ns4:get("x") == 99)
+ns4:clear("x")
+ok("clear(key) removes user-set value, fall-through to default",
+  ns4:get("x") == 10)
+
+ns4:set("a", 1)
+ns4:set("b", 2)
+ns4:clear()
+ok("clear() with no key removes all user-set values",
+  ns4:get("a") == nil and ns4:get("b") == nil)
 
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
