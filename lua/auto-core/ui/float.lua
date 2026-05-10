@@ -252,4 +252,9 @@ function M.confirm(prompt, opts)
   end)
 end
 
+-- Multi-pane float primitive (ADR 0007 Phase 2). Lives in its own
+-- file because the implementation is substantial; exposed here so
+-- consumers can `require("auto-core").ui.float.multi`.
+M.multi = require("auto-core.ui.float.multi")
+
 return M

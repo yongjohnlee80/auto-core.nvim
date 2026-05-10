@@ -2112,6 +2112,145 @@ lsp_reset._reset_for_tests()
 vim.fn.delete(tmp, "rf")
 end)()  -- close [42] IIFE so its locals don't count toward main function's 200 limit
 
+-- ─────────────────────── 43. ui.float.multi — multi-pane float ─────────────────────────
+print("\n[43] ui.float.multi — open/close/focus/cycle/resize/dispose")
+;(function()
+local mfloat = require("auto-core.ui.float.multi")
+mfloat._reset_for_tests()
+
+-- Open a four-pane instance. The fixture mirrors the gitsgraph
+-- shape exactly so Phase 3's worktree.graph can drop in.
+local m = mfloat.new({
+  name  = "smoke_test_panel",
+  outer = { width_pct = 0.85, height_pct = 0.85, title = " smoke " },
+  panes = {
+    left    = { width = 28, cursorline = true },
+    middle  = { title = " middle " },
+    preview = { width = 60, min_width = 30, min_middle = 30 },
+    footer  = { height = 1, content = " <Tab> cycle • q close " },
+  },
+  initial_focus = "middle",
+})
+
+ok("registry holds the instance after .new()",
+  mfloat.get("smoke_test_panel") == m)
+
+m:open()
+ok("is_open after :open()", m:is_open())
+ok("bg pane has a winid",
+  m:winid("bg") and vim.api.nvim_win_is_valid(m:winid("bg")))
+ok("left pane has a winid", m:winid("left") ~= nil)
+ok("middle pane has a winid", m:winid("middle") ~= nil)
+ok("footer pane has a winid", m:winid("footer") ~= nil)
+
+-- All panes carry the marker var.
+local marker = "auto_core_multi_float"
+local function _wvar(w)
+  local ok_v, v = pcall(vim.api.nvim_win_get_var, w, marker)
+  return ok_v and v or nil
+end
+ok("bg window stamped with marker",
+  _wvar(m:winid("bg")) == "smoke_test_panel")
+ok("left window stamped with marker",
+  _wvar(m:winid("left")) == "smoke_test_panel")
+ok("middle window stamped with marker",
+  _wvar(m:winid("middle")) == "smoke_test_panel")
+
+-- Initial focus landed on middle.
+ok("initial_focus moved cursor to middle",
+  vim.api.nvim_get_current_win() == m:winid("middle"))
+
+-- Footer is non-focusable; focusing it is a no-op (the function
+-- still stays on the requested winid because we don't validate
+-- focusable in :focus). Skip.
+
+-- Cycle: middle → preview (or → left if preview wasn't laid out).
+m:cycle("forward")
+local cur = vim.api.nvim_get_current_win()
+ok("cycle forward moved focus off middle", cur ~= m:winid("middle"))
+
+m:cycle("backward")
+ok("cycle backward returned to middle",
+  vim.api.nvim_get_current_win() == m:winid("middle"))
+
+-- Footer content lands in the auto-spawned scratch buffer.
+local footer_buf = m:bufnr("footer")
+local footer_lines = vim.api.nvim_buf_get_lines(footer_buf, 0, -1, false)
+ok("footer content rendered into scratch",
+  footer_lines[1] and footer_lines[1]:find("cycle", 1, true))
+
+-- set_buffer swaps a pane's bufnr; the auto-spawned old buffer is wiped.
+local replacement = vim.api.nvim_create_buf(false, true)
+vim.bo[replacement].bufhidden = "hide"  -- so wipe-on-set doesn't kill it
+local prev = m:bufnr("left")
+m:set_buffer("left", replacement)
+ok("set_buffer updates bufnr",
+  m:bufnr("left") == replacement)
+ok("set_buffer wiped the auto-spawned buffer",
+  not vim.api.nvim_buf_is_valid(prev))
+
+-- resize() recomputes layout — call it manually and confirm
+-- bg geometry still matches the editor dims.
+local pre = vim.api.nvim_win_get_config(m:winid("bg"))
+m:resize()
+local post = vim.api.nvim_win_get_config(m:winid("bg"))
+ok("resize re-applies bg geometry",
+  pre.width == post.width and pre.height == post.height,
+  string.format("pre=%dx%d post=%dx%d",
+    pre.width, pre.height, post.width, post.height))
+
+-- WinClosed on any pane triggers full close. Close left manually,
+-- expect the whole multi to tear down on the next event tick.
+local left_win = m:winid("left")
+pcall(vim.api.nvim_win_close, left_win, true)
+vim.wait(50, function() return not m:is_open() end)
+ok("closing one pane closes the whole multi-float",
+  not m:is_open())
+
+-- New idempotent: re-calling .new with the same name returns the
+-- same instance.
+local m2 = mfloat.new({
+  name  = "smoke_test_panel",
+  panes = { middle = {} },
+})
+ok("idempotent .new returns the existing instance", m2 == m)
+
+-- dispose drops it from the registry.
+m:dispose()
+ok("dispose removes from registry",
+  mfloat.get("smoke_test_panel") == nil)
+
+-- A 2-pane variant (no preview, no footer) lays out cleanly.
+local m3 = mfloat.new({
+  name  = "smoke_two_pane",
+  panes = {
+    left   = { width = 28 },
+    middle = {},
+  },
+})
+m3:open()
+ok("2-pane variant opens",
+  m3:winid("left") and m3:winid("middle") and not m3:winid("preview"))
+ok("2-pane: middle width fills the rest",
+  vim.api.nvim_win_get_config(m3:winid("middle")).width
+    > vim.api.nvim_win_get_config(m3:winid("left")).width)
+m3:dispose()
+
+-- A middle-only variant (a single content pane) opens.
+local m4 = mfloat.new({
+  name  = "smoke_solo",
+  panes = { middle = {} },
+})
+m4:open()
+ok("middle-only variant opens", m4:is_open())
+ok("middle-only has no left/preview/footer",
+  not m4:winid("left") and not m4:winid("preview")
+    and not m4:winid("footer"))
+m4:dispose()
+
+mfloat._reset_for_tests()
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
