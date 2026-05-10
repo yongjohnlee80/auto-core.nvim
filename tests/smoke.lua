@@ -2520,6 +2520,43 @@ events._reset_for_tests()
 require("auto-core.git.graph")._reset_for_tests()
 end)()
 
+-- ─────────────────────── 46. files — show_hidden / show_dotfiles prefs ─────────────────────────
+print("\n[46] files — global show_hidden / show_dotfiles prefs")
+;(function()
+local files = require("auto-core.files")
+files._reset_for_tests()
+
+ok("get_show_hidden defaults to true",   files.get_show_hidden()   == true)
+ok("get_show_dotfiles defaults to true", files.get_show_dotfiles() == true)
+
+-- Flip + read back.
+files.set_show_hidden(false)
+ok("set_show_hidden(false) round-trips", files.get_show_hidden() == false)
+files.set_show_dotfiles(false)
+ok("set_show_dotfiles(false) round-trips", files.get_show_dotfiles() == false)
+
+-- Watcher fires on change.
+local got_hidden, got_dotfiles = nil, nil
+files.watch_show_hidden(function(p) got_hidden = p end)
+files.watch_show_dotfiles(function(p) got_dotfiles = p end)
+files.set_show_hidden(true)
+vim.wait(20)
+ok("watch_show_hidden fired with new=true",
+  got_hidden ~= nil and got_hidden.new == true)
+files.set_show_dotfiles(true)
+vim.wait(20)
+ok("watch_show_dotfiles fired with new=true",
+  got_dotfiles ~= nil and got_dotfiles.new == true)
+
+-- Truthy non-bool coerces to bool (defensive).
+files.set_show_hidden("yes")
+ok("set_show_hidden coerces truthy non-bool to false (strict ==)",
+  files.get_show_hidden() == false,
+  "set_show_hidden requires literal `true`; non-true → false")
+
+files._reset_for_tests()
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
