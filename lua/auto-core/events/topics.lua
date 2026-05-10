@@ -128,6 +128,33 @@ local M = {
     payload = "{ path = string, stopped = { name = string, id = integer }[], detected_stack = string[], dry_run = boolean }",
     publishers = { "auto-core" },
   },
+
+  -- ── git mutations (auto-core.git.{fetch,pull,worktree}, ADR 0007 Phase 3.5) ───
+  ["core.git.fetch:started"] = {
+    doc = "git.fetch.fetch_one started for one repo.",
+    payload = "{ repo = { common_dir, label }, label }",
+    publishers = { "auto-core" },
+  },
+  ["core.git.fetch:completed"] = {
+    doc = "git.fetch.fetch_one completed (success or error).",
+    payload = "{ repo = { common_dir, label }, label, ok, stderr? }",
+    publishers = { "auto-core" },
+  },
+  ["core.git.pull:started"] = {
+    doc = "git.pull.pull_apply started against a worktree.",
+    payload = "{ wt = { path, branch }, mode = 'ff'|'reset' }",
+    publishers = { "auto-core" },
+  },
+  ["core.git.pull:completed"] = {
+    doc = "git.pull.pull_apply completed (success or error).",
+    payload = "{ wt = { path, branch }, mode, ok, stderr? }",
+    publishers = { "auto-core" },
+  },
+  ["core.git.worktree:destroyed"] = {
+    doc = "git.worktree.destroy ran (success or error). On success, `branch_err` may carry a non-fatal branch-delete error.",
+    payload = "{ repo = { common_dir }, wt = { path, branch?, sha? }, force, ok, err?, branch_err? }",
+    publishers = { "auto-core" },
+  },
 }
 
 return M

@@ -371,6 +371,89 @@ function M.get_workspace_root()
   return claim_state():get("workspace_root")
 end
 
+-- ── destroy: remove a linked worktree (+ optional branch delete) ─
+
+---Remove a linked worktree and (when attached to a local branch)
+---delete the branch. Local-only — never touches the remote. Async.
+---
+---**Round-trip pattern** (per ADR 0007 §Phase 3.5): consumers
+---typically call `pull.worktree_dirty(wt)` first; if dirty, prompt
+---the user to confirm destruction; then call here with
+---`opts.force = true`. Without force, `git worktree remove` itself
+---refuses on dirty/untracked content — the resulting stderr is
+---returned to `on_done` so the consumer can decide whether to
+---retry with force.
+---
+---The branch delete uses `-D` (force) because the user has already
+---consented to destroying the worktree's contents — refusing to
+---also delete the (now orphaned) branch on "not merged" would be
+---inconsistent with that consent. on_done receives
+---`(ok, err, branch_err)` where `branch_err` is non-nil if the
+---worktree removed cleanly but the branch delete failed (still
+---reported as overall ok=true).
+---
+---Topic published: `core.git.worktree:destroyed`
+---  payload `{ repo = { common_dir }, wt = { path, branch?, sha? },
+---            force, ok, err?, branch_err? }`
+---
+---@param repo { common_dir: string }
+---@param wt   { path: string, branch: string?, sha: string?, detached: boolean? }
+---@param opts { force: boolean? }?
+---@param on_done fun(ok: boolean, err: string?, branch_err: string?)?
+function M.destroy(repo, wt, opts, on_done)
+  opts = opts or {}
+  if not repo or type(repo.common_dir) ~= "string" or repo.common_dir == ""
+      or not wt or type(wt.path) ~= "string" or wt.path == "" then
+    if on_done then
+      on_done(false, "destroy: repo.common_dir + wt.path required")
+    end
+    return
+  end
+  local args = { "git", "--git-dir=" .. repo.common_dir, "worktree", "remove" }
+  if opts.force then args[#args + 1] = "--force" end
+  args[#args + 1] = wt.path
+  vim.system(args, { text = true }, vim.schedule_wrap(function(rm)
+    if rm.code ~= 0 then
+      local err = vim.trim(rm.stderr or "")
+      events.publish("core.git.worktree:destroyed", {
+        repo  = { common_dir = repo.common_dir },
+        wt    = wt,
+        force = opts.force == true,
+        ok    = false,
+        err   = err,
+      })
+      if on_done then on_done(false, err) end
+      return
+    end
+    if not wt.branch then
+      events.publish("core.git.worktree:destroyed", {
+        repo  = { common_dir = repo.common_dir },
+        wt    = wt,
+        force = opts.force == true,
+        ok    = true,
+      })
+      if on_done then on_done(true) end
+      return
+    end
+    -- Worktree removed; now delete the branch (force, see docstring).
+    vim.system(
+      { "git", "--git-dir=" .. repo.common_dir, "branch", "-D", wt.branch },
+      { text = true },
+      vim.schedule_wrap(function(br)
+        local branch_err = (br.code ~= 0) and vim.trim(br.stderr or "") or nil
+        events.publish("core.git.worktree:destroyed", {
+          repo       = { common_dir = repo.common_dir },
+          wt         = wt,
+          force      = opts.force == true,
+          ok         = true,
+          branch_err = branch_err,
+        })
+        if on_done then on_done(true, nil, branch_err) end
+      end)
+    )
+  end))
+end
+
 ---Test-only — clears the state namespace so smoke tests start clean.
 function M._reset_for_tests()
   if _ns then

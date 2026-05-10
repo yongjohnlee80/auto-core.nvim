@@ -2354,6 +2354,172 @@ vim.fn.delete(tmp, "rf")
 graph._reset_for_tests()
 end)()
 
+-- ─────────────────────── 45. git.fetch / git.pull / git.worktree.destroy (Phase 3.5) ─────────────────────────
+print("\n[45] git.fetch + git.pull + git.worktree.destroy")
+;(function()
+local fetch_mod = require("auto-core.git.fetch")
+local pull_mod  = require("auto-core.git.pull")
+local wt_mod    = require("auto-core.git.worktree")
+events._reset_for_tests()
+
+ok("git.fetch.fetch_one is a function", type(fetch_mod.fetch_one) == "function")
+ok("git.fetch.fetch_all is a function", type(fetch_mod.fetch_all) == "function")
+ok("git.pull.pull_status is a function", type(pull_mod.pull_status) == "function")
+ok("git.pull.pull_apply is a function",  type(pull_mod.pull_apply)  == "function")
+ok("git.pull.worktree_dirty is a function",
+  type(pull_mod.worktree_dirty) == "function")
+ok("git.worktree.destroy is a function", type(wt_mod.destroy) == "function")
+
+-- Build two repos so we can test fetch with a real local remote.
+local tmp = vim.fn.tempname() .. "_p35"
+local upstream = tmp .. "/upstream.git"
+local clone = tmp .. "/clone"
+vim.fn.mkdir(tmp, "p")
+vim.fn.system({ "git", "init", "--bare", "-q",
+  "--initial-branch=main", upstream })
+local seed = tmp .. "/seed"
+vim.fn.mkdir(seed, "p")
+vim.fn.system({ "git", "-C", seed, "init", "-q", "--initial-branch=main" })
+vim.fn.system({ "git", "-C", seed, "-c", "user.email=t@t", "-c", "user.name=t",
+  "commit", "--allow-empty", "-m", "seed" })
+vim.fn.system({ "git", "-C", seed, "remote", "add", "origin", upstream })
+vim.fn.system({ "git", "-C", seed, "push", "-q", "origin", "main" })
+-- Now clone a fresh working copy that we'll fetch + pull against.
+-- `-b main` forces the branch even if upstream's HEAD ref points
+-- elsewhere (avoids the default-branch ambiguity that bit the test
+-- on systems where init defaults to master).
+vim.fn.system({ "git", "clone", "-q", "-b", "main", upstream, clone })
+
+-- pull_status on a clean uptodate clone.
+local s = pull_mod.pull_status({ path = clone, branch = "main" })
+ok("pull_status: uptodate after fresh clone",
+  s.state == "uptodate", "state=" .. tostring(s.state))
+ok("pull_status: clean clone reports not dirty", s.dirty == false)
+
+-- worktree_dirty on the clean clone.
+local d = pull_mod.worktree_dirty({ path = clone })
+ok("worktree_dirty: clean clone is not dirty",
+  d.dirty == false and d.dirty_count == 0)
+
+-- Touch a tracked-style file in the clone to make it dirty for a
+-- subsequent assertion (we must add a tracked file first since
+-- worktree_dirty includes untracked).
+vim.fn.writefile({ "x" }, clone .. "/scratch.txt")
+local d2 = pull_mod.worktree_dirty({ path = clone })
+ok("worktree_dirty: untracked file flips dirty true",
+  d2.dirty == true and d2.dirty_count >= 1)
+vim.fn.delete(clone .. "/scratch.txt")
+
+-- Add a new commit upstream so the clone falls behind.
+vim.fn.system({ "git", "-C", seed, "-c", "user.email=t@t", "-c", "user.name=t",
+  "commit", "--allow-empty", "-m", "advance" })
+vim.fn.system({ "git", "-C", seed, "push", "-q", "origin", "main" })
+
+-- fetch_one on the clone; capture topic payloads.
+local fetch_started, fetch_completed = nil, nil
+events.subscribe("core.git.fetch:started",
+  function(p) fetch_started = p end)
+events.subscribe("core.git.fetch:completed",
+  function(p) fetch_completed = p end)
+
+local clone_common = vim.trim(vim.fn.systemlist({
+  "git", "-C", clone, "rev-parse", "--git-dir",
+})[1] or "")
+-- `--git-dir` returns either an absolute path or a relative one
+-- (typically `.git`) depending on cwd. Resolve to absolute.
+if not clone_common:match("^/") then
+  clone_common = clone .. "/" .. clone_common
+end
+
+local fetch_done = false
+fetch_mod.fetch_one({ common_dir = clone_common, label = "clone" }, nil,
+  function(ok_done, _stderr) fetch_done = ok_done end)
+vim.wait(8000, function() return fetch_done end)
+ok("fetch_one completed successfully against local remote",
+  fetch_done == true)
+ok("fetch:started topic fired with label",
+  fetch_started ~= nil and fetch_started.label == "clone")
+ok("fetch:completed topic fired with ok=true",
+  fetch_completed ~= nil and fetch_completed.ok == true,
+  vim.inspect(fetch_completed))
+
+-- After fetch, pull_status should report ff (one commit behind).
+local s2 = pull_mod.pull_status({ path = clone, branch = "main" })
+ok("pull_status: ff after upstream advance + fetch",
+  s2.state == "ff", "state=" .. tostring(s2.state))
+
+-- pull_apply ff brings the clone forward.
+local pull_started, pull_completed = nil, nil
+events.subscribe("core.git.pull:started",
+  function(p) pull_started = p end)
+events.subscribe("core.git.pull:completed",
+  function(p) pull_completed = p end)
+
+local pull_done = false
+pull_mod.pull_apply({ path = clone, branch = "main" }, "ff", nil,
+  function(ok_done) pull_done = ok_done end)
+vim.wait(8000, function() return pull_done end)
+ok("pull_apply ff succeeded", pull_done == true)
+ok("pull:started topic fired with mode=ff",
+  pull_started ~= nil and pull_started.mode == "ff")
+ok("pull:completed topic fired with ok=true",
+  pull_completed ~= nil and pull_completed.ok == true)
+
+-- After pull, status is uptodate.
+local s3 = pull_mod.pull_status({ path = clone, branch = "main" })
+ok("pull_status: uptodate after ff", s3.state == "uptodate")
+
+-- Unknown pull mode is a clean error.
+local bad_done = false
+local bad_err
+pull_mod.pull_apply({ path = clone, branch = "main" }, "not-a-mode", nil,
+  function(ok_done, err) bad_done = ok_done; bad_err = err end)
+vim.wait(50)
+ok("pull_apply unknown mode returns error",
+  bad_done == false and type(bad_err) == "string"
+    and bad_err:find("unknown mode", 1, true) ~= nil)
+
+-- Now add a worktree to the clone and test destroy. Use the seed
+-- repo for this since it has the bare-style common dir.
+vim.fn.mkdir(tmp .. "/wt-target", "p")
+vim.fn.system({ "git", "-C", seed,
+  "worktree", "add", "-b", "feature-x", tmp .. "/wt-target" })
+local seed_common = vim.trim(vim.fn.systemlist({
+  "git", "-C", seed, "rev-parse", "--git-dir",
+})[1] or "")
+if not seed_common:match("^/") then
+  seed_common = seed .. "/" .. seed_common
+end
+
+local destroy_topic = nil
+events.subscribe("core.git.worktree:destroyed",
+  function(p) destroy_topic = p end)
+
+local destroy_done = false
+local destroy_err
+wt_mod.destroy({ common_dir = seed_common },
+  { path = tmp .. "/wt-target", branch = "feature-x" },
+  { force = false },
+  function(ok_done, err) destroy_done = ok_done; destroy_err = err end)
+vim.wait(8000, function() return destroy_done ~= false end)
+ok("destroy: clean worktree removed",
+  destroy_done == true and destroy_err == nil,
+  string.format("done=%s err=%s",
+    tostring(destroy_done), tostring(destroy_err)))
+ok("destroy: target dir is gone",
+  vim.fn.isdirectory(tmp .. "/wt-target") == 0)
+ok("destroy: worktree:destroyed topic fired with ok=true",
+  destroy_topic ~= nil and destroy_topic.ok == true)
+-- Branch was deleted as part of destroy (no branch_err on success).
+ok("destroy: branch_err nil when branch deletes cleanly",
+  destroy_topic.branch_err == nil)
+
+-- Cleanup.
+vim.fn.delete(tmp, "rf")
+events._reset_for_tests()
+require("auto-core.git.graph")._reset_for_tests()
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
