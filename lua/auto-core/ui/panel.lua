@@ -107,8 +107,12 @@ end
 --      runs without changing the current window so `WinEnter`
 --      doesn't fire either.
 --   2. A `WinEnter`/`BufWinEnter` autocmd watches for a marked
---      buffer landing in a non-panel window and replaces it with
---      a fresh wipe-on-hidden scratch.
+--      buffer landing in a non-panel window and CLOSES that window.
+--      Closing matches user expectation: a stray `:vert sb <panel-buf>`
+--      should disappear entirely, not leave an empty placeholder
+--      window. When the close would leave an empty tabpage (last
+--      window in the tab), we fall back to swapping in a wipe-scratch
+--      so the visible buffer still goes away.
 
 local function _get_var(getter, target, name)
   local ok, v = pcall(getter, target, name)
@@ -118,6 +122,11 @@ end
 
 local function _bounce_buffer(winid)
   if not vim.api.nvim_win_is_valid(winid) then return end
+  -- Prefer closing the stray window outright. `nvim_win_close` errors
+  -- when the target is the last window in its tabpage; the pcall
+  -- swallows that and we fall back to the scratch swap below.
+  local closed = pcall(vim.api.nvim_win_close, winid, false)
+  if closed then return end
   local scratch = vim.api.nvim_create_buf(false, true)
   vim.bo[scratch].bufhidden = "wipe"
   vim.bo[scratch].buftype   = "nofile"
