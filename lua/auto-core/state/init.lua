@@ -324,6 +324,27 @@ function M.namespace(name, opts)
   return ns
 end
 
+-- Flush every registered namespace synchronously on `VimLeavePre`.
+-- Without this, deferred persist writes (vim.defer_fn 100ms debounce
+-- per ADR §"Performance budgets") can die when nvim exits before
+-- the timer fires. md-harpoon's per-project pin set on quit was
+-- the surfacing case; equally affects worktree's set_workspace_root
+-- and any other write within ~100ms of :qa.
+--
+-- Registered ONCE at module load (not per-namespace.new) so we
+-- don't accumulate handlers when consumers re-claim the same
+-- namespace name.
+local _leave_group = vim.api.nvim_create_augroup(
+  "AutoCoreStateFlush", { clear = true })
+vim.api.nvim_create_autocmd("VimLeavePre", {
+  group = _leave_group,
+  callback = function()
+    for _, ns in pairs(_registry) do
+      pcall(function() ns:persist_now() end)
+    end
+  end,
+})
+
 ---Test-only: blow away the registry. Production code never calls
 ---this. Smoke tests use it for isolation between cases.
 function M._reset_for_tests()
