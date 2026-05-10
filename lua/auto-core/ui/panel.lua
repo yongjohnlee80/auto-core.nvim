@@ -39,6 +39,13 @@ local M = {}
 ---@type table<string, AutoCorePanel>
 local _registry = {}
 
+-- Buffer-local var stamped on every buffer that has been displayed in
+-- a panel window. Paired with `w:auto_core_panel_name` on the panel
+-- window, this lets the BufWinEnter guard distinguish "panel buffer
+-- in its panel window" (legitimate) from "panel buffer in a stray
+-- editor split" (a leak — bounce it).
+local BUF_OWNER_VAR = "auto_core_panel_owner"
+
 ---Look up a panel by name. Returns nil if not registered.
 ---@param name string
 ---@return AutoCorePanel?
@@ -79,6 +86,68 @@ local function resolve_width(spec, cols)
   return n
 end
 
+-- ── leak guard against panel-buffer hijacks ──────────────
+--
+-- `winfixbuf` on the panel window prevents an external `:edit` /
+-- `:b` / bufferline-click from REPLACING the panel's buffer with
+-- something else. It does NOT stop the panel's own buffer from
+-- being SHOWN in another window — `:vert sb`, `:bnext` in the
+-- editor, bufferline cycling, session restore, etc. all happily
+-- pull the agent terminal / file tree into a stray editor split,
+-- producing duplicate-looking panels next to the real one.
+--
+-- Strategy:
+--   1. Panel buffers are marked with `b:auto_core_panel_owner =
+--      <panel name>` by `Panel:_stamp_buffer`, called explicitly
+--      from `Panel:open` (for the scratch placeholder) and
+--      `Panel:with_unfixed_buf` (for any consumer-supplied buffer
+--      that gets swapped in). We don't rely on autocmds for the
+--      stamp — `BufWinEnter` doesn't fire when a buffer already
+--      visible elsewhere is displayed again, and `with_unfixed_buf`
+--      runs without changing the current window so `WinEnter`
+--      doesn't fire either.
+--   2. A `WinEnter`/`BufWinEnter` autocmd watches for a marked
+--      buffer landing in a non-panel window and replaces it with
+--      a fresh wipe-on-hidden scratch.
+
+local function _get_var(getter, target, name)
+  local ok, v = pcall(getter, target, name)
+  if ok then return v end
+  return nil
+end
+
+local function _bounce_buffer(winid)
+  if not vim.api.nvim_win_is_valid(winid) then return end
+  local scratch = vim.api.nvim_create_buf(false, true)
+  vim.bo[scratch].bufhidden = "wipe"
+  vim.bo[scratch].buftype   = "nofile"
+  vim.bo[scratch].swapfile  = false
+  pcall(vim.api.nvim_win_set_buf, winid, scratch)
+end
+
+local _guard_group = vim.api.nvim_create_augroup(
+  "AutoCorePanelGuard", { clear = true })
+vim.api.nvim_create_autocmd({ "WinEnter", "BufWinEnter" }, {
+  group = _guard_group,
+  callback = function()
+    local winid = vim.api.nvim_get_current_win()
+    if not vim.api.nvim_win_is_valid(winid) then return end
+    -- Floating windows opt out — overlays may legitimately preview
+    -- a panel buffer (the float owner is responsible for cleanup).
+    if vim.api.nvim_win_get_config(winid).relative ~= "" then return end
+
+    local win_panel = _get_var(vim.api.nvim_win_get_var, winid,
+      "auto_core_panel_name")
+    if type(win_panel) == "string" and #win_panel > 0 then return end
+
+    local bufnr = vim.api.nvim_win_get_buf(winid)
+    local owner = _get_var(vim.api.nvim_buf_get_var, bufnr, BUF_OWNER_VAR)
+    if type(owner) == "string" and #owner > 0 then
+      _bounce_buffer(winid)
+    end
+  end,
+})
+
 -- ── the Panel class ────────────────────────────────────────
 
 ---@class AutoCorePanelOpts
@@ -104,6 +173,17 @@ function Panel:_stamp(winid)
   pcall(vim.api.nvim_win_set_var, winid, self._marker_var, 1)
   -- Also stamp the panel name for the winbar click router.
   pcall(vim.api.nvim_win_set_var, winid, "auto_core_panel_name", self.opts.name)
+end
+
+---Stamp the panel-owner marker on a buffer. Paired with the leak
+---guard autocmd above — any buffer carrying this marker that ends
+---up in a non-panel window is bounced back to a scratch.
+---@private
+---@param bufnr integer?
+function Panel:_stamp_buffer(bufnr)
+  if not bufnr or bufnr == 0 then return end
+  if not vim.api.nvim_buf_is_valid(bufnr) then return end
+  pcall(vim.api.nvim_buf_set_var, bufnr, BUF_OWNER_VAR, self.opts.name)
 end
 
 ---Scan the current tabpage for an existing window carrying our
@@ -150,6 +230,14 @@ function Panel:with_unfixed_buf(fn)
   local ok, result = pcall(fn)
   if was and vim.api.nvim_win_is_valid(self.winid) then
     vim.wo[self.winid].winfixbuf = true
+  end
+  -- Whatever buffer the consumer just placed in the panel is now
+  -- panel-owned. Stamping here is the only reliable hook: nvim
+  -- doesn't fire BufWinEnter for re-displays of an already-loaded
+  -- buffer, and `nvim_win_set_buf` doesn't change the current
+  -- window so WinEnter doesn't fire either.
+  if vim.api.nvim_win_is_valid(self.winid) then
+    self:_stamp_buffer(vim.api.nvim_win_get_buf(self.winid))
   end
   return ok, result
 end
@@ -198,6 +286,7 @@ function Panel:open(force)
       vim.bo[scratch].filetype = self.opts.filetype
     end
     pcall(vim.api.nvim_win_set_buf, winid, scratch)
+    self:_stamp_buffer(scratch)
   end
   vim.o.eventignore = saved_eventignore
   if not ok_cmd then
