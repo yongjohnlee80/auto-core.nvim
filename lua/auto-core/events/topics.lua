@@ -155,6 +155,18 @@ local M = {
     payload = "{ repo = { common_dir }, wt = { path, branch?, sha? }, force, ok, err?, branch_err? }",
     publishers = { "auto-core" },
   },
+
+  -- ── doc pinning (md-harpoon — ADR 0006 + auto-core-todos) ───────
+  ["doc:pinned"] = {
+    doc = "A document was pinned to one of md-harpoon's slots (or repinned to a different path).",
+    payload = "{ slot = string, path = string, source_bufnr = integer? }",
+    publishers = { "md-harpoon.nvim" },
+  },
+  ["doc:unpinned"] = {
+    doc = "A previously-pinned slot was cleared (or the panel was closed).",
+    payload = "{ slot = string, path = string? }",
+    publishers = { "md-harpoon.nvim" },
+  },
 }
 
 return M
