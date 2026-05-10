@@ -84,10 +84,10 @@ end
 ok("M.version is a semver string",
   type(core.version) == "string" and core.version:match("^%d+%.%d+%.%d+$") ~= nil,
   tostring(core.version))
-ok("M.version is 0.0.10 (Phase 7 log + health tag)",
-  select(1, eq(core.version, "0.0.10")))
-ok("M.api_version is 0.0 (pre-stable surface)",
-  select(1, eq(core.api_version, "0.0")))
+ok("M.version is 0.1.0 (solid beta — additive-only minor-bump rule)",
+  select(1, eq(core.version, "0.1.0")))
+ok("M.api_version is 0.1 (events + state + ui + fs + git + tasks + log + health stable)",
+  select(1, eq(core.api_version, "0.1")))
 ok("M.setup is a function", type(core.setup) == "function")
 ok("M.config table present",
   type(core.config) == "table"

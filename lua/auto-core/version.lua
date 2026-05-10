@@ -17,14 +17,15 @@
 ---
 ---  if require("auto-core").api_version >= "0.2" then ... end
 ---
----Pre-1.0 (today): `api_version = "0.0"` — the surface is unstable;
----consumers pin a specific package version. `api_version` flips to
----"0.1" once Phase 2 ships and the events + state surfaces are
----declared stable.
+---v0.1.0 (2026-05-11) is the **solid beta** — first release covered
+---by the `auto-core-maintenance` convention's additive-only minor-
+---bump rule. Consumers can safely pin via `version = "^0.1.0"` (caret)
+---and trust that no future v0.X.Y will rename, remove, or break-shape
+---any existing function, state key, topic, or persisted schema.
 ---
 ---@module 'auto-core.version'
 
 return {
-  version     = "0.0.10",
-  api_version = "0.0",
+  version     = "0.1.0",
+  api_version = "0.1",
 }
