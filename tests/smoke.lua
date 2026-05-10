@@ -2251,6 +2251,109 @@ m4:dispose()
 mfloat._reset_for_tests()
 end)()
 
+-- ─────────────────────── 44. git.graph — fan_out + show_stat + show_diff ─────────────────────────
+print("\n[44] git.graph — multi-repo discovery + commit show caches")
+;(function()
+local graph = require("auto-core.git.graph")
+graph._reset_for_tests()
+
+-- Build a small workspace with two real git repos so fan_out can probe.
+local tmp = vim.fn.tempname() .. "_graph_ws"
+vim.fn.mkdir(tmp .. "/repo-a", "p")
+vim.fn.mkdir(tmp .. "/repo-b", "p")
+vim.fn.system({ "git", "-C", tmp .. "/repo-a", "init", "-q" })
+vim.fn.system({ "git", "-C", tmp .. "/repo-a",
+  "-c", "user.email=t@t", "-c", "user.name=t",
+  "commit", "--allow-empty", "-m", "init" })
+vim.fn.system({ "git", "-C", tmp .. "/repo-b", "init", "-q" })
+vim.fn.system({ "git", "-C", tmp .. "/repo-b",
+  "-c", "user.email=t@t", "-c", "user.name=t",
+  "commit", "--allow-empty", "-m", "init" })
+
+-- fan_out: discovers both repos.
+local repos_found = graph.fan_out(tmp)
+ok("fan_out finds repo-a + repo-b", #repos_found == 2,
+  "found=" .. #repos_found)
+ok("fan_out repos sorted by label",
+  repos_found[1].label == "repo-a" and repos_found[2].label == "repo-b")
+ok("fan_out repo-a has sample_worktree",
+  type(repos_found[1].sample_worktree) == "string"
+    and repos_found[1].sample_worktree == tmp .. "/repo-a")
+ok("fan_out repo-a not bare", repos_found[1].is_bare == false)
+ok("fan_out repo-a has common_dir",
+  repos_found[1].common_dir:find("/repo%-a/%.git") ~= nil,
+  repos_found[1].common_dir)
+
+-- Cached: second call returns same array.
+local cached = graph.fan_out(tmp)
+ok("fan_out result is cached (same table)",
+  cached == repos_found)
+
+-- show_stat against the init commit. We need the actual hash.
+local hash = vim.fn.systemlist({
+  "git", "--git-dir=" .. repos_found[1].common_dir,
+  "rev-parse", "HEAD",
+})[1]
+ok("captured a real commit hash for repo-a",
+  type(hash) == "string" and #hash >= 7, "hash=" .. tostring(hash))
+
+local stat_lines = graph.show_stat(repos_found[1].common_dir, hash)
+ok("show_stat returns non-empty output for real hash", #stat_lines > 0,
+  "lines=" .. #stat_lines)
+ok("show_stat output mentions the commit message",
+  (function()
+    for _, l in ipairs(stat_lines) do
+      if l:find("init", 1, true) then return true end
+    end
+    return false
+  end)())
+
+local diff_lines = graph.show_diff(repos_found[1].common_dir, hash)
+ok("show_diff returns non-empty output for real hash",
+  #diff_lines > 0)
+
+-- Cache returns the same table on a second call.
+local stat_cached = graph.show_stat(repos_found[1].common_dir, hash)
+ok("show_stat result is cached", stat_cached == stat_lines)
+
+-- Bad hash: returns an error tag instead of crashing.
+local stat_bad = graph.show_stat(repos_found[1].common_dir, "deadbeefdeadbeef")
+ok("show_stat with bad hash returns a defensive output",
+  type(stat_bad) == "table" and #stat_bad > 0)
+
+-- clear_repo_cache wipes the per-repo caches but leaves fan-out alone.
+graph.clear_repo_cache(repos_found[1].common_dir)
+local stat_recomputed = graph.show_stat(repos_found[1].common_dir, hash)
+ok("clear_repo_cache forced a recomputation",
+  stat_recomputed ~= stat_lines and #stat_recomputed > 0)
+ok("clear_repo_cache preserved fan_out cache",
+  graph.fan_out(tmp) == repos_found)
+
+-- Topic invalidation: publishing worktree:added drops fan_out cache.
+require("auto-core").events.publish("worktree:added", { path = "/x" })
+vim.wait(20)
+local refreshed = graph.fan_out(tmp)
+ok("worktree:added event invalidates fan_out cache",
+  refreshed ~= repos_found and #refreshed == 2,
+  string.format("refreshed=%s repos_found=%s same=%s len=%d",
+    tostring(refreshed), tostring(repos_found),
+    tostring(refreshed == repos_found), #refreshed))
+
+-- worktree:removed too.
+require("auto-core").events.publish("worktree:removed", { path = "/x" })
+vim.wait(20)
+local refreshed2 = graph.fan_out(tmp)
+ok("worktree:removed event invalidates fan_out cache",
+  refreshed2 ~= refreshed,
+  string.format("refreshed2=%s refreshed=%s same=%s",
+    tostring(refreshed2), tostring(refreshed),
+    tostring(refreshed2 == refreshed)))
+
+-- Cleanup.
+vim.fn.delete(tmp, "rf")
+graph._reset_for_tests()
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

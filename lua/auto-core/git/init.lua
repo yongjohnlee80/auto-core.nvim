@@ -13,5 +13,6 @@ local M = {}
 M.repo     = require("auto-core.git.repo")
 M.status   = require("auto-core.git.status")
 M.worktree = require("auto-core.git.worktree")
+M.graph    = require("auto-core.git.graph")
 
 return M
