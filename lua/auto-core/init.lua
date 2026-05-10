@@ -78,6 +78,7 @@ M.git    = require("auto-core.git")
 M.tasks  = require("auto-core.tasks")
 M.log    = require("auto-core.log")
 M.health = require("auto-core.health")
+M.lsp    = require("auto-core.lsp")
 
 ---Initialize auto-core. Idempotent — re-calling re-applies opts and
 ---propagates the relevant subset to each subsystem.

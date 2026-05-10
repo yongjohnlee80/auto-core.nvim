@@ -121,6 +121,13 @@ local M = {
     payload = "{ kind = string, buf = integer, win = integer }",
     publishers = { "auto-core" },
   },
+
+  -- ── lsp lifecycle (auto-core.lsp.reset, ADR 0007 Phase 1) ────
+  ["core.lsp:reset"] = {
+    doc = "auto-core.lsp.reset.reset_for(path) ran. `stopped` is empty for dry_run or no-op resets.",
+    payload = "{ path = string, stopped = { name = string, id = integer }[], detected_stack = string[], dry_run = boolean }",
+    publishers = { "auto-core" },
+  },
 }
 
 return M

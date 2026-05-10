@@ -1960,6 +1960,158 @@ ok("setup({log.level='error'}) lowers level to ERROR",
 -- Restore default.
 core.setup({})
 
+-- ─────────────────────── 42. lsp.reset — tech-stack-aware restart ─────────────────────────
+print("\n[42] lsp.reset — tech-stack detection, partition, dry_run")
+;(function()
+local lsp_reset = require("auto-core.lsp.reset")
+lsp_reset._reset_for_tests()
+
+-- Build a deterministic tmpdir tree with a few stack markers.
+local tmp = vim.fn.tempname() .. "_lspreset"
+vim.fn.mkdir(tmp .. "/go-proj/sub", "p")
+vim.fn.writefile({ "module x" }, tmp .. "/go-proj/go.mod")
+vim.fn.mkdir(tmp .. "/ts-proj/src", "p")
+vim.fn.writefile({ "{}" }, tmp .. "/ts-proj/package.json")
+vim.fn.mkdir(tmp .. "/poly", "p")
+vim.fn.writefile({ "module y" }, tmp .. "/poly/go.mod")
+vim.fn.writefile({ "{}" }, tmp .. "/poly/package.json")
+vim.fn.mkdir(tmp .. "/empty", "p")
+
+-- detect_stack: walk-up from a file or subdir, OR-combine markers.
+local go_stack = lsp_reset.detect_stack(tmp .. "/go-proj/sub/file.go")
+ok("detect_stack(go file under go.mod) returns gopls",
+  vim.tbl_contains(go_stack, "gopls"),
+  vim.inspect(go_stack))
+ok("detect_stack(go file) does NOT return ts_ls",
+  not vim.tbl_contains(go_stack, "ts_ls"))
+
+local ts_stack = lsp_reset.detect_stack(tmp .. "/ts-proj/src")
+ok("detect_stack(ts dir) returns ts_ls + eslint",
+  vim.tbl_contains(ts_stack, "ts_ls")
+    and vim.tbl_contains(ts_stack, "eslint"))
+
+-- Polyglot dir (rare but legal): both go.mod and package.json present.
+local poly_stack = lsp_reset.detect_stack(tmp .. "/poly")
+ok("detect_stack(polyglot dir) unions both stacks",
+  vim.tbl_contains(poly_stack, "gopls")
+    and vim.tbl_contains(poly_stack, "ts_ls"),
+  vim.inspect(poly_stack))
+
+-- No marker reachable: empty result.
+local empty_stack = lsp_reset.detect_stack(tmp .. "/empty")
+ok("detect_stack(no marker) returns empty",
+  type(empty_stack) == "table" and #empty_stack == 0,
+  vim.inspect(empty_stack))
+
+-- register_stack adds servers; idempotent on repeat add.
+lsp_reset.register_stack("go.mod", { "custom_go_lsp" })
+local extended = lsp_reset.detect_stack(tmp .. "/go-proj")
+ok("register_stack appends new server",
+  vim.tbl_contains(extended, "custom_go_lsp"))
+lsp_reset.register_stack("go.mod", { "custom_go_lsp" })  -- duplicate
+local snap = lsp_reset.list_stacks()["go.mod"]
+local custom_count = 0
+for _, s in ipairs(snap) do
+  if s == "custom_go_lsp" then custom_count = custom_count + 1 end
+end
+ok("register_stack is idempotent (no duplicate entries)",
+  custom_count == 1, "custom_count=" .. custom_count)
+
+-- preview / reset_for partition logic. Stub vim.lsp.get_clients to
+-- return synthetic clients so we don't depend on a real LSP setup.
+local orig_get_clients = vim.lsp.get_clients
+local orig_stop = vim.lsp.stop_client
+local stop_calls = {}
+local function fake_clients(list)
+  vim.lsp.get_clients = function() return list end
+end
+vim.lsp.stop_client = function(id, _force)
+  stop_calls[#stop_calls + 1] = id
+end
+
+-- Case A: a gopls client rooted under the new go-proj path → kept.
+fake_clients({
+  { id = 11, name = "gopls", root_dir = tmp .. "/go-proj" },
+})
+local p1 = lsp_reset.preview(tmp .. "/go-proj")
+ok("preview keeps gopls already rooted under target",
+  #p1.stopped == 0 and #p1.untouched == 1,
+  string.format("stopped=%d untouched=%d", #p1.stopped, #p1.untouched))
+
+-- Case B: a gopls client rooted under a DIFFERENT go project → stopped.
+fake_clients({
+  { id = 12, name = "gopls", root_dir = "/some/other/go-project" },
+})
+local p2 = lsp_reset.preview(tmp .. "/go-proj")
+ok("preview stops gopls rooted outside target",
+  #p2.stopped == 1 and p2.stopped[1].id == 12)
+
+-- Case C: a ts_ls client when the target is a Go project → untouched
+-- (ts_ls is NOT in the considered set for go.mod stack).
+fake_clients({
+  { id = 13, name = "ts_ls", root_dir = "/some/ts-project" },
+})
+local p3 = lsp_reset.preview(tmp .. "/go-proj")
+ok("preview leaves out-of-stack clients alone",
+  #p3.stopped == 0 and #p3.untouched == 1)
+
+-- Case D: extra_servers extends the considered set.
+fake_clients({
+  { id = 14, name = "ts_ls", root_dir = "/elsewhere" },
+})
+local p4 = lsp_reset.preview(tmp .. "/go-proj",
+  { extra_servers = { "ts_ls" } })
+ok("preview with extra_servers stops the additional name",
+  #p4.stopped == 1 and p4.stopped[1].id == 14)
+
+-- Case E: exclude takes precedence — even mismatched + in-stack
+-- clients are untouched if excluded.
+fake_clients({
+  { id = 15, name = "gopls", root_dir = "/elsewhere" },
+})
+local p5 = lsp_reset.preview(tmp .. "/go-proj",
+  { exclude = { "gopls" } })
+ok("preview honors opts.exclude",
+  #p5.stopped == 0 and #p5.untouched == 1)
+
+-- Case F: dry_run skips the actual stop_client call but still publishes.
+fake_clients({
+  { id = 16, name = "gopls", root_dir = "/elsewhere" },
+})
+stop_calls = {}
+local got_topic = nil
+events.subscribe("core.lsp:reset", function(payload, _topic)
+  got_topic = payload
+end)
+lsp_reset.reset_for(tmp .. "/go-proj", { dry_run = true })
+vim.wait(20)
+ok("dry_run does NOT call vim.lsp.stop_client",
+  #stop_calls == 0, "stop_calls=" .. vim.inspect(stop_calls))
+ok("dry_run still publishes core.lsp:reset",
+  got_topic ~= nil and got_topic.dry_run == true,
+  vim.inspect(got_topic))
+
+-- Case G: real reset_for stops mismatched clients AND publishes.
+fake_clients({
+  { id = 17, name = "gopls", root_dir = "/elsewhere" },
+})
+stop_calls = {}
+got_topic = nil
+lsp_reset.reset_for(tmp .. "/go-proj")
+vim.wait(20)
+ok("reset_for stops the mismatched client", vim.tbl_contains(stop_calls, 17))
+ok("reset_for publishes payload with detected_stack",
+  got_topic ~= nil
+    and vim.tbl_contains(got_topic.detected_stack, "gopls"),
+  vim.inspect(got_topic))
+
+-- Restore real LSP API.
+vim.lsp.get_clients = orig_get_clients
+vim.lsp.stop_client = orig_stop
+lsp_reset._reset_for_tests()
+vim.fn.delete(tmp, "rf")
+end)()  -- close [42] IIFE so its locals don't count toward main function's 200 limit
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
