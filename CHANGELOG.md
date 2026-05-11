@@ -10,6 +10,38 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.2] — 2026-05-11 — winbar click router resolves panel via getmousepos
+
+Bug fix. `auto-core.ui.winbar.click()` resolved the panel by
+reading `w:auto_core_panel_name` of `nvim_get_current_win()`. Vim's
+clickable-statusline contract says clicking a winbar region moves
+focus to that window, but in practice the `@func@` callback often
+fires while `nvim_get_current_win()` still reflects the editor
+window the user was clicking from — the lookup fails, no router
+is called, the click silently no-ops. Users saw winbar clicks
+"work sometimes" because the timing was sensitive to mouse mode,
+terminal multiplexer, and pending redraws.
+
+### Fixed
+
+- `M.click()` now prefers `vim.fn.getmousepos().winid` (the window
+  directly UNDER the click) over `nvim_get_current_win()` for
+  panel resolution. Falls back to `nvim_get_current_win()` for
+  programmatic invocations (smoke tests / RPC probes) where no
+  mouse event fired. No API or topic changes; existing consumers
+  using `register_click_router` see the same surface — clicks
+  just actually arrive now.
+
+### Notes
+
+This unblocks the auto-finder winbar (sections `0:config` /
+`1:files` / `2:repos` clickable to focus). Auto-agents has its
+own `panel/winbar.lua` with a direct click handler so it was
+unaffected; the auto-core route is what auto-finder + future
+consumers use. A separate follow-up could migrate auto-agents
+onto the shared `auto-core.ui.winbar` for a single click path
+across the family — additive, not required for this fix.
+
 ## [v0.1.1] — 2026-05-11 — workspace/active/agent_status no longer persist
 
 Bug fix. The `core` namespace's `workspace_root`, `active_worktree`,

@@ -84,8 +84,8 @@ end
 ok("M.version is a semver string",
   type(core.version) == "string" and core.version:match("^%d+%.%d+%.%d+$") ~= nil,
   tostring(core.version))
-ok("M.version is 0.1.1 (session-scoped core keys patch)",
-  select(1, eq(core.version, "0.1.1")))
+ok("M.version is 0.1.2 (winbar click router uses getmousepos)",
+  select(1, eq(core.version, "0.1.2")))
 ok("M.api_version is 0.1 (events + state + ui + fs + git + tasks + log + health stable)",
   select(1, eq(core.api_version, "0.1")))
 ok("M.setup is a function", type(core.setup) == "function")

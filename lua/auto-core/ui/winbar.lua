@@ -53,18 +53,40 @@ end
 ---Click entry point — referenced from the winbar string itself
 ---via `v:lua.require'auto-core.ui.winbar'.click`. nvim invokes
 ---this with (minwid, clicks, button, mods); we only care about
----minwid (the section number) and route via the current window's
----panel name.
+---minwid (the section number).
+---
+---Panel resolution: prefer `vim.fn.getmousepos().winid` — the
+---window directly UNDER the mouse click — over
+---`nvim_get_current_win()`. Vim's clickable-statusline contract
+---says clicking moves focus to that window, but the exact
+---ordering relative to the `@func@` callback varies (mouse
+---setting, terminal multiplexer, redraw scheduling). In practice
+---the callback frequently runs while `nvim_get_current_win()`
+---still reflects the editor the user was in — and the click
+---silently no-ops. Using getmousepos pins resolution to the
+---click target regardless of focus state.
+---
+---Falls back to `nvim_get_current_win()` for programmatic calls
+---(smoke tests, RPC probes) where no mouse event has fired yet.
 ---@param minwid integer
 ---@param _clicks integer
 ---@param _button string
 ---@param _mods string
 function M.click(minwid, _clicks, _button, _mods)
-  -- Resolve the panel by the window-local marker on the current
-  -- window. Each auto-core panel stamps `w:auto_core_panel_name` on
-  -- open; ui.panel sets it.
-  local cur = vim.api.nvim_get_current_win()
-  local ok, name = pcall(vim.api.nvim_win_get_var, cur, "auto_core_panel_name")
+  local panel_winid
+  local ok_mp, mp = pcall(vim.fn.getmousepos)
+  if ok_mp and type(mp) == "table"
+      and type(mp.winid) == "number" and mp.winid > 0 then
+    panel_winid = mp.winid
+  else
+    panel_winid = vim.api.nvim_get_current_win()
+  end
+  -- Resolve the panel by the window-local marker stamped at panel
+  -- open. ui.panel sets `w:auto_core_panel_name` on the panel
+  -- window; consumers register their click router with the same
+  -- name via `register_click_router`.
+  local ok, name = pcall(vim.api.nvim_win_get_var, panel_winid,
+    "auto_core_panel_name")
   if not ok or type(name) ~= "string" then return end
   local handler = _click_routers[name]
   if handler then pcall(handler, minwid) end
