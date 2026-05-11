@@ -26,6 +26,6 @@
 ---@module 'auto-core.version'
 
 return {
-  version     = "0.1.3",
+  version     = "0.1.4",
   api_version = "0.1",
 }

@@ -10,6 +10,12 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.4] — 2026-05-11 — percentage-based widths for multi-float panes
+
+Feature. `ui.float.multi`'s `_compute_layout` now treats width values
+between 0 and 1 as percentages of the total inner width. Enables
+responsive layouts for multi-pane floats (like the worktree graph).
+
 ## [v0.1.3] — 2026-05-11 — debug.winlog probe + `:AutoCoreDebug winlog` command
 
 Additive patch-line release. Adds an opt-in window/buffer lifecycle

@@ -84,8 +84,8 @@ end
 ok("M.version is a semver string",
   type(core.version) == "string" and core.version:match("^%d+%.%d+%.%d+$") ~= nil,
   tostring(core.version))
-ok("M.version is 0.1.3 (debug subsystem + winlog probe)",
-  select(1, eq(core.version, "0.1.3")))
+ok("M.version is 0.1.4 (multi-float supports percentage widths)",
+  select(1, eq(core.version, "0.1.4")))
 ok("M.api_version is 0.1 (M.debug additive; events/state/ui/fs/git/tasks/log/health unchanged)",
   select(1, eq(core.api_version, "0.1")))
 ok("M.setup is a function", type(core.setup) == "function")
