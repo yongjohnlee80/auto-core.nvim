@@ -2248,6 +2248,36 @@ ok("middle-only has no left/preview/footer",
     and not m4:winid("footer"))
 m4:dispose()
 
+-- Percentage-based widths (Responsive)
+local m_perc = mfloat.new({
+  name  = "smoke_test_percentage",
+  outer = { width_pct = 0.8 }, -- 0.8 * 80 = 64
+  panes = {
+    left    = { width = 0.25 }, -- 0.25 * 62 (inner) = 15
+    middle  = { title = " middle " },
+    preview = { width = 0.5, min_middle = 0 },  -- 0.5 * 62 (inner) = 31
+    },
+  })
+  m_perc:open()
+  -- inner_w = math.floor(80 * 0.8) - 2 = 64 - 2 = 62
+  -- left_w = math.floor(62 * 0.25) = 15
+  -- gap1 = 1 (left/middle)
+  -- gap2 = 1 (middle/preview)
+  -- preview_w = math.floor(62 * 0.5) = 31
+  -- middle_w = 62 - 15 - 31 - 2 = 14
+
+local l_win = m_perc:winid("left")
+local m_win = m_perc:winid("middle")
+local p_win = m_perc:winid("preview")
+
+ok("percentage: left window width is 25% of inner",
+  vim.api.nvim_win_get_width(l_win) == 15, "got " .. vim.api.nvim_win_get_width(l_win))
+ok("percentage: preview window width is 50% of inner",
+  vim.api.nvim_win_get_width(p_win) == 31, "got " .. vim.api.nvim_win_get_width(p_win))
+ok("percentage: middle window width claims rest",
+  vim.api.nvim_win_get_width(m_win) == 14, "got " .. vim.api.nvim_win_get_width(m_win))
+m_perc:dispose()
+
 mfloat._reset_for_tests()
 end)()
 

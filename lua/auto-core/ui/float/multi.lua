@@ -142,13 +142,20 @@ function Float:_compute_layout()
   local has_middle  = panes.middle  ~= nil
   local has_preview = panes.preview ~= nil
 
-  local left_w    = has_left and (panes.left.width or 28) or 0
+  local function resolve_w(w, total)
+    if not w then return nil end
+    if w > 0 and w < 1 then return math.floor(total * w) end
+    return w
+  end
+
+  local left_w = has_left and (resolve_w(panes.left.width, inner_w) or 28) or 0
   local preview_w = 0
   if has_preview and has_middle then
     local pv = panes.preview
     local available =
       inner_w - left_w - (pv.min_middle or 40) - (has_left and 1 or 0) - 1
-    preview_w = math.min(pv.width or 90, math.max(0, available))
+    local target_pv_w = resolve_w(pv.width, inner_w) or 90
+    preview_w = math.min(target_pv_w, math.max(0, available))
     if preview_w < (pv.min_width or 0) then preview_w = 0 end
   end
 
