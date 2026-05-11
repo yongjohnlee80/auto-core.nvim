@@ -10,6 +10,56 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.1] — 2026-05-11 — workspace/active/agent_status no longer persist
+
+Bug fix. The `core` namespace's `workspace_root`, `active_worktree`,
+and `agent_status` keys were persisted to `~/.local/state/nvim/auto-core/core.json`
+under `persist = "json"`. Two failure modes followed:
+
+1. A `workspace_root` written during one session (e.g. `~/.config/nvim`
+   while iterating on the plugin) survived restart. On every subsequent
+   launch `worktree.nvim`'s `_ensure_root_now()` saw a non-nil
+   `get_workspace_root()` and skipped its launch-cwd capture — so the
+   workspace stayed pinned to the stale value forever, breaking
+   `<leader>gA` / `<leader>gW` / repo discovery / the entire worktree
+   feature surface regardless of where the user actually launched nvim.
+2. Concurrent nvim instances clobbered each other's values through the
+   shared `core.json` file (last-writer-wins).
+
+### Changed
+
+- `auto-core.git.worktree.{set,get}_workspace_root` and
+  `{set,get}_active` now hold their value in module-local Lua state,
+  per nvim process. Function signatures, return shapes, and the
+  `core.workspace_root:changed` / `core.active_worktree:changed`
+  events are unchanged.
+- `auto-core.tasks.status.{set,get,list,clear}` likewise hold the
+  agent map in module-local memory. The `agent.status:changed` event
+  is unchanged.
+- `core.json` no longer contains `workspace_root`, `active_worktree`,
+  or `agent_status`. Other keys in the `core` namespace
+  (`files.show_hidden`, `files.show_dotfiles`) continue to persist
+  unchanged — those are global user preferences, not session state.
+
+### Notes for consumers
+
+No source-level migration is required. Subscribers of the
+`core.workspace_root:changed` / `core.active_worktree:changed` /
+`agent.status:changed` events keep working. Consumers that read
+through `auto-core.git.worktree.get_workspace_root()` /
+`auto-core.tasks.status.get()` also keep working.
+
+Subscribers of the **state-namespace** flavor of these topics
+(`state.core:workspace_root:changed`, `state.core:active_worktree:changed`,
+`state.core:agent_status:changed`) no longer fire — but no consumer in
+the AutoVim family used those (the explicit topics above were always
+the canonical signal).
+
+If your `~/.local/state/nvim/auto-core/core.json` still contains the
+old keys, they are harmless dead bytes — the new code never reads
+them. Auto-core overwrites the file with only the live keys on the
+next `files.*` toggle.
+
 ## [v0.1.0] — 2026-05-11 — solid beta
 
 First release under the additive-only stability contract. Bundles all

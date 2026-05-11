@@ -7,8 +7,9 @@
 ---  - porcelain parser
 ---  - per-repo + workspace-wide worktree listing
 ---  - branch listing / lookup helpers
----  - workspace memory (active worktree + workspace root) backed by
----    `auto-core.state` so it survives nvim restarts
+---  - session-scoped workspace memory (active worktree + workspace
+---    root) held in module-local Lua state — per-nvim-process,
+---    NOT persisted to disk (see comment on `_workspace_root`)
 ---  - canonical events: `worktree:added`, `worktree:removed`,
 ---    `core.active_worktree:changed`, `core.workspace_root:changed`
 ---
@@ -40,34 +41,36 @@
 ---  M.set_workspace_root(path)             -- → publishes core.workspace_root:changed
 ---  M.get_workspace_root()                 → string?
 ---
----State persistence:
----  Namespace `core` (json backend) carries:
----    active_worktree: string?    -- the wt the user is currently inside
----    workspace_root:  string?    -- the parent dir of the active worktree
----    cwd:             string?    -- last-seen cwd (unrelated, by core itself)
+---Persistence:
+---  Neither `active_worktree` nor `workspace_root` is persisted. Both
+---  live in module-local Lua state — one mirror per nvim process.
+---  Restart re-derives: `workspace_root` is captured at session start
+---  by `worktree.nvim`'s `plugin/worktree.lua`, `active_worktree` is
+---  refreshed by the next `worktree:switched` event after launch.
 ---@module 'auto-core.git.worktree'
 
 local events    = require("auto-core.events")
-local state_mod = require("auto-core.state")
 local path_mod  = require("auto-core.fs.path")
 
 local M = {}
 
--- Lazy-init the core state namespace. We can't claim it at module
--- load because state_mod.namespace runs file IO; deferring keeps
--- `require` cheap. claim_state() is idempotent.
-local _ns = nil
-local function claim_state()
-  if _ns then return _ns end
-  _ns = state_mod.namespace("core", {
-    defaults = {
-      active_worktree = nil,
-      workspace_root  = nil,
-    },
-    persist = "json",
-  })
-  return _ns
-end
+-- Session-scoped storage. workspace_root + active_worktree are
+-- per-nvim-process state, not persisted to disk. The prior
+-- persist="json" round-trip caused two problems once consumers
+-- started routing through the canonical values:
+--   1. A persisted workspace_root from a prior session (e.g. an
+--      ~/.config/nvim run during plugin development) survived every
+--      subsequent launch — get_workspace_root() returned the stale
+--      value, so plugin/worktree.lua's _ensure_root_now() skipped
+--      its launch-cwd capture and the workspace never updated.
+--   2. Concurrent nvim instances clobbered each other's values
+--      through the shared core.json file (last-writer-wins).
+-- Each instance now keeps its own in-memory mirror; values are
+-- re-derived per session (workspace_root from plugin/worktree.lua's
+-- VimEnter / vim_did_enter==1 capture, active_worktree from the
+-- next worktree:switched event).
+local _workspace_root = nil
+local _active_worktree = nil
 
 -- ── pure data layer (verbatim port from worktree.nvim/git.lua) ──
 
@@ -323,21 +326,20 @@ function M.repo_container(common_dir)
   return vim.fn.fnamemodify(common_dir, ":h")
 end
 
--- ── workspace memory (state-backed, event-publishing) ────────
+-- ── workspace memory (session-scoped, event-publishing) ───────
 
----Set the currently-active worktree path. Persists to state, then
----publishes `core.active_worktree:changed` with `{ from, to, cwd }`.
+---Set the currently-active worktree path. In-memory only; publishes
+---`core.active_worktree:changed` with `{ from, to, cwd }`.
 ---@param path string?
 function M.set_active(path)
-  local ns = claim_state()
-  local from = ns:get("active_worktree")
+  local from = _active_worktree
   -- Don't use `(cond) and nil or X` — Lua's ternary breaks when the
   -- "true" branch is nil (a falsy value); it falls through to X. Use
   -- explicit if/else instead.
   local to = nil
   if path ~= nil then to = path_mod.normalize(path) end
   if from == to then return end
-  ns:set("active_worktree", to)
+  _active_worktree = to
   events.publish("core.active_worktree:changed", {
     from = from,
     to   = to,
@@ -348,27 +350,26 @@ end
 ---Currently-active worktree path (last value passed to set_active).
 ---@return string?
 function M.get_active()
-  return claim_state():get("active_worktree")
+  return _active_worktree
 end
 
 ---Set the workspace root (the directory whose immediate children are
----worktree-bearing repos). Persists, publishes
+---worktree-bearing repos). In-memory only; publishes
 ---`core.workspace_root:changed` with `{ from, to }`.
 ---@param path string?
 function M.set_workspace_root(path)
-  local ns = claim_state()
-  local from = ns:get("workspace_root")
+  local from = _workspace_root
   local to = nil
   if path ~= nil then to = path_mod.normalize(path) end
   if from == to then return end
-  ns:set("workspace_root", to)
+  _workspace_root = to
   events.publish("core.workspace_root:changed", { from = from, to = to })
 end
 
 ---Currently-set workspace root.
 ---@return string?
 function M.get_workspace_root()
-  return claim_state():get("workspace_root")
+  return _workspace_root
 end
 
 -- ── destroy: remove a linked worktree (+ optional branch delete) ─
@@ -454,13 +455,10 @@ function M.destroy(repo, wt, opts, on_done)
   end))
 end
 
----Test-only — clears the state namespace so smoke tests start clean.
+---Test-only — clears session-scoped storage so smoke tests start clean.
 function M._reset_for_tests()
-  if _ns then
-    pcall(function() _ns:set("active_worktree", nil) end)
-    pcall(function() _ns:set("workspace_root", nil) end)
-  end
-  _ns = nil
+  _workspace_root = nil
+  _active_worktree = nil
 end
 
 return M
