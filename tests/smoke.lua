@@ -84,9 +84,9 @@ end
 ok("M.version is a semver string",
   type(core.version) == "string" and core.version:match("^%d+%.%d+%.%d+$") ~= nil,
   tostring(core.version))
-ok("M.version is 0.1.2 (winbar click router uses getmousepos)",
-  select(1, eq(core.version, "0.1.2")))
-ok("M.api_version is 0.1 (events + state + ui + fs + git + tasks + log + health stable)",
+ok("M.version is 0.1.3 (debug subsystem + winlog probe)",
+  select(1, eq(core.version, "0.1.3")))
+ok("M.api_version is 0.1 (M.debug additive; events/state/ui/fs/git/tasks/log/health unchanged)",
   select(1, eq(core.api_version, "0.1")))
 ok("M.setup is a function", type(core.setup) == "function")
 ok("M.config table present",
@@ -2555,6 +2555,131 @@ ok("set_show_hidden coerces truthy non-bool to false (strict ==)",
   "set_show_hidden requires literal `true`; non-true → false")
 
 files._reset_for_tests()
+end)()
+
+-- ─────────────────────── 47. debug.winlog — opt-in window/buffer probe ─────────────────────────
+print("\n[47] debug.winlog — start/stop/status/tail/clear contract")
+;(function()
+local winlog = require("auto-core").debug.winlog
+
+-- Start clean: route the log to a temp path so we don't trample the
+-- user's real cache file when the smoke runs locally.
+local tmp = vim.fn.tempname() .. "-winlog.log"
+winlog.stop()                                       -- defensive: prior run residue
+winlog.start({ log_path = tmp, poll_interval_ms = 60 })
+
+ok("is_running() true after start()", winlog.is_running() == true)
+
+local s = winlog.status()
+ok("status.running mirrors is_running()", s.running == true)
+ok("status.log_path matches the opt we passed", s.log_path == tmp)
+ok("status.poll_interval_ms honors opt (clamped to >=50)",
+  s.poll_interval_ms == 60)
+ok("status.events is non-empty list",
+  type(s.events) == "table" and #s.events > 0)
+ok("path() == status.log_path", winlog.path() == tmp)
+-- start() writes a banner + INITIAL line synchronously, so the
+-- count is non-zero immediately after start.
+ok("status.event_count > 0 immediately after start() (banner written)",
+  s.event_count > 0,
+  "got " .. tostring(s.event_count))
+
+-- Banner is on disk synchronously. Verify before any window activity
+-- so the assertion targets the start path, not the poll/autocmd path.
+local saw_banner = false
+for _, line in ipairs(winlog.tail(40)) do
+  if line:find("winlog started", 1, true) then saw_banner = true; break end
+end
+ok("tail() contains the start banner", saw_banner)
+
+-- Provoke a window event: open + close a scratch split. The poll
+-- detector and the WinNew autocmd both fire — we assert event_count
+-- moves and tail() reflects the change.
+local count_before = winlog.status().event_count
+vim.cmd("botright new")
+local probe_win = vim.api.nvim_get_current_win()
+local probe_buf = vim.api.nvim_get_current_buf()
+vim.bo[probe_buf].bufhidden = "wipe"
+vim.bo[probe_buf].buftype   = "nofile"
+-- Wait for one poll tick + the autocmd-driven append. The 60ms poll
+-- plus jitter is plenty for the writes to land.
+vim.wait(250, function()
+  return winlog.status().event_count > count_before
+end, 20)
+ok("event_count rises after a real WinNew",
+  winlog.status().event_count > count_before,
+  "before=" .. count_before .. " after=" .. winlog.status().event_count)
+
+-- Close the probe window so we don't leak it past the test.
+pcall(vim.api.nvim_win_close, probe_win, true)
+vim.wait(120)
+
+local tail = winlog.tail(20)
+ok("tail() returns at least one line after activity",
+  type(tail) == "table" and #tail > 0)
+
+-- Stop and confirm running state flips. tail() still reads from the
+-- file after stop — it's a pure file read.
+winlog.stop()
+ok("is_running() false after stop()", winlog.is_running() == false)
+ok("status.running mirrors is_running()", winlog.status().running == false)
+
+-- clear() truncates AND resets the counter. Assert in that order
+-- (counter check first, then file check) to mirror the doc contract.
+winlog.clear()
+ok("event_count zero after clear()", winlog.status().event_count == 0)
+ok("tail() empty after clear()", #winlog.tail(40) == 0)
+
+-- toggle() round-trips: off → on → off. start() will re-write the
+-- banner so event_count rises again; the assertion targets the
+-- running-state flip, not the count.
+ok("toggle() turns it back on",  winlog.toggle({ log_path = tmp }) == true)
+ok("toggle() turns it back off", winlog.toggle() == false)
+
+-- Idempotent stop — second stop is a no-op, doesn't error.
+local ok_stop2 = pcall(winlog.stop)
+ok("stop() is idempotent (second call doesn't error)", ok_stop2)
+
+-- Out-of-range poll interval clamps to the documented [50, 5000].
+winlog.start({ log_path = tmp, poll_interval_ms = 1 })
+ok("poll_interval_ms clamps low value to 50",
+  winlog.status().poll_interval_ms == 50)
+winlog.start({ log_path = tmp, poll_interval_ms = 1e9 })
+ok("poll_interval_ms clamps high value to 5000",
+  winlog.status().poll_interval_ms == 5000)
+winlog.stop()
+
+-- panel_filter flag is honored — start with it on and verify status
+-- mirrors it. (We can't easily exercise the filter outcome headlessly
+-- without booting a panel; assert the option surface.)
+winlog.start({ log_path = tmp, panel_filter = true })
+ok("panel_filter honored when opt is true",
+  winlog.status().panel_filter == true)
+winlog.start({ log_path = tmp, panel_filter = false })
+ok("panel_filter honored when opt is false",
+  winlog.status().panel_filter == false)
+winlog.stop()
+
+-- Cleanup the temp log file.
+pcall(os.remove, tmp)
+end)()
+
+-- ─────────────────────── 48. version + api_version reflect v0.1.3 ─────────────────────────
+print("\n[48] version bump: v0.1.3 (additive patch line)")
+;(function()
+local v = require("auto-core.version")
+ok("version is v0.1.3 (debug subsystem added)", v.version == "0.1.3")
+ok("api_version is 0.1 (additive, no break to existing surface)", v.api_version == "0.1")
+-- :h api_version semver gate consumers will use.
+local core = require("auto-core")
+ok("M.debug is a table on the public surface",
+  type(core.debug) == "table")
+ok("M.debug.winlog is a table on the public surface",
+  type(core.debug) == "table" and type(core.debug.winlog) == "table")
+ok("M.debug.winlog.start is a function",
+  type(core.debug.winlog.start) == "function")
+ok("M.debug.winlog.stop is a function",
+  type(core.debug.winlog.stop) == "function")
 end)()
 
 -- ─────────────────────── summary ─────────────────────────

@@ -22,6 +22,9 @@
 ---  M.tasks         agent tasks       (Phase 5)
 ---  M.log           structured logger (Phase 7)
 ---  M.health        :checkhealth      (Phase 7)
+---  M.debug         diagnostic probes (v0.1.3 — opt-in winlog probe
+---                  for panel singleton bugs; see `:AutoCoreDebug
+---                  winlog`)
 ---
 ---Hard rule from ADR 0006: this module never `require`s a family
 ---plugin (no `require("auto-agents")`, etc.). Dependency direction
@@ -80,6 +83,7 @@ M.log    = require("auto-core.log")
 M.health = require("auto-core.health")
 M.lsp    = require("auto-core.lsp")
 M.files  = require("auto-core.files")
+M.debug  = require("auto-core.debug")
 
 ---Initialize auto-core. Idempotent — re-calling re-applies opts and
 ---propagates the relevant subset to each subsystem.

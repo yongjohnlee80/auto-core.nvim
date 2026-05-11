@@ -10,6 +10,50 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.3] — 2026-05-11 — debug.winlog probe + `:AutoCoreDebug winlog` command
+
+Additive patch-line release. Adds an opt-in window/buffer lifecycle
+logger for diagnosing panel-singleton violations, stray panel-buffer
+hijacks, and splits made under `eventignore = "all"` / `noautocmd =
+true` that bypass the `auto-core.ui.panel` leak guard. Productized
+version of the ad-hoc probe used to track down the duplicate-auto-
+agents-panel bug seen on terminal resize.
+
+### Added
+
+- `M.debug` namespace (Lua surface). First subsystem: `M.debug.winlog`.
+- `M.debug.winlog.start(opts?)` / `stop()` / `toggle(opts?)` /
+  `is_running()` / `status()` / `tail(n?)` / `clear()` / `path()`.
+- `:AutoCoreDebug winlog [on|off|toggle|status|tail [N]|clear|path]`
+  user command. Bare `:AutoCoreDebug winlog` toggles. `tail` opens a
+  scratch buffer with the last N log lines.
+- Probe pairs an autocmd set (`WinNew`, `WinClosed`, `BufWinEnter`,
+  `WinEnter`, `VimResized`, `CmdlineLeave`) with a uv-timer poll
+  (default 200ms, clamped to [50ms, 5000ms]) so windows created with
+  `noautocmd = true` — invisible to the autocmd path — still get
+  logged with full info: split/relative discriminator, panel marker,
+  buffer-owner stamp, ft, buftype, dimensions, and the post-creation
+  layout snapshot.
+- Default log path `vim.fn.stdpath("cache")/auto-core-winlog.log` —
+  per-machine, durable across nvim restarts, overridable via
+  `opts.log_path`. Suitable for cross-machine workflows where you
+  reproduce on one box and analyze on another.
+- `opts.panel_filter` (default false): when true, the `BufWinEnter`
+  / `WinEnter` handlers only log events involving buffers stamped
+  with `b:auto_core_panel_owner` (set by `Panel:_stamp_buffer`).
+  Quieter when you only care about panel-hijack arrivals.
+
+### Version metadata
+
+- `version` → `0.1.3` (additive patch line, consistent with v0.1.x
+  cadence: every v0.1.Z so far has been additive, including the prior
+  fixes at v0.1.1 and v0.1.2).
+- `api_version` unchanged at `0.1`. New surface is feature-detected
+  via `type(require("auto-core").debug) == "table"` (or
+  `type(require("auto-core").debug.winlog) == "table"` for the probe
+  specifically) — auto-core stays on the additive-only minor-bump
+  rule per [[auto-core-maintenance]], so the soft branch is safe.
+
 ## [v0.1.2] — 2026-05-11 — winbar click router resolves panel via getmousepos
 
 Bug fix. `auto-core.ui.winbar.click()` resolved the panel by
