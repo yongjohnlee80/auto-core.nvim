@@ -84,8 +84,8 @@ end
 ok("M.version is a semver string",
   type(core.version) == "string" and core.version:match("^%d+%.%d+%.%d+$") ~= nil,
   tostring(core.version))
-ok("M.version is 0.1.4 (multi-float supports percentage widths)",
-  select(1, eq(core.version, "0.1.4")))
+ok("M.version is 0.1.5 (mailbox feature in-flight on this branch; tag stays at last shipped)",
+  select(1, eq(core.version, "0.1.5")))
 ok("M.api_version is 0.1 (M.debug additive; events/state/ui/fs/git/tasks/log/health unchanged)",
   select(1, eq(core.api_version, "0.1")))
 ok("M.setup is a function", type(core.setup) == "function")
@@ -2694,11 +2694,12 @@ winlog.stop()
 pcall(os.remove, tmp)
 end)()
 
--- ─────────────────────── 48. version + api_version reflect v0.1.3 ─────────────────────────
-print("\n[48] version bump: v0.1.3 (additive patch line)")
+-- ─────────────────────── 48. version + api_version (mailbox feature in-flight, stays at v0.1.5) ─────
+print("\n[48] version pinned to v0.1.5 — feature in-flight; tag bump deferred until mailbox feature complete")
 ;(function()
 local v = require("auto-core.version")
-ok("version is v0.1.3 (debug subsystem added)", v.version == "0.1.3")
+ok("version stays at v0.1.5 (next tag deferred until mailbox feature complete)",
+  v.version == "0.1.5")
 ok("api_version is 0.1 (additive, no break to existing surface)", v.api_version == "0.1")
 -- :h api_version semver gate consumers will use.
 local core = require("auto-core")
@@ -2710,6 +2711,1361 @@ ok("M.debug.winlog.start is a function",
   type(core.debug.winlog.start) == "function")
 ok("M.debug.winlog.stop is a function",
   type(core.debug.winlog.stop) == "function")
+ok("M.mailbox is a table on the public surface (ADR 0013 Phase 1)",
+  type(core.mailbox) == "table")
+ok("M.mailbox surface includes send/claim/complete/start/stop/refresh/scan_now",
+  type(core.mailbox.send) == "function"
+    and type(core.mailbox.claim) == "function"
+    and type(core.mailbox.complete) == "function"
+    and type(core.mailbox.start) == "function"
+    and type(core.mailbox.stop) == "function"
+    and type(core.mailbox.refresh) == "function"
+    and type(core.mailbox.scan_now) == "function")
+ok("M.mailbox.commands is a table",
+  type(core.mailbox.commands) == "table"
+    and type(core.mailbox.commands.register) == "function")
+ok("M.mailbox.router is a table",
+  type(core.mailbox.router) == "table"
+    and type(core.mailbox.router.start) == "function")
+ok("M.mailbox.bootstrap is a table",
+  type(core.mailbox.bootstrap) == "table"
+    and type(core.mailbox.bootstrap.render) == "function")
+ok("legacy M.mailbox.consume is gone (router replaces per-mailbox consumers)",
+  core.mailbox.consume == nil)
+end)()
+
+-- ─────────────────────── 49. mailbox subsystem (ADR 0013 Phase 1, revised) ─────────
+print("\n[49] mailbox: per-mailbox roots, bootstrap upsert, central router, outbox delivery, wake, commands")
+;(function()
+local mailbox  = require("auto-core.mailbox")
+local mb_path  = mailbox.path
+local message  = mailbox.message
+local registry = mailbox.registry
+local transp   = mailbox.transport
+local commands = mailbox.commands
+local router   = mailbox.router
+local boot     = mailbox.bootstrap
+local events_m = require("auto-core.events")
+
+-- Hermetic temp root so the test never touches the real durable
+-- mailbox root. configure(nil) at teardown restores defaults.
+local tmp_root = vim.fn.tempname() .. "-mailbox-test"
+vim.fn.mkdir(tmp_root, "p")
+
+-- Capture any AUTO_AGENTS_* env overrides up-front so the
+-- "default points at the durable global location" assertions
+-- aren't fooled by the surrounding shell environment.
+local saved_env = {
+  AUTO_AGENTS_MAILBOX_ROOT = vim.env.AUTO_AGENTS_MAILBOX_ROOT,
+  AUTO_AGENTS_CONFIG_DIR   = vim.env.AUTO_AGENTS_CONFIG_DIR,
+  AUTO_AGENTS_KB_ROOT      = vim.env.AUTO_AGENTS_KB_ROOT,
+}
+vim.env.AUTO_AGENTS_MAILBOX_ROOT = nil
+vim.env.AUTO_AGENTS_CONFIG_DIR   = nil
+vim.env.AUTO_AGENTS_KB_ROOT      = nil
+
+-- ── 49a. host-fallback root resolution (used for nvim/user) ─
+mailbox._reset_for_tests()
+events_m._reset_for_tests()
+ok("host_fallback_root is durable global location (.auto-agents-config/mailbox)",
+  mailbox.host_fallback_root():find("%.auto%-agents%-config/mailbox$") ~= nil,
+  "got: " .. mailbox.host_fallback_root())
+ok("host_fallback_root does NOT include any worktree path segment",
+  not mailbox.host_fallback_root():find(tmp_root, 1, true),
+  "got: " .. mailbox.host_fallback_root())
+
+vim.env.AUTO_AGENTS_MAILBOX_ROOT = tmp_root .. "/env-mb"
+mailbox._reset_for_tests()
+ok("AUTO_AGENTS_MAILBOX_ROOT env var takes precedence for host fallback",
+  mailbox.host_fallback_root() == tmp_root .. "/env-mb",
+  "got: " .. mailbox.host_fallback_root())
+vim.env.AUTO_AGENTS_MAILBOX_ROOT = nil
+
+vim.env.AUTO_AGENTS_CONFIG_DIR = tmp_root .. "/cfg"
+mailbox._reset_for_tests()
+ok("AUTO_AGENTS_CONFIG_DIR resolves to <cfg>/mailbox",
+  mailbox.host_fallback_root() == tmp_root .. "/cfg/mailbox",
+  "got: " .. mailbox.host_fallback_root())
+vim.env.AUTO_AGENTS_CONFIG_DIR = nil
+
+vim.env.AUTO_AGENTS_KB_ROOT = tmp_root .. "/cfg2/kb"
+mailbox._reset_for_tests()
+ok("AUTO_AGENTS_KB_ROOT derives <dirname>/mailbox",
+  mailbox.host_fallback_root() == tmp_root .. "/cfg2/mailbox",
+  "got: " .. mailbox.host_fallback_root())
+vim.env.AUTO_AGENTS_KB_ROOT = nil
+
+-- setup({mailbox = {root = ...}}) override beats env.
+-- Fixture: reflect the actual agent-roster tool backing:
+--   agent:lector  → codex-backed
+--   agent:jarvis  → claude-backed (Claude Code; this very assistant)
+--   agent:gemini  → gemini-backed
+-- The architecture treats roots as opaque per-mailbox config dirs;
+-- the test verifies that multiple distinct roots coexist and that
+-- the central router collapses by unique root regardless of name.
+local active_root      = tmp_root .. "/active"
+local codex_like_root  = tmp_root .. "/.codex/mailbox"
+local claude_like_root = tmp_root .. "/.claude/mailbox"
+local gemini_like_root = tmp_root .. "/.gemini/mailbox"
+require("auto-core").setup({ mailbox = { root = active_root } })
+ok("setup({mailbox={root=...}}) override applies to host fallback",
+  mailbox.host_fallback_root() == active_root,
+  "got: " .. mailbox.host_fallback_root())
+
+-- ── 49a2. tool_root resolver — per-tool agent mailbox layout ──
+-- The default agent-mailbox layout is the tool's own config dir
+-- under $HOME, not the host coordination dir. host_fallback_root
+-- is reserved for nvim/user.
+do
+  local saved_home = vim.env.HOME
+  vim.env.HOME = "/home/test"
+  ok("tool_root('claude') resolves to ~/.claude/mailbox",
+    mb_path.tool_root("claude") == "/home/test/.claude/mailbox",
+    "got: " .. tostring(mb_path.tool_root("claude")))
+  ok("tool_root('gemini') resolves to ~/.gemini/mailbox",
+    mb_path.tool_root("gemini") == "/home/test/.gemini/mailbox")
+  ok("tool_root('codex') resolves to ~/.codex/mailbox",
+    mb_path.tool_root("codex") == "/home/test/.codex/mailbox")
+  ok("tool_root('unknown') returns nil",
+    mb_path.tool_root("unknown") == nil)
+  ok("tool_root('') returns nil",
+    mb_path.tool_root("") == nil)
+  -- Extensibility: a new tool can join by mutating TOOL_DIRS.
+  mb_path.TOOL_DIRS["amp"] = ".amp/mailbox"
+  ok("TOOL_DIRS is extensible for new tools",
+    mb_path.tool_root("amp") == "/home/test/.amp/mailbox")
+  mb_path.TOOL_DIRS["amp"] = nil
+  vim.env.HOME = saved_home
+end
+
+-- Demonstrate the recommended call shape: register an agent
+-- mailbox with root = path.tool_root('codex'). The fact that
+-- a host coordination root exists doesn't affect agent registration.
+do
+  local probe_root = mb_path.tool_root("codex")
+  ok("an agent mailbox registered with tool_root('codex') lives under ~/.codex/mailbox",
+    type(probe_root) == "string"
+      and probe_root:find("%.codex/mailbox$") ~= nil,
+    "got: " .. tostring(probe_root))
+end
+
+-- ── 49b. id validation ─────────────────────────────────────
+ok("validate_id accepts 'user'", (mb_path.validate_id("user")))
+ok("validate_id accepts 'agent:lector'", (mb_path.validate_id("agent:lector")))
+ok("validate_id rejects empty string",
+  not mb_path.validate_id(""))
+ok("validate_id rejects path traversal '../boom'",
+  not mb_path.validate_id("../boom"))
+ok("validate_id rejects slash 'a/b'",
+  not mb_path.validate_id("a/b"))
+ok("validate_id rejects leading dot '.hidden'",
+  not mb_path.validate_id(".hidden"))
+
+-- ── 49c. registration uses per-mailbox roots + upserts bootstrap doc ──
+local registered_payloads = {}
+local sub = events_m.subscribe("core.mailbox:registered", function(p)
+  registered_payloads[#registered_payloads + 1] = p
+end)
+
+-- Codex-backed agent (Lector) — uses Codex's tool config root.
+local lector_rec = mailbox.register("agent:lector", {
+  root = codex_like_root,
+  wake = { command = "send_slot", args = { slot = "lector" } },
+})
+ok("register returns record with per-mailbox root + dir + subs + wake",
+  type(lector_rec) == "table"
+    and lector_rec.id == "agent:lector"
+    and lector_rec.root == codex_like_root
+    and lector_rec.dir == codex_like_root .. "/agent:lector"
+    and type(lector_rec.subs) == "table"
+    and type(lector_rec.wake) == "table"
+    and lector_rec.wake.command == "send_slot")
+ok("lector's mailbox dir lives under Codex's config root (~/.codex/mailbox/agent:lector)",
+  lector_rec.dir == codex_like_root .. "/agent:lector",
+  "got: " .. lector_rec.dir)
+ok("inbox/outbox/processing/archive/responses all exist on disk",
+  vim.fn.isdirectory(lector_rec.subs.inbox)      == 1
+    and vim.fn.isdirectory(lector_rec.subs.outbox)     == 1
+    and vim.fn.isdirectory(lector_rec.subs.processing) == 1
+    and vim.fn.isdirectory(lector_rec.subs.archive)    == 1
+    and vim.fn.isdirectory(lector_rec.subs.responses)  == 1)
+
+-- Claude-backed agent (Jarvis) — separate tool, separate root.
+-- A second claude-backed agent would share this root, subdivided
+-- by id (~/.claude/mailbox/agent:jarvis/, ~/.claude/mailbox/agent:hephaestus/,
+-- etc) so the central router opens just ONE watcher on
+-- ~/.claude/mailbox/ regardless of how many Claude agents exist.
+local jarvis_rec = mailbox.register("agent:jarvis", {
+  root = claude_like_root,
+  wake = { command = "send_slot", args = { slot = "jarvis" } },
+})
+ok("claude-backed agent uses Claude's tool root",
+  jarvis_rec.root == claude_like_root
+    and jarvis_rec.dir == claude_like_root .. "/agent:jarvis",
+  "got: " .. jarvis_rec.dir)
+
+-- Add a second claude-backed agent to exercise the
+-- multi-agent-per-tool-root case. Both share ~/.claude/mailbox/,
+-- subdivided by id, and the router opens ONE watcher on the root.
+local hephaestus_rec = mailbox.register("agent:hephaestus", {
+  root = claude_like_root,
+  wake = { command = "send_slot", args = { slot = "hephaestus" } },
+})
+ok("multiple claude-backed agents share the root, subdivided by id",
+  hephaestus_rec.root == claude_like_root
+    and hephaestus_rec.dir == claude_like_root .. "/agent:hephaestus"
+    and jarvis_rec.root == hephaestus_rec.root,
+  "jarvis.dir=" .. jarvis_rec.dir
+    .. " hephaestus.dir=" .. hephaestus_rec.dir)
+
+-- Gemini-backed agent under its own tool root.
+local gemini_rec = mailbox.register("agent:gemini", {
+  root = gemini_like_root,
+  wake = { command = "send_slot", args = { slot = "gemini" } },
+})
+ok("gemini-backed agent uses its own tool root",
+  gemini_rec.dir == gemini_like_root .. "/agent:gemini")
+
+-- Host-side mailbox with no explicit root falls back.
+local nvim_rec = mailbox.register("nvim")
+ok("host-side 'nvim' mailbox falls back to host fallback root",
+  nvim_rec.root == active_root
+    and nvim_rec.dir == active_root .. "/nvim")
+
+ok("core.mailbox:registered fired for every register call",
+  #registered_payloads == 5)
+ok("first registered payload carries first_time=true",
+  registered_payloads[1].first_time == true)
+ok("registered payload includes bootstrap_path + bootstrap_revision",
+  type(registered_payloads[1].bootstrap_path)     == "string"
+    and type(registered_payloads[1].bootstrap_revision) == "string"
+    and #registered_payloads[1].bootstrap_revision >= 16)
+
+-- registry.list reflects what we've registered.
+ok("registry.list reports all five mailboxes",
+  (function()
+    local set = {}
+    for _, id in ipairs(registry.list()) do set[id] = true end
+    return set["agent:lector"] and set["agent:jarvis"]
+       and set["agent:hephaestus"] and set["agent:gemini"]
+       and set["nvim"]
+  end)())
+
+-- unique_roots collapses claude+claude → one entry.
+ok("registry.unique_roots collapses shared roots (jarvis + hephaestus on claude → one entry)",
+  (function()
+    local roots = registry.unique_roots()
+    -- expect 4 unique roots: codex (lector), claude (jarvis+hephaestus),
+    -- gemini, host-fallback (nvim).
+    return #roots == 4
+  end)(),
+  "got: " .. vim.inspect(registry.unique_roots()))
+
+events_m.unsubscribe(sub)
+
+-- ── 49c2. bootstrap-mailbox.md upsert + revision stamping ──
+local boot_path = lector_rec.bootstrap.path
+ok("bootstrap-mailbox.md written to <mailbox-dir>/bootstrap-mailbox.md",
+  boot_path == lector_rec.dir .. "/bootstrap-mailbox.md"
+    and vim.fn.filereadable(boot_path) == 1)
+
+local boot_text = table.concat(vim.fn.readfile(boot_path), "\n")
+ok("bootstrap doc body mentions the agent id",
+  boot_text:find("agent:lector", 1, true) ~= nil)
+ok("bootstrap doc frontmatter has revision field",
+  boot_text:find("revision:") ~= nil)
+ok("bootstrap doc embeds the wake summary",
+  boot_text:find("send_slot", 1, true) ~= nil)
+ok("bootstrap doc carries the audit instructions",
+  boot_text:find("bootstrap audit protocol") ~= nil)
+ok("bootstrap doc documents Codex writable_roots setup",
+  boot_text:find("sandbox_workspace_write", 1, true) ~= nil
+    and boot_text:find("writable_roots", 1, true) ~= nil
+    and boot_text:find("/home/<user>/.codex/mailbox/<agent-id>", 1, true) ~= nil)
+
+-- Revision is content-derived: re-render with the same inputs
+-- yields the SAME revision (despite a different upserted_at).
+local _, rev_a = boot.render({ id = "agent:lector", dir = lector_rec.dir,
+  wake = lector_rec.wake })
+local _, rev_b = boot.render({ id = "agent:lector", dir = lector_rec.dir,
+  wake = lector_rec.wake })
+ok("render with identical inputs → identical revision",
+  rev_a == rev_b, "a=" .. tostring(rev_a) .. " b=" .. tostring(rev_b))
+-- Different wake command → different revision (real protocol change).
+local _, rev_c = boot.render({ id = "agent:lector", dir = lector_rec.dir,
+  wake = { command = "different_command" } })
+ok("render with different inputs → different revision",
+  rev_a ~= rev_c)
+
+-- Re-register upserts the doc (rewrite on every register). Stay on
+-- the same root so boot_path is still valid.
+local first_mtime = vim.fn.getftime(boot_path)
+vim.wait(1100)  -- coarse-grained second-resolution mtime
+mailbox.register("agent:lector", {
+  root = codex_like_root,
+  wake = { command = "send_slot", args = { slot = "lector" } },
+})
+ok("re-register upserts the bootstrap doc (mtime advances)",
+  vim.fn.getftime(boot_path) > first_mtime,
+  string.format("before=%d after=%d", first_mtime, vim.fn.getftime(boot_path)))
+
+-- ── 49d. message construction + validation ─────────────────
+local m1, m1_err = message.build({
+  from = "agent:gemini", to = "agent:lector",
+  subject = "review please", body = "ready",
+})
+ok("message.build returns a valid message", m1 ~= nil and m1_err == nil,
+  tostring(m1_err))
+ok("kind defaults to 'message'", m1.kind == "message")
+ok("id auto-generated and non-empty", type(m1.id) == "string" and #m1.id > 0)
+ok("created_at ISO 8601 (Z)", type(m1.created_at) == "string"
+  and m1.created_at:match("Z$") ~= nil)
+ok("validate accepts a built message",
+  (message.validate(m1)))
+
+local m2, m2_err = message.build({ from = "x" })  -- missing to
+ok("build rejects missing 'to'", m2 == nil and type(m2_err) == "string")
+local m3, m3_err = message.build({
+  from = "a", to = "b", kind = "command",
+})
+ok("build rejects command without command name",
+  m3 == nil and type(m3_err) == "string", tostring(m3_err))
+local m4, m4_err = message.build({
+  from = "a", to = "b", kind = "command", command = "harpoon",
+})
+ok("build accepts command with command name",
+  m4 ~= nil and m4_err == nil, tostring(m4_err))
+
+-- ── 49e. host-side send() writes directly to recipient inbox ──
+local queued_events = {}
+local qs = events_m.subscribe("core.mailbox:message_queued", function(p)
+  queued_events[#queued_events + 1] = p
+end)
+
+local result, send_err = mailbox.send({
+  from = "agent:gemini", to = "agent:lector",
+  subject = "ready", body = "branch X is up",
+})
+ok("send returns a result with id/path/message",
+  result ~= nil and send_err == nil
+    and type(result.id) == "string"
+    and type(result.path) == "string"
+    and type(result.message) == "table",
+  tostring(send_err))
+ok("send wrote the JSON file under the RECIPIENT's per-mailbox root (codex for lector)",
+  result.path:sub(1, #codex_like_root) == codex_like_root,
+  "got: " .. result.path)
+ok("send wrote a complete JSON object (atomic rename was the commit)",
+  (function()
+    local lines = vim.fn.readfile(result.path)
+    local ok_dec, decoded = pcall(vim.json.decode, table.concat(lines, "\n"))
+    return ok_dec
+      and type(decoded) == "table"
+      and decoded.id == result.id
+      and decoded.from == "agent:gemini"
+      and decoded.to   == "agent:lector"
+  end)())
+ok("recipient inbox contains NO leftover .tmp- files",
+  (function()
+    local inbox = lector_rec.subs.inbox
+    for _, e in ipairs(vim.fn.readdir(inbox)) do
+      if e:sub(1, 5) == ".tmp-" then return false end
+    end
+    return true
+  end)())
+ok("core.mailbox:message_queued fired synchronously from send",
+  #queued_events == 1
+    and queued_events[1].mailbox == "agent:lector"
+    and queued_events[1].id == result.id,
+  vim.inspect(queued_events))
+ok("transport.list_inbox lists the new id",
+  vim.tbl_contains(transp.list_inbox("agent:lector"), result.id))
+
+-- ── 49f. claim → processing, complete → archive + response ──
+local completed_events = {}
+local response_events = {}
+events_m.subscribe("core.mailbox:message_completed", function(p)
+  completed_events[#completed_events + 1] = p
+end)
+events_m.subscribe("core.mailbox:response_written", function(p)
+  response_events[#response_events + 1] = p
+end)
+
+local cor = message.new_correlation_id()
+local r2 = mailbox.send({
+  from = "agent:gemini", to = "agent:lector",
+  subject = "needs reply", body = "do the thing",
+  correlation_id = cor,
+})
+
+local claimed, claim_err = mailbox.claim("agent:lector", r2.id)
+ok("claim returns the message", claimed ~= nil and claim_err == nil,
+  tostring(claim_err))
+ok("claim moves file out of inbox",
+  not vim.tbl_contains(transp.list_inbox("agent:lector"), r2.id))
+ok("claim moves file into processing",
+  vim.tbl_contains(transp.list_processing("agent:lector"), r2.id))
+
+local cok, cerr = mailbox.complete("agent:lector", r2.id, {
+  ok = true, value = { result = "approved" },
+})
+ok("complete returns true", cok == true, tostring(cerr))
+ok("complete moves out of processing",
+  not vim.tbl_contains(transp.list_processing("agent:lector"), r2.id))
+ok("complete archives the message",
+  vim.tbl_contains(transp.list_archive("agent:lector"), r2.id))
+ok("response landed in sender's responses dir keyed by correlation_id",
+  vim.tbl_contains(transp.list_responses("agent:gemini"), cor))
+ok("response file is a valid envelope with ok=true and matching reply_to",
+  (function()
+    local resp_path = gemini_rec.subs.responses .. "/" .. cor .. ".json"
+    if vim.fn.filereadable(resp_path) ~= 1 then return false end
+    local content = table.concat(vim.fn.readfile(resp_path), "\n")
+    local ok_dec, decoded = pcall(vim.json.decode, content)
+    return ok_dec
+      and decoded.ok == true
+      and decoded.reply_to == r2.id
+      and decoded.correlation_id == cor
+      and type(decoded.value) == "table"
+      and decoded.value.result == "approved"
+  end)())
+ok("core.mailbox:message_completed fired",
+  #completed_events == 1 and completed_events[1].id == r2.id)
+ok("core.mailbox:response_written fired with the correlation_id",
+  #response_events == 1
+    and response_events[1].correlation_id == cor
+    and response_events[1].reply_to == r2.id)
+
+events_m.unsubscribe(qs)
+
+-- ── 49g. central router: lifecycle + start/stop/refresh ─────
+router._reset_for_tests()
+events_m._reset_for_tests()
+ok("router is not running before start", router.is_running() == false)
+router.start()
+ok("router is running after start", router.is_running() == true)
+local status = router.status()
+ok("router status reports one entry per unique registered root",
+  (function()
+    local count = 0
+    for _ in pairs(status.roots) do count = count + 1 end
+    -- codex + claude + gemini + active_root (host fallback) = 4.
+    -- jarvis + hephaestus collapse onto the single claude watcher.
+    return count == 4
+  end)(),
+  vim.inspect(status))
+
+-- Idempotent start.
+router.start()
+ok("router.start is idempotent", router.is_running() == true)
+
+-- ── 49h. router routes outbox → recipient inbox ─────────────
+local routed_events = {}
+events_m.subscribe("core.mailbox:outbox_routed", function(p)
+  routed_events[#routed_events + 1] = p
+end)
+local queued_via_router = {}
+events_m.subscribe("core.mailbox:message_queued", function(p)
+  if p.mailbox == "agent:gemini" then
+    queued_via_router[#queued_via_router + 1] = p
+  end
+end)
+
+-- jarvis writes to its OWN outbox addressed to gemini.
+-- (Simulates a sandboxed agent dropping a message in its outbox.)
+local jarvis_outgoing = message.build({
+  from = "agent:jarvis", to = "agent:gemini",
+  body = "hello gemini from jarvis",
+})
+local outbox_file = jarvis_rec.subs.outbox .. "/" .. jarvis_outgoing.id .. ".json"
+vim.fn.writefile({ vim.json.encode(jarvis_outgoing) }, outbox_file)
+-- Force a scan since we wrote directly with writefile (not atomic rename
+-- through the watcher path) — the watcher may or may not fire on the
+-- single-step write; scan_now makes the test deterministic.
+router.scan_now()
+vim.wait(300, function() return #routed_events >= 1 end, 25)
+
+ok("router fired core.mailbox:outbox_routed",
+  #routed_events >= 1
+    and routed_events[1].from == "agent:jarvis"
+    and routed_events[1].to == "agent:gemini"
+    and routed_events[1].id == jarvis_outgoing.id,
+  vim.inspect(routed_events))
+ok("outbox file is GONE from jarvis's outbox after routing",
+  vim.fn.filereadable(outbox_file) == 0)
+ok("message landed in gemini's inbox",
+  vim.tbl_contains(transp.list_inbox("agent:gemini"), jarvis_outgoing.id))
+-- After routing, the router's inbox dispatch fires too.
+vim.wait(200, function() return #queued_via_router >= 1 end, 25)
+ok("core.mailbox:message_queued fired for gemini's inbox after routing",
+  #queued_via_router >= 1
+    and queued_via_router[1].id == jarvis_outgoing.id)
+
+-- ── 49i. outbox_undeliverable when recipient is unregistered ──
+local undeliverable_events = {}
+events_m.subscribe("core.mailbox:outbox_undeliverable", function(p)
+  undeliverable_events[#undeliverable_events + 1] = p
+end)
+local orphan = message.build({
+  from = "agent:jarvis", to = "agent:nobody_registered",
+  body = "noone home",
+})
+local orphan_path = jarvis_rec.subs.outbox .. "/" .. orphan.id .. ".json"
+vim.fn.writefile({ vim.json.encode(orphan) }, orphan_path)
+router.scan_now()
+vim.wait(200, function() return #undeliverable_events >= 1 end, 25)
+ok("undeliverable fires when recipient is unregistered",
+  #undeliverable_events >= 1
+    and undeliverable_events[1].reason == "recipient_unregistered"
+    and undeliverable_events[1].to == "agent:nobody_registered",
+  vim.inspect(undeliverable_events))
+ok("undeliverable: file REMAINS in sender's outbox (retryable)",
+  vim.fn.filereadable(orphan_path) == 1)
+
+-- Now register the missing recipient with a tmp root and re-scan;
+-- the next routing pass should succeed.
+mailbox.register("agent:nobody_registered", { root = tmp_root .. "/.misc/mailbox" })
+router.scan_now()
+vim.wait(300, function()
+  return vim.fn.filereadable(orphan_path) == 0
+end, 25)
+ok("recipient registers later → re-scan routes the pending message",
+  vim.fn.filereadable(orphan_path) == 0
+    and vim.tbl_contains(transp.list_inbox("agent:nobody_registered"), orphan.id))
+
+router.stop()
+ok("router.stop drops running state", router.is_running() == false)
+
+-- ── 49j. wake hook dispatch via command registry ────────────
+commands._reset_for_tests()
+events_m._reset_for_tests()
+router._reset_for_tests()
+
+local wake_invocations = {}
+commands.register("send_slot", {
+  owner = "auto-agents.nvim",
+  handler = function(args, ctx)
+    wake_invocations[#wake_invocations + 1] = { args = args, ctx = ctx }
+    return { ok = true }
+  end,
+  description = "wake the agent's terminal slot",
+})
+
+-- Register user FIRST so its wake hook is in place before we send.
+mailbox.register("user", {
+  wake = { command = "send_slot", args = { slot = "user_terminal" } },
+})
+
+router.start()
+
+-- Send a fresh user→lector message and capture its id specifically
+-- (lector's inbox has leftovers from earlier sections; using the
+-- returned id keeps this section hermetic).
+local wake_msg = mailbox.send({
+  from = "user", to = "agent:lector",
+  body = "wake test 1",
+})
+vim.wait(300, function()
+  for _, inv in ipairs(wake_invocations) do
+    if inv.ctx.arrival_id == wake_msg.id then return true end
+  end
+  return false
+end, 25)
+ok("wake hook dispatched send_slot on inbox arrival for the new message",
+  (function()
+    for _, inv in ipairs(wake_invocations) do
+      if inv.ctx.arrival_id == wake_msg.id
+          and inv.args.slot == "lector"
+          and inv.ctx.reason == "mailbox_wake"
+          and inv.ctx.mailbox == "agent:lector"
+          and inv.ctx.arrival_kind == "inbox"
+      then return true end
+    end
+    return false
+  end)(),
+  vim.inspect(wake_invocations))
+
+-- Wake also fires for response arrivals to the sender. Subscribe
+-- AFTER the send so we only capture the response leg.
+local response_received = {}
+events_m.subscribe("core.mailbox:response_received", function(p)
+  response_received[#response_received + 1] = p
+end)
+
+mailbox.claim("agent:lector", wake_msg.id)
+mailbox.complete("agent:lector", wake_msg.id, { ok = true, value = "ack" })
+-- complete() writes a response to user/responses; router.scan_now()
+-- makes arrival detection deterministic without waiting on fs_event.
+router.scan_now()
+vim.wait(400, function()
+  for _, p in ipairs(response_received) do
+    if p.mailbox == "user" then return true end
+  end
+  return false
+end, 25)
+ok("core.mailbox:response_received fired for user's responses",
+  (function()
+    for _, p in ipairs(response_received) do
+      if p.mailbox == "user" then return true end
+    end
+    return false
+  end)(),
+  vim.inspect(response_received))
+ok("wake hook also dispatched on response arrival for user",
+  (function()
+    for _, inv in ipairs(wake_invocations) do
+      if inv.ctx.arrival_kind == "responses"
+          and inv.ctx.mailbox == "user"
+          and inv.args.slot == "user_terminal"
+      then return true end
+    end
+    return false
+  end)(),
+  vim.inspect(wake_invocations))
+
+router.stop()
+
+-- ── 49k. command registry: register, list, get, reject unknown ──
+commands._reset_for_tests()
+local cmd_registered = {}
+local cmd_executed = {}
+local cmd_rejected = {}
+events_m.subscribe("core.command:registered", function(p)
+  cmd_registered[#cmd_registered + 1] = p
+end)
+events_m.subscribe("core.command:executed", function(p)
+  cmd_executed[#cmd_executed + 1] = p
+end)
+events_m.subscribe("core.command:rejected", function(p)
+  cmd_rejected[#cmd_rejected + 1] = p
+end)
+
+local reg_ok, reg_err = commands.register("harpoon", {
+  owner = "md-harpoon.nvim",
+  handler = function(args) return { ok = true, value = { panel = args.panel or "1" } } end,
+  description = "pin a doc to a md-harpoon slot",
+})
+ok("commands.register returns true", reg_ok == true, tostring(reg_err))
+ok("core.command:registered fired",
+  #cmd_registered == 1 and cmd_registered[1].name == "harpoon")
+ok("commands.get returns the spec", (function()
+  local s = commands.get("harpoon")
+  return type(s) == "table" and s.owner == "md-harpoon.nvim"
+end)())
+ok("commands.list includes harpoon",
+  (function()
+    for _, s in ipairs(commands.list()) do
+      if s.name == "harpoon" then return true end
+    end
+    return false
+  end)())
+
+-- Re-register with a different owner is refused.
+local rr_ok, rr_err = commands.register("harpoon", {
+  owner = "evil.plugin", handler = function() end,
+})
+ok("re-register with different owner is refused",
+  rr_ok == false and type(rr_err) == "string" and rr_err:find("already owned"),
+  tostring(rr_err))
+-- Re-register with the SAME owner is allowed (hot-reload friendly).
+local rr2_ok = commands.register("harpoon", {
+  owner = "md-harpoon.nvim", handler = function() return { ok = true } end,
+})
+ok("re-register with same owner is allowed", rr2_ok == true)
+
+-- Dispatch unknown command via handle_message → structured rejection.
+local unknown_msg = message.build({
+  from = "agent:gemini", to = "nvim",
+  kind = "command", command = "definitely_not_real",
+  correlation_id = "cor-test-1",
+})
+local resp = commands.handle_message(unknown_msg)
+ok("handle_message returns ok=false for unknown command",
+  type(resp) == "table" and resp.ok == false)
+ok("rejection code is 'unknown_command'",
+  resp.code == "unknown_command",
+  tostring(resp.code))
+ok("core.command:rejected fired with the correlation_id",
+  #cmd_rejected >= 1
+    and cmd_rejected[#cmd_rejected].name == "definitely_not_real"
+    and cmd_rejected[#cmd_rejected].correlation_id == "cor-test-1")
+
+-- Dispatch known command — handler returns table.
+local known_msg = message.build({
+  from = "user", to = "nvim",
+  kind = "command", command = "harpoon",
+  args = { panel = "2" },
+})
+local resp2 = commands.handle_message(known_msg)
+ok("handle_message dispatches known command",
+  type(resp2) == "table" and resp2.ok == true)
+ok("core.command:executed fired",
+  #cmd_executed >= 1 and cmd_executed[#cmd_executed].name == "harpoon")
+
+-- kind != command is rejected (it's not a command message).
+local bad_kind = { id = "x", kind = "message", from = "a", to = "b" }
+local resp3 = commands.handle_message(bad_kind)
+ok("handle_message rejects kind != 'command'",
+  resp3.ok == false and resp3.code == "not_a_command")
+
+-- handler that throws → handler_error, NOT a raise.
+commands.register("crashy", {
+  owner = "test", handler = function() error("oops") end,
+})
+local resp4 = commands.handle_message(message.build({
+  from = "a", to = "b", kind = "command", command = "crashy",
+}))
+ok("handler that errors → ok=false, code='handler_error'",
+  resp4.ok == false and resp4.code == "handler_error"
+    and resp4.error:find("oops"),
+  vim.inspect(resp4))
+
+-- ── Schema validation (should-fix #5) ───────────────────────
+-- Register a command with a schema covering required/optional
+-- fields and the supported type primitives.
+commands.register("opendiff", {
+  owner = "auto-agents.nvim",
+  schema = {
+    old_file_path = "string",
+    new_file_path = "string",
+    tab_name      = "string?",
+    line_count    = "integer?",
+  },
+  handler = function(args)
+    return { ok = true, value = args }
+  end,
+})
+
+-- Happy path — handler returns ok=true.
+local good = commands.handle_message(message.build({
+  from = "a", to = "b", kind = "command", command = "opendiff",
+  args = { old_file_path = "/a", new_file_path = "/b", tab_name = "T" },
+}))
+ok("schema: handler runs when args satisfy schema",
+  good.ok == true and good.value.old_file_path == "/a",
+  vim.inspect(good))
+
+-- Missing required field → bad_args, NOT handler_error.
+local missing = commands.handle_message(message.build({
+  from = "a", to = "b", kind = "command", command = "opendiff",
+  args = { old_file_path = "/a" },
+  correlation_id = "cor-bad-args-1",
+}))
+ok("schema: missing required field → ok=false, code=bad_args",
+  missing.ok == false and missing.code == "bad_args"
+    and missing.field == "new_file_path",
+  vim.inspect(missing))
+
+-- Wrong type → bad_args.
+local wrongtype = commands.handle_message(message.build({
+  from = "a", to = "b", kind = "command", command = "opendiff",
+  args = { old_file_path = "/a", new_file_path = 42 },
+}))
+ok("schema: wrong-type field → ok=false, code=bad_args, error names the type mismatch",
+  wrongtype.ok == false and wrongtype.code == "bad_args"
+    and wrongtype.field == "new_file_path"
+    and wrongtype.error:find("string", 1, true) ~= nil,
+  vim.inspect(wrongtype))
+
+-- Optional field absent is fine.
+local opt_absent = commands.handle_message(message.build({
+  from = "a", to = "b", kind = "command", command = "opendiff",
+  args = { old_file_path = "/a", new_file_path = "/b" },
+}))
+ok("schema: optional field omitted is accepted",
+  opt_absent.ok == true)
+
+-- Integer type rejects floats.
+commands.register("setline", {
+  owner = "test", schema = { n = "integer" },
+  handler = function() return { ok = true } end,
+})
+local floaty = commands.handle_message(message.build({
+  from = "a", to = "b", kind = "command", command = "setline",
+  args = { n = 3.5 },
+}))
+ok("schema: integer type rejects non-integer numbers",
+  floaty.ok == false and floaty.code == "bad_args")
+
+-- Schema rejection publishes core.command:rejected with reason='bad_args'.
+local bad_args_rejections = {}
+events_m.subscribe("core.command:rejected", function(p)
+  bad_args_rejections[#bad_args_rejections + 1] = p
+end)
+commands.handle_message(message.build({
+  from = "a", to = "b", kind = "command", command = "opendiff",
+  args = { old_file_path = "/a" },
+  correlation_id = "cor-bad-args-event",
+}))
+ok("schema: rejection publishes core.command:rejected with reason='bad_args'",
+  (function()
+    for _, e in ipairs(bad_args_rejections) do
+      if e.name == "opendiff" and e.reason == "bad_args"
+          and e.correlation_id == "cor-bad-args-event"
+      then return true end
+    end
+    return false
+  end)(),
+  vim.inspect(bad_args_rejections))
+
+-- ── 49l. fail() transition writes failure envelope ─────────
+local r3 = mailbox.send({
+  from = "agent:gemini", to = "agent:lector",
+  body = "intentional fail", correlation_id = "cor-fail-1",
+})
+mailbox.claim("agent:lector", r3.id)
+local fok, ferr = mailbox.fail("agent:lector", r3.id, "deliberate",
+  { response = true })
+ok("fail returns true", fok == true, tostring(ferr))
+ok("failed message archived",
+  vim.tbl_contains(transp.list_archive("agent:lector"), r3.id))
+ok("response envelope for failure has ok=false and the error",
+  (function()
+    -- gemini's responses dir lives under its tool root, not the host
+    -- fallback — read via the registered record.
+    local p = registry.get("agent:gemini").subs.responses .. "/cor-fail-1.json"
+    if vim.fn.filereadable(p) ~= 1 then return false end
+    local content = table.concat(vim.fn.readfile(p), "\n")
+    local ok_dec, decoded = pcall(vim.json.decode, content)
+    return ok_dec and decoded.ok == false and decoded.error == "deliberate"
+  end)())
+
+-- ── 49l0. host executioner via file transport (ADR §4) ─────
+;(function()
+local mb = require("auto-core.mailbox")
+local router = mb.router
+local commands = mb.commands
+
+commands._reset_for_tests()
+events_m._reset_for_tests()
+router._reset_for_tests()
+
+-- Register the host-side executioner mailbox. Default
+-- executioner=true for id='nvim'; we exercise that default here.
+local nvim_rec = mb.register("nvim")
+ok("register('nvim') sets executioner=true by default",
+  nvim_rec.executioner == true)
+-- Other ids default to executioner=false.
+local lector_rec_now = registry.get("agent:lector")
+ok("non-nvim mailbox defaults to executioner=false",
+  lector_rec_now.executioner == false)
+
+-- Register a 'harpoon' command. The handler captures invocations
+-- so we can assert it actually ran via the file path (not direct
+-- lua dispatch).
+local handler_invocations = {}
+commands.register("harpoon", {
+  owner = "md-harpoon.nvim",
+  handler = function(args, ctx)
+    handler_invocations[#handler_invocations + 1] = {
+      args = args, ctx = ctx,
+    }
+    return { ok = true, value = { panel = args.panel or "1" } }
+  end,
+  description = "pin a doc to a md-harpoon slot",
+})
+
+router.start()
+
+-- The realistic flow: a sandboxed agent (here jarvis) writes a
+-- command JSON to its OWN outbox addressed to 'nvim'. Router
+-- routes outbox → nvim/inbox → executioner claims+dispatches+
+-- completes; sender (jarvis) gets a response in its responses/
+-- dir keyed by correlation_id.
+local cor = "cor-exec-harpoon-" .. tostring(vim.uv.hrtime())
+local cmd_msg = mb.message.build({
+  from = "agent:jarvis", to = "nvim",
+  kind = "command", command = "harpoon",
+  args = { panel = "2", file = "/tmp/foo.md" },
+  correlation_id = cor,
+})
+local jarvis_rec_now = registry.get("agent:jarvis")
+vim.fn.writefile({ vim.json.encode(cmd_msg) },
+  jarvis_rec_now.subs.outbox .. "/" .. cmd_msg.id .. ".json")
+
+local executed_events = {}
+events_m.subscribe("core.command:executed", function(p)
+  executed_events[#executed_events + 1] = p
+end)
+local completed_events = {}
+events_m.subscribe("core.mailbox:message_completed", function(p)
+  completed_events[#completed_events + 1] = p
+end)
+
+router.scan_now()
+vim.wait(400, function()
+  return #executed_events >= 1 and #completed_events >= 1
+end, 25)
+
+ok("executioner dispatched the file-routed command via registry",
+  #handler_invocations >= 1
+    and handler_invocations[1].args.panel == "2"
+    and handler_invocations[1].args.file  == "/tmp/foo.md"
+    and handler_invocations[1].ctx.reason == "mailbox_executioner"
+    and handler_invocations[1].ctx.mailbox == "nvim",
+  vim.inspect(handler_invocations))
+ok("core.command:executed fired with name='harpoon'",
+  #executed_events >= 1 and executed_events[1].name == "harpoon")
+ok("core.mailbox:message_completed fired for the executioner-handled message",
+  (function()
+    for _, e in ipairs(completed_events) do
+      if e.mailbox == "nvim" and e.id == cmd_msg.id then return true end
+    end
+    return false
+  end)(),
+  vim.inspect(completed_events))
+ok("command file moved out of nvim inbox/processing into archive",
+  not vim.tbl_contains(transp.list_inbox("nvim"), cmd_msg.id)
+    and not vim.tbl_contains(transp.list_processing("nvim"), cmd_msg.id)
+    and vim.tbl_contains(transp.list_archive("nvim"), cmd_msg.id))
+
+-- Response envelope landed in sender's responses/ with the
+-- handler's return value. This is the "blocking sender" contract:
+-- the agent that sent the command can poll <jarvis>/responses/
+-- <cor>.json and unblock.
+ok("sender's responses/<cor>.json contains the handler's return value",
+  (function()
+    local p = jarvis_rec_now.subs.responses .. "/" .. cor .. ".json"
+    if vim.fn.filereadable(p) ~= 1 then return false end
+    local txt = table.concat(vim.fn.readfile(p), "\n")
+    local okd, dec = pcall(vim.json.decode, txt)
+    return okd and dec.ok == true
+      and dec.reply_to == cmd_msg.id
+      and dec.correlation_id == cor
+      and type(dec.value) == "table"
+      and dec.value.panel == "2"
+  end)())
+
+-- Unknown command through the file transport — structured
+-- rejection lands in the sender's responses dir, not a thrown error.
+local cor_unknown = "cor-exec-unknown-" .. tostring(vim.uv.hrtime())
+local unknown_msg = mb.message.build({
+  from = "agent:jarvis", to = "nvim",
+  kind = "command", command = "definitely_not_registered",
+  correlation_id = cor_unknown,
+})
+vim.fn.writefile({ vim.json.encode(unknown_msg) },
+  jarvis_rec_now.subs.outbox .. "/" .. unknown_msg.id .. ".json")
+local rejected_events = {}
+events_m.subscribe("core.command:rejected", function(p)
+  rejected_events[#rejected_events + 1] = p
+end)
+router.scan_now()
+vim.wait(400, function() return #rejected_events >= 1 end, 25)
+ok("unknown command via file path is rejected with structured response",
+  #rejected_events >= 1
+    and rejected_events[1].name == "definitely_not_registered",
+  vim.inspect(rejected_events))
+ok("sender unblocks via responses/<cor>.json with ok=false code=unknown_command",
+  (function()
+    local p = jarvis_rec_now.subs.responses .. "/" .. cor_unknown .. ".json"
+    if vim.fn.filereadable(p) ~= 1 then return false end
+    local txt = table.concat(vim.fn.readfile(p), "\n")
+    local okd, dec = pcall(vim.json.decode, txt)
+    return okd and dec.ok == false
+  end)())
+
+-- Non-command messages on an executioner mailbox still trigger
+-- the wake hook (executioner only intercepts kind='command').
+-- We can't register a wake on nvim here without polluting, but we
+-- can assert: a plain 'message' to nvim does NOT call the
+-- executioner (handler_invocations doesn't grow).
+local hi_before = #handler_invocations
+mb.send({ from = "agent:jarvis", to = "nvim",
+  body = "just a message, not a command" })
+router.scan_now()
+vim.wait(200, function() return false end, 50)  -- give it a moment
+ok("non-command messages on executioner mailbox do NOT invoke handlers",
+  #handler_invocations == hi_before)
+
+router.stop()
+commands._reset_for_tests()
+events_m._reset_for_tests()
+end)()
+
+-- ── 49l1. router polling fallback + status flags ──────────
+;(function()
+local mb = require("auto-core.mailbox")
+local router = mb.router
+events_m._reset_for_tests()
+router._reset_for_tests()
+
+-- mode='poll' skips fs_event entirely; the global poll timer must
+-- pick up new arrivals via scan_now().
+router.configure({ mode = "poll", poll_interval_ms = 60 })
+router.start()
+ok("status.mode reports 'poll' after configure",
+  router.status().mode == "poll",
+  vim.inspect(router.status()))
+ok("status.poll_running is true with poll mode + an interval",
+  router.status().poll_running == true,
+  vim.inspect(router.status()))
+ok("every root reports poll_active=true in poll mode",
+  (function()
+    for _, entry in pairs(router.status().roots) do
+      if entry.poll_active ~= true then return false end
+    end
+    return next(router.status().roots) ~= nil
+  end)(),
+  vim.inspect(router.status()))
+ok("every root has zero fs_event handles in poll mode",
+  (function()
+    for _, entry in pairs(router.status().roots) do
+      if entry.handles ~= 0 then return false end
+    end
+    return true
+  end)(),
+  vim.inspect(router.status()))
+
+-- Now send via outbox: simulate an agent dropping a message in
+-- its own outbox, no fs_event; only the poll timer can find it.
+local jarvis_rec = registry.get("agent:jarvis")
+local outgoing = mb.message.build({
+  from = "agent:jarvis", to = "agent:gemini",
+  body = "polled delivery test",
+})
+vim.fn.writefile({ vim.json.encode(outgoing) },
+  jarvis_rec.subs.outbox .. "/" .. outgoing.id .. ".json")
+local routed_via_poll = false
+events_m.subscribe("core.mailbox:outbox_routed", function(p)
+  if p.id == outgoing.id then routed_via_poll = true end
+end)
+-- Wait a bit longer than the poll interval. We do NOT call
+-- scan_now() — the timer must fire on its own.
+vim.wait(400, function() return routed_via_poll end, 25)
+ok("poll-mode timer routes outbox without fs_event",
+  routed_via_poll)
+router.stop()
+ok("status.poll_running false after stop", router.status().poll_running == false)
+
+-- mode='watch' is strict: even with poll_interval_ms set, no
+-- timer should run. Useful as a "must have watchers" mode.
+router._reset_for_tests()
+router.configure({ mode = "watch", poll_interval_ms = 60 })
+router.start()
+ok("watch mode never starts the poll timer even with interval set",
+  router.status().poll_running == false,
+  vim.inspect(router.status()))
+ok("every root reports poll_active=false in watch mode",
+  (function()
+    for _, entry in pairs(router.status().roots) do
+      if entry.poll_active ~= false then return false end
+    end
+    return true
+  end)())
+router.stop()
+
+-- poll_interval_ms=false disables polling even if a root would
+-- otherwise need it.
+router._reset_for_tests()
+router.configure({ mode = "poll", poll_interval_ms = false })
+router.start()
+ok("poll_interval_ms=false prevents the timer from starting",
+  router.status().poll_running == false)
+router.stop()
+
+router._reset_for_tests()
+events_m._reset_for_tests()
+end)()
+
+-- ── 49l2. claim stamps + stale processing recovery ─────────
+;(function()
+local mb = require("auto-core.mailbox")
+local tr = mb.transport
+events_m._reset_for_tests()
+
+-- Fresh message → claim stamps claimed_at/claimed_by/attempt
+-- durably on the processing file.
+local r = mb.send({ from = "agent:gemini", to = "agent:lector",
+  body = "stamp test", correlation_id = "cor-stale-stamp" })
+local msg, claim_err = mb.claim("agent:lector", r.id,
+  { claimed_by = "test-harness" })
+ok("claim returns the message with stamps", msg ~= nil and claim_err == nil,
+  tostring(claim_err))
+ok("claim stamps claimed_at + claimed_by + attempt on the returned msg",
+  type(msg.claimed_at) == "string"
+    and msg.claimed_by == "test-harness"
+    and msg.attempt == 1,
+  vim.inspect(msg))
+
+-- Stamps are durable on disk (read processing file independently).
+local on_disk = tr.read_from("agent:lector", "processing", r.id)
+ok("claim stamps persist to disk",
+  on_disk ~= nil
+    and on_disk.claimed_by == "test-harness"
+    and on_disk.attempt == 1
+    and type(on_disk.claimed_at) == "string")
+
+-- Recover-stale with a tiny threshold (0ms) trips immediately. Use
+-- 'fail' policy (default) → archived + structured response.
+local stale_events = {}
+events_m.subscribe("core.mailbox:stale_recovered", function(p)
+  stale_events[#stale_events + 1] = p
+end)
+local result = tr.recover_stale("agent:lector", { threshold_ms = 0 })
+ok("recover_stale returns recovered list + scan count",
+  type(result) == "table"
+    and type(result.recovered) == "table"
+    and type(result.scanned) == "number",
+  vim.inspect(result))
+ok("the stamped message was recovered with policy='fail'",
+  (function()
+    for _, e in ipairs(result.recovered) do
+      if e.id == r.id and e.policy == "fail" then return true end
+    end
+    return false
+  end)(),
+  vim.inspect(result.recovered))
+ok("core.mailbox:stale_recovered fired for the recovery",
+  (function()
+    for _, e in ipairs(stale_events) do
+      if e.id == r.id and e.policy == "fail" then return true end
+    end
+    return false
+  end)())
+ok("recovered message archived",
+  vim.tbl_contains(tr.list_archive("agent:lector"), r.id))
+ok("recovered message no longer in processing",
+  not vim.tbl_contains(tr.list_processing("agent:lector"), r.id))
+-- Structured response with stale_processing_timeout went to sender.
+ok("recovery wrote a response envelope with error=stale_processing_timeout",
+  (function()
+    local resp_path = registry.get("agent:gemini").subs.responses
+                     .. "/cor-stale-stamp.json"
+    if vim.fn.filereadable(resp_path) ~= 1 then return false end
+    local txt = table.concat(vim.fn.readfile(resp_path), "\n")
+    local okd, dec = pcall(vim.json.decode, txt)
+    return okd and dec.ok == false
+      and dec.error == "stale_processing_timeout"
+  end)())
+
+-- 'requeue' policy puts the message back in inbox; attempt
+-- preserved; next claim → attempt = 2.
+local r2 = mb.send({ from = "agent:gemini", to = "agent:lector",
+  body = "requeue test", correlation_id = "cor-requeue" })
+mb.claim("agent:lector", r2.id, { claimed_by = "test-harness" })
+local result2 = tr.recover_stale("agent:lector",
+  { threshold_ms = 0, policy = "requeue" })
+ok("requeue policy recovers the message",
+  (function()
+    for _, e in ipairs(result2.recovered) do
+      if e.id == r2.id and e.policy == "requeue" then return true end
+    end
+    return false
+  end)(),
+  vim.inspect(result2))
+ok("requeued message returns to inbox",
+  vim.tbl_contains(tr.list_inbox("agent:lector"), r2.id))
+ok("requeued message no longer in processing",
+  not vim.tbl_contains(tr.list_processing("agent:lector"), r2.id))
+
+-- Next claim → attempt = 2 (the counter survived requeue).
+local msg2 = mb.claim("agent:lector", r2.id, { claimed_by = "test-harness" })
+ok("next claim after requeue increments attempt to 2",
+  msg2 ~= nil and msg2.attempt == 2,
+  vim.inspect(msg2))
+-- Cleanup.
+mb.fail("agent:lector", r2.id, "test-done", { response = false })
+
+-- Threshold honors recency: a fresh claim with the default
+-- threshold (5min) is NOT recovered.
+local r3 = mb.send({ from = "agent:gemini", to = "agent:lector",
+  body = "young message" })
+mb.claim("agent:lector", r3.id)
+local result3 = tr.recover_stale("agent:lector")  -- default 5min
+ok("fresh claim is NOT swept under default threshold",
+  (function()
+    for _, e in ipairs(result3.recovered) do
+      if e.id == r3.id then return false end
+    end
+    return true
+  end)(),
+  vim.inspect(result3))
+mb.fail("agent:lector", r3.id, "test-cleanup", { response = false })
+
+-- recover_stale_all walks every registered mailbox.
+local merged = tr.recover_stale_all({ threshold_ms = 999999999 })
+ok("recover_stale_all returns merged scanned + recovered list",
+  type(merged) == "table"
+    and type(merged.scanned) == "number"
+    and type(merged.recovered) == "table",
+  vim.inspect(merged))
+end)()
+
+-- ── 49n_pre. message_state + list_entries + viewer data pipeline ──
+;(function()
+local mb = require("auto-core.mailbox")
+local tr = mb.transport
+local ui = mb.ui
+
+-- The earlier 49l block left agent:lector with an archived 'failed'
+-- message. Find it specifically (list_archive returns sorted-by-id,
+-- which is roughly oldest-first; archive contains both completed
+-- and failed messages by now).
+local fail_id
+for _, id in ipairs(transp.list_archive("agent:lector")) do
+  if tr.message_state("agent:lector", id) == "failed" then
+    fail_id = id; break
+  end
+end
+ok("agent:lector archive has a 'failed' message from the fail test",
+  type(fail_id) == "string")
+local fail_state = tr.message_state("agent:lector", fail_id)
+ok("message_state classifies the archived failed message as 'failed'",
+  fail_state == "failed",
+  "got " .. tostring(fail_state))
+
+-- Send a fresh message and verify it's "queued" before claim.
+local r = mb.send({
+  from = "agent:gemini", to = "agent:lector",
+  body = "fresh queued",
+})
+local s = tr.message_state("agent:lector", r.id)
+ok("freshly-sent inbox message reports 'queued'",
+  s == "queued", "got " .. tostring(s))
+
+-- Claim it → "claimed".
+mb.claim("agent:lector", r.id)
+s = tr.message_state("agent:lector", r.id)
+ok("after claim, message_state reports 'claimed'",
+  s == "claimed", "got " .. tostring(s))
+
+-- Complete with response → "completed", and the response exists
+-- in the sender's responses dir.
+local cor = "cor-state-test-" .. tostring(vim.uv.hrtime())
+mb.complete("agent:lector", r.id, {
+  ok = true, value = "ack", correlation_id = cor,
+})
+s = tr.message_state("agent:lector", r.id)
+ok("after complete, message_state reports 'completed'",
+  s == "completed", "got " .. tostring(s))
+
+-- Unknown id → nil.
+ok("unknown message id → state is nil",
+  tr.message_state("agent:lector", "nope-never-existed") == nil)
+
+-- list_entries: ensure decoded payload fields land on entries.
+local inbox_entries = tr.list_entries("agent:lector", "inbox")
+ok("list_entries(inbox) returns a table",
+  type(inbox_entries) == "table")
+local arch_entries = tr.list_entries("agent:lector", "archive")
+ok("list_entries(archive) carries states + responded annotation",
+  (function()
+    local saw_completed, saw_failed = false, false
+    for _, e in ipairs(arch_entries) do
+      if e.state == "completed" then saw_completed = true end
+      if e.state == "failed"    then saw_failed    = true end
+    end
+    return saw_completed and saw_failed
+  end)(),
+  vim.inspect(arch_entries))
+
+-- list_all merges every subdir, sorted by mtime desc.
+local all = tr.list_all("agent:lector")
+ok("list_all merges across subdirs and sorts desc",
+  (function()
+    if #all < 2 then return true end  -- nothing to compare
+    for i = 1, #all - 1 do
+      if all[i].mtime < all[i + 1].mtime then return false end
+    end
+    return true
+  end)())
+
+-- Viewer's data pipeline (without actually rendering windows).
+ui._reset_for_tests()
+ui._select("agent:lector", "all")
+local data = ui._render_data()
+ok("ui._render_data returns tree + tree_map + entries",
+  type(data.tree) == "table"
+    and type(data.tree_map) == "table"
+    and type(data.entries) == "table")
+ok("tree contains a row per registered mailbox + 5 subdirs each",
+  (function()
+    -- One owner row + 5 scope rows per mailbox.
+    local owner_rows = 0
+    for _, m in ipairs(data.tree_map) do
+      if m.scope == "all" then owner_rows = owner_rows + 1 end
+    end
+    return owner_rows == #registry.records()
+  end)(),
+  vim.inspect(data.tree_map))
+
+-- Backlog indicator: lower threshold and check tree includes warning.
+ui._reset_for_tests()
+ui.open({ backlog_threshold = 1, initial_mailbox = "agent:lector",
+  initial_scope = "all" })
+-- Immediately read state and close — open() requires a real UI but
+-- we don't drive interactions; the smoke run is headless so windows
+-- exist briefly. We just verify the tree was built with the
+-- backlog warning embedded.
+local s2 = ui._state()
+local saw_warn = false
+for _, line in ipairs(s2.tree_lines) do
+  if line:find("⚠ inbox=", 1, true) then saw_warn = true; break end
+end
+ok("backlog indicator appears in the tree when inbox >= threshold",
+  saw_warn, vim.inspect(s2.tree_lines))
+ui.close()
+end)()
+
+-- ── 49n. debug probe surface — :AutoCoreDebug mailbox helpers ─
+;(function()
+local dbg = require("auto-core").debug.mailbox
+ok("debug.mailbox is a table",
+  type(dbg) == "table"
+    and type(dbg.recent)         == "function"
+    and type(dbg.format_entry)   == "function"
+    and type(dbg.status)         == "function"
+    and type(dbg.registry_lines) == "function"
+    and type(dbg.tail_lines)     == "function"
+    and type(dbg.follow_start)   == "function"
+    and type(dbg.follow_stop)    == "function"
+    and type(dbg.clear)          == "function")
+
+-- registry_lines renders the current state without crashing on
+-- empty/full registries.
+local lines = dbg.registry_lines()
+ok("registry_lines returns a non-empty list of strings",
+  type(lines) == "table" and #lines >= 3
+    and type(lines[1]) == "string"
+    -- `:find(needle, 1, true)` is a literal-text search; the hyphens
+    -- in "auto-core" would otherwise be pattern-quantifiers.
+    and lines[1]:find("auto-core mailbox registry", 1, true) ~= nil,
+  type(lines) == "table" and ("first=" .. tostring(lines[1])
+                              .. " count=" .. tostring(#lines)) or "not-a-table")
+
+-- tail_lines pulls from the trace; we trust the trace's existing
+-- contract here. Just verify the shape.
+local tail = dbg.tail_lines(20)
+ok("tail_lines returns a list with at least the header rows",
+  type(tail) == "table" and #tail >= 2)
+
+-- recent() filters trace to core.mailbox:* / core.command:*. The
+-- earlier sections fired both, so we should see entries.
+local rec_events = dbg.recent(50)
+ok("recent() returns mailbox / command events only",
+  (function()
+    if #rec_events == 0 then return false end
+    for _, e in ipairs(rec_events) do
+      if not (e.topic:sub(1, 13) == "core.mailbox:"
+              or e.topic:sub(1, 13) == "core.command:") then
+        return false
+      end
+    end
+    return true
+  end)(),
+  vim.inspect(rec_events))
+end)()
+
+-- ── 49o. teardown ───────────────────────────────────────────
+mailbox._reset_for_tests()
+events_m._reset_for_tests()
+require("auto-core").setup()  -- restore defaults
+pcall(vim.fn.delete, tmp_root, "rf")
+-- Restore env so the rest of the suite (if any) sees originals.
+vim.env.AUTO_AGENTS_MAILBOX_ROOT = saved_env.AUTO_AGENTS_MAILBOX_ROOT
+vim.env.AUTO_AGENTS_CONFIG_DIR   = saved_env.AUTO_AGENTS_CONFIG_DIR
+vim.env.AUTO_AGENTS_KB_ROOT      = saved_env.AUTO_AGENTS_KB_ROOT
 end)()
 
 -- ─────────────────────── summary ─────────────────────────

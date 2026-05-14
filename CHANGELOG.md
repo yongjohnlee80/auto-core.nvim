@@ -10,6 +10,137 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.5] — 2026-05-14 — mailbox subsystem: durable file-backed transport + router + executioner (ADR 0013 phase 1)
+
+Additive patch-line release. Adds `auto-core.mailbox` — a
+sandbox-friendly, file-backed cross-process transport that lets
+sandboxed CLI agents (Claude / Codex / Gemini / …) coordinate with
+each other and with Neovim through atomic JSON writes to per-tool-
+config-dir mailboxes. Implements ADR 0013 phase 1 in full.
+
+### Why
+
+Sandboxed agents can't reach Neovim via socket, loopback HTTP, or
+RPC. They CAN read/write their own `~/.<tool>/` config dir. Mailbox
+data therefore lives at `<tool-root>/mailbox/<id>/` where it's
+sandbox-allowed without permission prompts.
+
+### Added — public surface
+
+- `M.mailbox` namespace with submodules: `path`, `message`,
+  `registry`, `transport`, `commands`, `router`, `bootstrap`, `ui`.
+- `M.mailbox.configure({ root, autostart, mode, poll_interval_ms,
+  stale_threshold_ms, stale_policy, stale_recover_on_start })`
+  forwarded through to path / router subsystems.
+- `M.mailbox.path.tool_root(tool)` for agent-backed mailboxes
+  (`claude`/`gemini`/`codex` and extensible via `path.TOOL_DIRS`).
+- `M.mailbox.path.host_fallback_root()` for non-sandboxed actors
+  (`nvim`, `user`) — resolves `$AUTO_AGENTS_MAILBOX_ROOT` →
+  `$AUTO_AGENTS_CONFIG_DIR/mailbox` →
+  `dirname($AUTO_AGENTS_KB_ROOT)/mailbox` →
+  `~/.config/nvim/.auto-agents-config/mailbox`.
+- `M.mailbox.register(id, { root, wake, executioner })` ensures
+  the canonical 5-subdir layout and upserts the bootstrap doc.
+- `M.mailbox.send/claim/complete/fail` for state transitions, with
+  durable claim stamps (`claimed_at`, `claimed_at_unix`,
+  `claimed_by`, `attempt`).
+- `M.mailbox.recover_stale(mailbox, opts)` and `recover_stale_all`
+  for processing recovery (policies: `'fail'` default, `'requeue'`).
+- `M.mailbox.start/stop/refresh/scan_now/is_running`.
+- `M.mailbox.commands.register/get/list/unregister/handle_message/
+  reject_unknown/validate_args` — whitelisted dispatch with schema
+  validation. Schemas accept `string | integer | number | boolean |
+  table | function | any` with `?` for optional fields. Failures
+  produce structured `{ ok=false, code, field, error }` rejections;
+  raw Lua/Vimscript/shell/RPC strings are NEVER executed.
+- `:AutoCoreMailbox [open|close|toggle|refresh]` — three-pane
+  viewer on `auto-core.ui.float.multi` (owner-tree | messages
+  newest-first with state icons | preview). Backlog indicator
+  `⚠ inbox=N` per ADR §2 observability.
+- `:AutoCoreDebug mailbox status | tail [N] | registry | follow
+  [on|off|toggle] | clear` — read-only probe filtering the event
+  trace to mailbox/command topics with payload-aware pretty
+  printing.
+
+### Added — bootstrap doc contract (ADR §9 anchor)
+
+- `<mailbox-dir>/bootstrap-mailbox.md` rewritten from a versioned
+  template on every `register()`. Frontmatter carries
+  `revision: <sha256-of-rendered-body>`.
+- Doc body instructs agents to audit the revision on every wake,
+  distill the protocol into durable agent memory on FIRST read,
+  and refresh that memory whenever the revision changes.
+- Documents the Codex `writable_roots` sandbox requirement so
+  codex-backed agents can add their mailbox dir to
+  `~/.codex/config.toml`.
+
+### Added — central router (ADR §3)
+
+- One logical walk-and-watch per UNIQUE registered root. Multi-
+  agent-per-tool collapses cleanly (`agent:jarvis` +
+  `agent:hephaestus` under `~/.claude/mailbox/` → one watcher).
+- libuv `fs_event` + walk-and-watch for the Linux recursion gap.
+- Path classifier dispatches:
+  - `outbox/`    → atomic rename to recipient inbox (`core.mailbox:
+                   outbox_routed` / `outbox_undeliverable`).
+  - `inbox/`     → `core.mailbox:message_queued` + executioner OR
+                   wake hook.
+  - `responses/` → `core.mailbox:response_received` + wake hook.
+- Polling fallback: `mode = 'auto'|'watch'|'poll'`,
+  `poll_interval_ms` (default 1000, `false` disables). Per-root
+  `poll_active` flag surfaced via `router.status()`.
+
+### Added — default `nvim` executioner (ADR §4)
+
+- `register('nvim')` defaults `executioner = true`. When a
+  `kind="command"` message lands in an executioner mailbox's inbox,
+  the router auto-claims (`claimed_by='nvim-executioner'`),
+  dispatches via `commands.handle_message`, and `transport.complete`
+  writes the response envelope back to the sender's
+  `responses/<correlation_id>.json` so blocking pollers unblock.
+- Unknown / bad-args commands produce structured rejection
+  envelopes through the same path.
+
+### Added — event topics (all additive, public)
+
+- `core.mailbox:registered / outbox_routed / outbox_undeliverable /
+  message_queued / message_claimed / message_completed /
+  message_failed / response_received / response_written /
+  stale_recovered`.
+- `core.command:registered / executed / rejected`.
+
+### Version metadata
+
+- `version` → `0.1.5` (additive patch line per
+  [[auto-core-maintenance]] — no rename / removal / shape break).
+- `api_version` unchanged at `0.1`. New surface is feature-detected
+  via `type(require("auto-core").mailbox) == "table"`.
+
+### Migration
+
+No source-level migration. The contract is now in place for the
+downstream wiring described in the ADR's "Implementation Plan"
+steps 9–10:
+
+- `auto-agents.nvim` registers `send_slot` / `openDiff` /
+  `closeDiff` / `getDiffStatus`, calls `mailbox.register(...)` at
+  agent-spawn time, and generates the mailbox section in
+  `AGENTS.md` / `CLAUDE.md` / `GEMINI.md`.
+- `md-harpoon.nvim` registers the `harpoon` command.
+
+This release ships the foundation only; family plugins land in
+follow-up worktrees on their own repos.
+
+### Live test
+
+Architectural validation done end-to-end with real Claude (jarvis)
+and Codex (lector) agents — `send_slot` command flows through the
+mailbox path, `nvim` executioner dispatches the registered handler,
+response envelope routes back; Lector reads his bootstrap on wake,
+saves the protocol to durable Codex memory per the first-read
+directive, and acks via his outbox. Zero nvim-RPC indirection from
+the agent side.
+
 ## [v0.1.4] — 2026-05-11 — percentage-based widths for multi-float panes
 
 Feature. `ui.float.multi`'s `_compute_layout` now treats width values

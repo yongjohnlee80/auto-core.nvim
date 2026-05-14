@@ -156,6 +156,76 @@ local M = {
     publishers = { "auto-core" },
   },
 
+  -- ── mailbox lifecycle (ADR 0013 Phase 1 — auto-core.mailbox) ────
+  -- File-backed cross-process transport; topics signal arrival,
+  -- claim, completion, failure, and response writes. Subscribers
+  -- typically scope by `mailbox` field.
+  ["core.mailbox:registered"] = {
+    doc = "auto-core.mailbox.register ensured a mailbox's 5-subdir layout + bootstrap doc.",
+    payload = "{ mailbox = string, dir = string, root = string, wake = table?, bootstrap_path = string, bootstrap_revision = string, first_time = boolean }",
+    publishers = { "auto-core" },
+  },
+  ["core.mailbox:outbox_routed"] = {
+    doc = "The router atomically delivered <sender>/outbox/<id>.json → <recipient>/inbox/<id>.json.",
+    payload = "{ from = string, to = string, id = string, path = string }",
+    publishers = { "auto-core" },
+  },
+  ["core.mailbox:outbox_undeliverable"] = {
+    doc = "Outbox routing failed (recipient unregistered, rename failed, decode failed). File left in sender's outbox/ for retry.",
+    payload = "{ from = string, to = string?, id = string, reason = string, error = string?, path = string? }",
+    publishers = { "auto-core" },
+  },
+  ["core.mailbox:message_queued"] = {
+    doc = "A new message landed in <mailbox>/inbox/. The central router fires this on arrival (post-routing).",
+    payload = "{ mailbox = string, id = string, kind = string?, from = string?, path = string, correlation_id = string?, message = table?, decode_error = string? }",
+    publishers = { "auto-core" },
+  },
+  ["core.mailbox:response_received"] = {
+    doc = "A new response landed in <mailbox>/responses/. Triggers wake hook for the original sender.",
+    payload = "{ mailbox = string, correlation_id = string, path = string }",
+    publishers = { "auto-core" },
+  },
+  ["core.mailbox:message_claimed"] = {
+    doc = "transport.claim moved a message from inbox/ to processing/.",
+    payload = "{ mailbox = string, id = string, path = string }",
+    publishers = { "auto-core" },
+  },
+  ["core.mailbox:message_completed"] = {
+    doc = "transport.complete archived a processed message (and optionally wrote a response).",
+    payload = "{ mailbox = string, id = string, path = string, response_path = string? }",
+    publishers = { "auto-core" },
+  },
+  ["core.mailbox:message_failed"] = {
+    doc = "transport.fail archived a message with status='failed'.",
+    payload = "{ mailbox = string, id = string, path = string, error = string?, response_path = string? }",
+    publishers = { "auto-core" },
+  },
+  ["core.mailbox:stale_recovered"] = {
+    doc = "recover_stale moved a stale processing/ message — to inbox (requeue) or archive (fail).",
+    payload = "{ mailbox = string, id = string, policy = 'fail'|'requeue', age_ms = integer, attempt = integer?, path = string, response_path = string? }",
+    publishers = { "auto-core" },
+  },
+  ["core.mailbox:response_written"] = {
+    doc = "A response envelope landed in the sender's responses/ dir.",
+    payload = "{ mailbox = string, reply_to = string, correlation_id = string, path = string, ok = boolean }",
+    publishers = { "auto-core" },
+  },
+  ["core.command:registered"] = {
+    doc = "commands.register stored a new command handler.",
+    payload = "{ name = string, owner = string, description = string? }",
+    publishers = { "auto-core", "md-harpoon.nvim", "auto-agents.nvim" },
+  },
+  ["core.command:executed"] = {
+    doc = "commands.handle_message dispatched a registered command.",
+    payload = "{ name = string, ok = boolean }",
+    publishers = { "auto-core" },
+  },
+  ["core.command:rejected"] = {
+    doc = "commands.reject_unknown / handle_message rejected an unknown command.",
+    payload = "{ name = string, reason = string, message_id = string?, from = string?, to = string?, correlation_id = string? }",
+    publishers = { "auto-core" },
+  },
+
   -- ── doc pinning (md-harpoon — ADR 0006 + auto-core-todos) ───────
   ["doc:pinned"] = {
     doc = "A document was pinned to one of md-harpoon's slots (or repinned to a different path).",

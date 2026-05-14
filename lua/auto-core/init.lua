@@ -25,6 +25,11 @@
 ---  M.debug         diagnostic probes (v0.1.3 — opt-in winlog probe
 ---                  for panel singleton bugs; see `:AutoCoreDebug
 ---                  winlog`)
+---  M.mailbox       durable file-backed mailbox transport + central
+---                  router + command registry (v0.1.6 — ADR 0013,
+---                  Phase 1: per-mailbox roots under each agent's
+---                  tool config dir, walk-and-watch router that
+---                  routes outbox→inbox and dispatches wake hooks)
 ---
 ---Hard rule from ADR 0006: this module never `require`s a family
 ---plugin (no `require("auto-agents")`, etc.). Dependency direction
@@ -41,6 +46,7 @@ M.api_version = v.api_version
 ---@field events { fire_autocmds: boolean?, strict_topics: boolean?, trace_capacity: integer? }?
 ---@field log    { level: string }?           -- "error" | "warn" | "info" | "debug" | "trace"
 ---@field state  { persist_dir: string }?     -- override the default persist root (~/.config/nvim/.auto-core/)
+---@field mailbox { root: string?, autostart: boolean? }?  -- host-side fallback root + whether setup() starts the router
 M.defaults = {
   events = {
     -- Opt-in compatibility shim per ADR §6: when true, `publish(topic)`
@@ -58,6 +64,12 @@ M.defaults = {
   },
   log    = { level = "info" },
   state  = { persist_dir = nil },
+  -- Mailbox config. `root` is the HOST-SIDE FALLBACK for mailboxes
+  -- registered without an explicit per-mailbox root (e.g. `nvim`,
+  -- `user`). Agent mailboxes always pass their own root (typically
+  -- a tool config dir like `~/.claude/mailbox`). `autostart`, when
+  -- true, makes setup() also start the central router.
+  mailbox = { root = nil, autostart = false },
 }
 
 ---@type AutoCoreConfig
@@ -84,6 +96,7 @@ M.health = require("auto-core.health")
 M.lsp    = require("auto-core.lsp")
 M.files  = require("auto-core.files")
 M.debug  = require("auto-core.debug")
+M.mailbox = require("auto-core.mailbox")
 
 ---Initialize auto-core. Idempotent — re-calling re-applies opts and
 ---propagates the relevant subset to each subsystem.
@@ -113,6 +126,15 @@ function M.setup(opts)
   -- |"trace" or a numeric `M.log.levels.<NAME>`.
   M.log.configure({
     level = M.config.log and M.config.log.level,
+  })
+
+  -- Forward mailbox config. `root` is the host-side fallback;
+  -- nil → resolve via env/default. `autostart` flips the router on
+  -- as part of setup() — typical hosts leave this false and start
+  -- the router after registering their mailboxes.
+  M.mailbox.configure({
+    root      = M.config.mailbox and M.config.mailbox.root,
+    autostart = M.config.mailbox and M.config.mailbox.autostart,
   })
 
   M._initialized = true
