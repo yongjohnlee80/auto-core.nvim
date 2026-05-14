@@ -31,6 +31,6 @@ return {
   -- once the whole feature lands (router + bootstrap + debug
   -- probe + family-plugin wiring). Until then, the working tree
   -- stays at v0.1.5 even as new work is committed onto this branch.
-  version     = "0.1.5",
+  version     = "0.1.6",
   api_version = "0.1",
 }

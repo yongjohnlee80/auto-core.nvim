@@ -232,6 +232,26 @@ function M.list_branches(repo_path)
   return lines
 end
 
+---List all remote-tracking branches in `repo_path`.
+---@param repo_path string?
+---@return string[]
+function M.list_remote_branches(repo_path)
+  local cwd = repo_path or vim.fn.getcwd()
+  local result = vim.system(
+    { "git", "-C", cwd, "for-each-ref",
+      "--format=%(refname:short)", "refs/remotes/" },
+    { text = true }
+  ):wait()
+  if result.code ~= 0 then return {} end
+  local lines = {}
+  for line in (result.stdout or ""):gmatch("([^\n]+)") do
+    if not line:match("/HEAD$") then
+      lines[#lines + 1] = line
+    end
+  end
+  return lines
+end
+
 ---Returns true if `repo_path` has a local branch named `name`.
 ---@param repo_path string
 ---@param name      string
@@ -452,6 +472,56 @@ function M.destroy(repo, wt, opts, on_done)
         if on_done then on_done(true, nil, branch_err) end
       end)
     )
+  end))
+end
+
+---Track a remote branch into a new worktree. Async.
+---@param repo { common_dir: string }
+---@param remote_ref string
+---@param local_name string
+---@param target_path string
+---@param on_done fun(res: { ok: boolean, stderr: string? })?
+function M.track(repo, remote_ref, local_name, target_path, on_done)
+  local args = {
+    "git", "--git-dir=" .. repo.common_dir, "worktree", "add",
+    "--track", "-b", local_name, target_path, remote_ref
+  }
+  vim.system(args, { text = true }, vim.schedule_wrap(function(res)
+    local ok = res.code == 0
+    local stderr = ok and nil or vim.trim(res.stderr or "")
+    events.publish("core.git.worktree:added", {
+      repo   = { common_dir = repo.common_dir },
+      path   = target_path,
+      branch = local_name,
+      ok     = ok,
+      stderr = stderr,
+    })
+    if on_done then on_done({ ok = ok, stderr = stderr }) end
+  end))
+end
+
+---Create a new worktree from a base ref. Async.
+---@param repo { common_dir: string }
+---@param branch_name string
+---@param target_path string
+---@param base_ref string
+---@param on_done fun(res: { ok: boolean, stderr: string? })?
+function M.create(repo, branch_name, target_path, base_ref, on_done)
+  local args = {
+    "git", "--git-dir=" .. repo.common_dir, "worktree", "add",
+    "-b", branch_name, target_path, base_ref
+  }
+  vim.system(args, { text = true }, vim.schedule_wrap(function(res)
+    local ok = res.code == 0
+    local stderr = ok and nil or vim.trim(res.stderr or "")
+    events.publish("core.git.worktree:added", {
+      repo   = { common_dir = repo.common_dir },
+      path   = target_path,
+      branch = branch_name,
+      ok     = ok,
+      stderr = stderr,
+    })
+    if on_done then on_done({ ok = ok, stderr = stderr }) end
   end))
 end
 

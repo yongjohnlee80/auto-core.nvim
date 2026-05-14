@@ -155,6 +155,31 @@ local M = {
     payload = "{ repo = { common_dir }, wt = { path, branch?, sha? }, force, ok, err?, branch_err? }",
     publishers = { "auto-core" },
   },
+  ["core.git.worktree:added"] = {
+    doc = "A new worktree was created via track() or create().",
+    payload = "{ repo = { common_dir }, path = string, branch = string, ok = boolean, stderr = string? }",
+    publishers = { "auto-core" },
+  },
+  ["core.git.repo.checkout:started"] = {
+    doc = "git.repo.checkout started.",
+    payload = "{ path = string, branch = string }",
+    publishers = { "auto-core" },
+  },
+  ["core.git.repo.checkout:completed"] = {
+    doc = "git.repo.checkout completed.",
+    payload = "{ path = string, branch = string, ok = boolean, stderr = string? }",
+    publishers = { "auto-core" },
+  },
+  ["core.git.repo.remote:deleted"] = {
+    doc = "A remote branch was deleted via delete_remote().",
+    payload = "{ path = string, remote = string, branch = string, ok = boolean, stderr = string? }",
+    publishers = { "auto-core" },
+  },
+  ["core.git.repo.branch:created"] = {
+    doc = "A new branch was created via create_branch().",
+    payload = "{ path = string, name = string, base = string, ok = boolean, stderr = string? }",
+    publishers = { "auto-core" },
+  },
 
   -- ── mailbox lifecycle (ADR 0013 Phase 1 — auto-core.mailbox) ────
   -- File-backed cross-process transport; topics signal arrival,

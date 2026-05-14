@@ -84,6 +84,11 @@ end
 ok("M.version is a semver string",
   type(core.version) == "string" and core.version:match("^%d+%.%d+%.%d+$") ~= nil,
   tostring(core.version))
+-- FIXME (baseline-stale): see the long FIXME in section [48] below —
+-- this literal-string version assertion needs manual updating on every
+-- patch bump (currently expects 0.1.5; this branch ships v0.1.6). Same
+-- maintenance opportunity as section [48]. Left stale on purpose so
+-- the failure stays discoverable.
 ok("M.version is 0.1.5 (mailbox feature in-flight on this branch; tag stays at last shipped)",
   select(1, eq(core.version, "0.1.5")))
 ok("M.api_version is 0.1 (M.debug additive; events/state/ui/fs/git/tasks/log/health unchanged)",
@@ -888,6 +893,41 @@ for i = pre_delete_count + 1, #seen do
 end
 ok("delete-event fired with change='deleted'", saw_delete,
   vim.inspect({ before = pre_delete_count, total = #seen, last = seen[#seen] }))
+
+-- Directory creation and deletion.
+local pre_dir_count = #seen
+vim.wait(150)
+vim.fn.mkdir(tmp_root .. "/new_dir")
+vim.wait(300, function()
+  for i = pre_dir_count + 1, #seen do
+    if seen[i].path:sub(-#"/new_dir") == "/new_dir" then return true end
+  end
+  return false
+end)
+local saw_dir_create = false
+for i = pre_dir_count + 1, #seen do
+  if seen[i].path:sub(-#"/new_dir") == "/new_dir" and seen[i].change == "created" then
+    saw_dir_create = true
+  end
+end
+ok("create-event fired for new directory", saw_dir_create)
+
+local pre_dir_del_count = #seen
+vim.wait(150)
+vim.fn.delete(tmp_root .. "/new_dir", "d")
+vim.wait(300, function()
+  for i = pre_dir_del_count + 1, #seen do
+    if seen[i].path:sub(-#"/new_dir") == "/new_dir" and seen[i].change == "deleted" then return true end
+  end
+  return false
+end)
+local saw_dir_delete = false
+for i = pre_dir_del_count + 1, #seen do
+  if seen[i].path:sub(-#"/new_dir") == "/new_dir" and seen[i].change == "deleted" then
+    saw_dir_delete = true
+  end
+end
+ok("delete-event fired for deleted directory", saw_dir_delete)
 
 -- Ignore filter: writes under .git/ should produce NO events.
 local before_ignore = #seen
@@ -2694,8 +2734,20 @@ winlog.stop()
 pcall(os.remove, tmp)
 end)()
 
--- ─────────────────────── 48. version + api_version (mailbox feature in-flight, stays at v0.1.5) ─────
-print("\n[48] version pinned to v0.1.5 — feature in-flight; tag bump deferred until mailbox feature complete")
+-- ─────────────────────── 48. version + api_version sanity ─────────────────────────
+-- FIXME (baseline-stale): the literal-string version assertion below
+-- needs manual updating on every patch bump (currently expects 0.1.5;
+-- this branch is shipping v0.1.6). The next maintenance pass should
+-- either
+--   (a) parse `require("auto-core.version").version` and assert it
+--       matches a regex like "^0%.1%.%d+$" so the test tracks
+--       additive patch bumps without manual edits, OR
+--   (b) replace this section with a single check that the surface
+--       exists (M.debug.winlog, M.mailbox, etc) and drop the version
+--       string assertion entirely.
+-- Tracked: leave the assertion as-is so the failure stays
+-- discoverable until someone consciously picks it up.
+print("\n[48] version + api_version sanity")
 ;(function()
 local v = require("auto-core.version")
 ok("version stays at v0.1.5 (next tag deferred until mailbox feature complete)",
@@ -4066,6 +4118,101 @@ pcall(vim.fn.delete, tmp_root, "rf")
 vim.env.AUTO_AGENTS_MAILBOX_ROOT = saved_env.AUTO_AGENTS_MAILBOX_ROOT
 vim.env.AUTO_AGENTS_CONFIG_DIR   = saved_env.AUTO_AGENTS_CONFIG_DIR
 vim.env.AUTO_AGENTS_KB_ROOT      = saved_env.AUTO_AGENTS_KB_ROOT
+end)()
+
+-- ─────────────────────── 49. remote branches + git mutations (Phase 3.5+) ─────────────────────────
+print("\n[49] git.worktree/git.repo — remote branches + mutations")
+;(function()
+local wt_mod = require("auto-core.git.worktree")
+local repo_mod = require("auto-core.git.repo")
+local events = require("auto-core.events")
+
+-- 1. Setup local bare remote and a clone
+local tmp = vim.fn.tempname()
+local remote_path = tmp .. "/remote.git"
+local clone_path  = tmp .. "/clone"
+vim.fn.mkdir(remote_path, "p")
+vim.system({ "git", "init", "--bare", remote_path }):wait()
+
+vim.fn.mkdir(clone_path, "p")
+vim.system({ "git", "clone", remote_path, clone_path }):wait()
+vim.system({ "git", "-C", clone_path, "config", "user.email", "test@example.com" }):wait()
+vim.system({ "git", "-C", clone_path, "config", "user.name", "Test User" }):wait()
+vim.system({ "git", "-C", clone_path, "commit", "--allow-empty", "-m", "initial" }):wait()
+vim.system({ "git", "-C", clone_path, "push", "origin", "HEAD" }):wait()
+
+-- 2. Create a remote branch
+vim.system({ "git", "-C", clone_path, "checkout", "-b", "feature-y" }):wait()
+vim.system({ "git", "-C", clone_path, "push", "origin", "feature-y" }):wait()
+local def_branch = wt_mod.default_branch(clone_path)
+vim.system({ "git", "-C", clone_path, "checkout", def_branch }):wait()
+
+-- 3. Test list_remote_branches
+local remotes = wt_mod.list_remote_branches(clone_path)
+local found = false
+for _, r in ipairs(remotes) do if r == "origin/feature-y" then found = true end end
+ok("list_remote_branches finds real remote branch", found)
+
+-- 4. Test track()
+local wt_added_event = nil
+events.subscribe("core.git.worktree:added", function(p) wt_added_event = p end)
+
+local track_path = tmp .. "/track-wt"
+local track_done = false
+wt_mod.track({ common_dir = clone_path .. "/.git" }, "origin/feature-y", "feature-y-local", track_path, function(res)
+  ok("track() callback reports success", res.ok, res.stderr)
+  track_done = true
+end)
+vim.wait(2000, function() return track_done end)
+
+ok("track() created directory", vim.fn.isdirectory(track_path) == 1)
+ok("track() published core.git.worktree:added", wt_added_event and wt_added_event.path == track_path)
+
+-- 5. Test create_branch()
+local branch_created_event = nil
+events.subscribe("core.git.repo.branch:created", function(p) branch_created_event = p end)
+
+local cb_done = false
+repo_mod.create_branch(clone_path, "new-branch", def_branch, function(res)
+  ok("create_branch() callback reports success", res.ok, res.stderr)
+  cb_done = true
+end)
+vim.wait(2000, function() return cb_done end)
+ok("create_branch() published core.git.repo.branch:created", branch_created_event and branch_created_event.name == "new-branch")
+
+-- 6. Test checkout() + checkout_status()
+ok("checkout_status() reports ok for clean branch", repo_mod.checkout_status(clone_path, def_branch).ok)
+
+local checkout_event = nil
+events.subscribe("core.git.repo.checkout:completed", function(p) checkout_event = p end)
+local co_done = false
+repo_mod.checkout(clone_path, def_branch, function(res)
+  ok("checkout() callback reports success", res.ok, res.stderr)
+  co_done = true
+end)
+vim.wait(2000, function() return co_done end)
+ok("checkout() published core.git.repo.checkout:completed", checkout_event and checkout_event.branch == def_branch)
+
+-- 7. Test delete_remote()
+local remote_deleted_event = nil
+events.subscribe("core.git.repo.remote:deleted", function(p) remote_deleted_event = p end)
+local del_done = false
+repo_mod.delete_remote(clone_path, "origin", "feature-y", function(res)
+  ok("delete_remote() callback reports success", res.ok)
+  del_done = true
+end)
+vim.wait(2000, function() return del_done end)
+ok("delete_remote() published core.git.repo.remote:deleted", remote_deleted_event and remote_deleted_event.branch == "feature-y")
+
+-- Verify remote branch is gone from listing
+vim.system({ "git", "-C", clone_path, "fetch", "--prune" }):wait()
+remotes = wt_mod.list_remote_branches(clone_path)
+found = false
+for _, r in ipairs(remotes) do if r == "origin/feature-y" then found = true end end
+ok("remote branch gone after delete_remote + prune", not found)
+
+-- Cleanup
+vim.fn.delete(tmp, "rf")
 end)()
 
 -- ─────────────────────── summary ─────────────────────────

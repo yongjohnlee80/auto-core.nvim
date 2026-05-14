@@ -10,6 +10,73 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.6] — 2026-05-14 — remote-branch management primitives + events for git.repo/git.worktree
+
+Additive patch-line release. Adds the git-side primitives that the
+`worktree.nvim` graph uses for its `R` / `C` / `D` / `W` keybindings
+(toggle remotes, checkout, destroy, new branch).
+
+### Added — git.repo
+
+- `repo.checkout_status(path, branch)` — sync probe. Returns
+  `{ ok, reason?, dirty?, worktree? }`. Detects: not-a-repo,
+  branch-already-checked-out-in-another-worktree, dirty working tree.
+- `repo.checkout(path, branch, on_done)` — async checkout. Publishes
+  `core.git.repo.checkout:started` / `:completed`.
+- `repo.create_branch(path, name, base, on_done)` — async branch
+  creation via `git checkout -b name base`. Publishes
+  `core.git.repo.branch:created`.
+- `repo.delete_remote(path, remote, branch, on_done)` — async
+  `git push remote --delete branch`. Publishes
+  `core.git.repo.remote:deleted`.
+
+### Added — git.worktree
+
+- `worktree.list_remote_branches(repo_path)` — sync. Returns
+  `origin/<branch>` style strings, excluding `*/HEAD` pseudo-refs.
+- `worktree.track(repo, remote_ref, local_name, target_path, on_done)`
+  — async `git worktree add --track -b local_name target remote_ref`.
+  Publishes `core.git.worktree:added`.
+- `worktree.create(repo, branch_name, target_path, base_ref, on_done)`
+  — async `git worktree add -b branch target base`. Publishes
+  `core.git.worktree:added`.
+
+### Callback shape — unified across the new primitives
+
+All four async functions above use the same `on_done(res)` shape:
+
+```lua
+on_done = function(res)
+  -- res.ok :: boolean
+  -- res.stderr :: string?   -- present only on failure
+end
+```
+
+This matches the existing `repo.checkout` shape and avoids the
+two-arg/table-arg asymmetry that an earlier draft mixed in. Callers
+can pattern-match against the table; old `(ok, err)` shape is NOT
+shipped.
+
+### Added — event topics (all additive)
+
+- `core.git.repo.checkout:started`
+- `core.git.repo.checkout:completed`
+- `core.git.repo.remote:deleted`
+- `core.git.repo.branch:created`
+- `core.git.worktree:added`
+
+### Version metadata
+
+- `version` → `0.1.6` (additive patch line per
+  [[auto-core-maintenance]]).
+- `api_version` unchanged at `0.1`. New surface is feature-detected
+  via `type(require("auto-core").git.repo.checkout) == "function"`.
+
+### Migration
+
+No source-level migration. The corresponding consumer-side wiring
+ships in `worktree.nvim` v0.4.4.
+
 ## [v0.1.5] — 2026-05-14 — mailbox transport + command registry skeleton (ADR 0013 Phase 1)
 
 Additive patch-line release. Adds `auto-core.mailbox` — a durable,

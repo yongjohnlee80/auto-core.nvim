@@ -120,4 +120,85 @@ function M.is_bare(path)
   return out == "true"
 end
 
+---Probe the status of a potential checkout. Sync.
+---@param path string
+---@param branch string
+---@return { ok: boolean, reason: string?, dirty: boolean?, worktree: string? }
+function M.checkout_status(path, branch)
+  local p = fs_path.normalize(path)
+  if not M.is_git(p) then
+    return { ok = false, reason = "not a git repository" }
+  end
+
+  -- Check for existing worktree for this branch.
+  local wt_mod = require("auto-core.git.worktree")
+  local existing_wt = wt_mod.worktree_for_branch(p, branch)
+  if existing_wt then
+    return { ok = false, reason = "branch already checked out in " .. existing_wt, worktree = existing_wt }
+  end
+
+  -- Check for dirty working tree.
+  local pull_mod = require("auto-core.git.pull")
+  local status = pull_mod.worktree_dirty({ path = p })
+  if status.dirty then
+    return { ok = false, reason = "working tree is dirty (" .. status.dirty_count .. " files)", dirty = true }
+  end
+
+  return { ok = true }
+end
+
+---Checkout a branch in the repo at `path`. Async.
+---@param path string
+---@param branch string
+---@param on_done fun(res: { ok: boolean, stderr: string? })?
+function M.checkout(path, branch, on_done)
+  local events = require("auto-core.events")
+  events.publish("core.git.repo.checkout:started", { path = path, branch = branch })
+  local args = { "git", "-C", path, "checkout", branch }
+  vim.system(args, { text = true }, vim.schedule_wrap(function(res)
+    local ok = res.code == 0
+    local stderr = ok and nil or vim.trim(res.stderr or "")
+    events.publish("core.git.repo.checkout:completed", {
+      path = path, branch = branch, ok = ok, stderr = stderr
+    })
+    if on_done then on_done({ ok = ok, stderr = stderr }) end
+  end))
+end
+
+---Delete a remote branch. Async.
+---@param path string
+---@param remote string
+---@param branch string
+---@param on_done fun(res: { ok: boolean, stderr: string? })?
+function M.delete_remote(path, remote, branch, on_done)
+  local events = require("auto-core.events")
+  local args = { "git", "-C", path, "push", remote, "--delete", branch }
+  vim.system(args, { text = true }, vim.schedule_wrap(function(res)
+    local ok = res.code == 0
+    local stderr = ok and nil or vim.trim(res.stderr or "")
+    events.publish("core.git.repo.remote:deleted", {
+      path = path, remote = remote, branch = branch, ok = ok, stderr = stderr
+    })
+    if on_done then on_done({ ok = ok, stderr = stderr }) end
+  end))
+end
+
+---Create and checkout a new branch from a base ref. Async.
+---@param path string
+---@param name string
+---@param base string
+---@param on_done fun(res: { ok: boolean, stderr: string? })?
+function M.create_branch(path, name, base, on_done)
+  local events = require("auto-core.events")
+  local args = { "git", "-C", path, "checkout", "-b", name, base }
+  vim.system(args, { text = true }, vim.schedule_wrap(function(res)
+    local ok = res.code == 0
+    local stderr = ok and nil or vim.trim(res.stderr or "")
+    events.publish("core.git.repo.branch:created", {
+      path = path, name = name, base = base, ok = ok, stderr = stderr
+    })
+    if on_done then on_done({ ok = ok, stderr = stderr }) end
+  end))
+end
+
 return M
