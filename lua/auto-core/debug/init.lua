@@ -4,10 +4,12 @@
 ---namespace runs at setup time.
 ---
 ---Sub-modules (probes):
----   `winlog` — window/buffer lifecycle logger. Detects panel
+---   `winlog`  — window/buffer lifecycle logger. Detects panel
 ---     singleton violations, stray panel-buffer hijacks, and splits
 ---     made under `eventignore = "all"` / `noautocmd = true` that
 ---     bypass the leak-guard autocmd.
+---   `mailbox` — mailbox event filter / pretty-printer / router
+---     status / registry dump / follow-mode appender.
 ---
 ---Routing rule: each probe is a self-contained module
 ---(`auto-core.debug.<probe>`) that exposes a small, uniform API
@@ -18,6 +20,7 @@
 
 local M = {}
 
-M.winlog = require("auto-core.debug.winlog")
+M.winlog  = require("auto-core.debug.winlog")
+M.mailbox = require("auto-core.debug.mailbox")
 
 return M

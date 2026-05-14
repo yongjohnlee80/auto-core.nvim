@@ -26,6 +26,11 @@
 ---@module 'auto-core.version'
 
 return {
-  version     = "0.1.4",
+  -- v0.1.5 is the last *committed* tag. The mailbox feature is
+  -- in-flight on the queue-mailbox branch; we tag the next bump
+  -- once the whole feature lands (router + bootstrap + debug
+  -- probe + family-plugin wiring). Until then, the working tree
+  -- stays at v0.1.5 even as new work is committed onto this branch.
+  version     = "0.1.5",
   api_version = "0.1",
 }

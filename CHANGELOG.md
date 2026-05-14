@@ -10,6 +10,67 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.5] — 2026-05-14 — mailbox transport + command registry skeleton (ADR 0013 Phase 1)
+
+Additive patch-line release. Adds `auto-core.mailbox` — a durable,
+file-backed cross-process transport that gives sandboxed CLI agents
+a way to coordinate with each other and with Neovim through atomic
+JSON writes to a shared directory tree. Sockets, loopback HTTP, and
+Neovim RPC are not reachable from the default agent sandbox; file
+I/O is. See ADR 0013 for the full rationale.
+
+### Added
+
+- `M.mailbox` namespace with submodules: `path`, `message`,
+  `registry`, `transport`, `consumer`, `commands`.
+- `M.mailbox.configure({ root })` — override the resolved mailbox
+  root. Default is durable + global, NOT tied to any worktree:
+  `$AUTO_AGENTS_MAILBOX_ROOT` → `$AUTO_AGENTS_CONFIG_DIR/mailbox` →
+  `dirname($AUTO_AGENTS_KB_ROOT)/mailbox` →
+  `~/.config/nvim/.auto-agents-config/mailbox`. The default
+  intentionally survives worktree creation/destruction so
+  coordination state is never orphaned.
+- `M.mailbox.register(id)` — ensure
+  `<root>/<id>/{inbox,outbox,processing,archive,responses}/` exist.
+  Mailbox ids may include `:` (e.g. `agent:lector`); path-traversal
+  and slash characters are rejected.
+- `M.mailbox.send(opts)` — atomic enqueue: write tmp file in the
+  target inbox, fsync, rename into place. Generates a stable id
+  and ISO-8601 `created_at` if not supplied; validates the baseline
+  message shape (kind/from/to/command).
+- `M.mailbox.claim/complete/fail` — state transitions
+  (`inbox → processing → archive`), with optional response envelope
+  written to the sender's `responses/<correlation_id>.json`.
+- `M.mailbox.consume(id, opts)` — observe an inbox via
+  `auto-core.fs.watch` or a uv-timer polling fallback
+  (`mode = "auto" | "watch" | "poll"`). Emits
+  `core.mailbox:message_queued` for newly-arrived files.
+- `M.mailbox.commands` — command registry skeleton:
+  `register/get/list/unregister` plus `handle_message` and
+  `reject_unknown`. The registry is the security boundary:
+  unknown commands return a structured `{ok=false, code="unknown_command"}`
+  response; raw Lua/Vimscript/shell/RPC strings are never executed.
+- New event topics: `core.mailbox:registered`,
+  `core.mailbox:message_queued`, `core.mailbox:message_claimed`,
+  `core.mailbox:message_completed`, `core.mailbox:message_failed`,
+  `core.mailbox:response_written`, `core.command:registered`,
+  `core.command:executed`, `core.command:rejected`.
+
+### Version metadata
+
+- `version` → `0.1.5` (additive patch line per
+  [[auto-core-maintenance]]).
+- `api_version` unchanged at `0.1`. New surface is feature-detected
+  via `type(require("auto-core").mailbox) == "table"`.
+
+### Migration
+
+No source-level migration. Follow-up worktrees will move
+`md-harpoon` (harpoon command), `auto-agents` (openDiff /
+closeDiff / send_slot / send_user), and the diff-queue review
+flow onto the command registry; this release does NOT touch
+those plugins.
+
 ## [v0.1.4] — 2026-05-11 — percentage-based widths for multi-float panes
 
 Feature. `ui.float.multi`'s `_compute_layout` now treats width values
