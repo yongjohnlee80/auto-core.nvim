@@ -46,6 +46,7 @@
 
 local events    = require("auto-core.events")
 local fs_path   = require("auto-core.fs.path")
+local mb_path   = require("auto-core.mailbox.path")
 local registry  = require("auto-core.mailbox.registry")
 local message   = require("auto-core.mailbox.message")
 local commands  = require("auto-core.mailbox.commands")
@@ -222,7 +223,8 @@ local function dispatch_wake(rec, kind, mid)
   }
   local ctx = {
     reason       = "mailbox_wake",
-    mailbox      = rec.id,
+    mailbox      = rec.bare_id,
+    mailbox_full = rec.id,
     arrival_kind = kind,
     arrival_id   = mid,
   }
@@ -243,7 +245,8 @@ local function route_outbox(rec, mid)
   if not msg then
     if derr then
       events.publish("core.mailbox:outbox_undeliverable", {
-        from   = rec.id,
+        from   = rec.bare_id,
+        from_full = rec.id,
         id     = mid,
         reason = "decode_failed",
         error  = derr,
@@ -255,7 +258,8 @@ local function route_outbox(rec, mid)
   local recipient = registry.get(msg.to)
   if not recipient then
     events.publish("core.mailbox:outbox_undeliverable", {
-      from   = rec.id,
+      from   = rec.bare_id,
+      from_full = rec.id,
       to     = msg.to,
       id     = mid,
       reason = "recipient_unregistered",
@@ -268,7 +272,8 @@ local function route_outbox(rec, mid)
   local ok, err = vim.uv.fs_rename(src, dst)
   if not ok then
     events.publish("core.mailbox:outbox_undeliverable", {
-      from   = rec.id,
+      from   = rec.bare_id,
+      from_full = rec.id,
       to     = msg.to,
       id     = mid,
       reason = "rename_failed",
@@ -278,16 +283,16 @@ local function route_outbox(rec, mid)
     return
   end
 
-  -- Pre-seed the recipient's inbox-seen set so the same file isn't
-  -- announced twice (once here, once by the watcher firing on
-  -- recipient inbox). We still let the recipient inbox path publish
-  -- the queued event so subscribers consistently see
-  -- core.mailbox:message_queued AFTER core.mailbox:outbox_routed.
+  -- v0.1.8: event payloads use bare ids for consumer-friendly
+  -- pattern matching. Use `from_full` / `to_resolved` when you need
+  -- the full instance-suffixed form (e.g. for cross-instance routing).
   events.publish("core.mailbox:outbox_routed", {
-    from = rec.id,
-    to   = msg.to,
-    id   = mid,
-    path = dst,
+    from        = rec.bare_id,
+    from_full   = rec.id,
+    to          = mb_path.bare_id(msg.to),
+    to_resolved = recipient.id,
+    id          = mid,
+    path        = dst,
   })
 end
 
@@ -318,8 +323,9 @@ local function execute_command(rec, mid, msg)
     return
   end
   local response = commands.handle_message(claimed, {
-    reason  = "mailbox_executioner",
-    mailbox = rec.id,
+    reason       = "mailbox_executioner",
+    mailbox      = rec.bare_id,
+    mailbox_full = rec.id,
   })
   -- complete() handles the response envelope routing back to the
   -- sender. Errors during complete are logged but don't propagate;
@@ -335,7 +341,8 @@ local function handle_inbox(rec, mid)
   seen[mid] = true
   local msg, err = transport.read_from(rec.id, "inbox", mid)
   events.publish("core.mailbox:message_queued", {
-    mailbox        = rec.id,
+    mailbox        = rec.bare_id,
+    mailbox_full   = rec.id,
     id             = mid,
     kind           = msg and msg.kind or nil,
     from           = msg and msg.from or nil,
@@ -361,7 +368,8 @@ local function handle_response(rec, cor)
   if seen[cor] then return end
   seen[cor] = true
   events.publish("core.mailbox:response_received", {
-    mailbox        = rec.id,
+    mailbox        = rec.bare_id,
+    mailbox_full   = rec.id,
     correlation_id = cor,
     path           = rec.subs.responses .. "/" .. cor .. ".json",
   })

@@ -2,27 +2,37 @@
 ---layout management + bootstrap-doc upsert.
 ---
 ---A mailbox is identified by a string id (e.g. `user`, `nvim`,
----`agent:lector`). Registering a mailbox:
+---`agent:lector`). v0.1.8 introduces **per-instance scoping**:
+---bare ids passed to `register` are auto-suffixed with the current
+---nvim's `instance_id` (`<unix-seconds>-<pid>`) so that multiple
+---nvim processes sharing a tool root (~/.codex/mailbox/...) get
+---non-overlapping mailbox subtrees. Callers can pass an already-
+---suffixed id to address a specific instance (rare; cross-instance
+---is intentionally explicit).
+---
+---Registering a mailbox:
 ---
 ---  1. Resolves the on-disk root. The caller may pass an explicit
 ---     `root` (e.g. `~/.claude/mailbox` for a claude-backed agent)
 ---     so the sandbox-allowed location is used. Without `root`,
 ---     auto-core falls back to the host-side default — see
 ---     `auto-core.mailbox.path.host_fallback_root`.
----  2. Ensures `<root>/<id>/{inbox,outbox,processing,archive,
+---  2. Resolves the full id via `path.full_id(bare_id)` so each
+---     registration is scoped to this nvim's instance_id.
+---  3. Ensures `<root>/<full_id>/{inbox,outbox,processing,archive,
 ---     responses}/` exist.
----  3. Stores the optional `wake = { command, args }` config so the
+---  4. Stores the optional `wake = { command, args }` config so the
 ---     central router can dispatch a wake-up through the command
 ---     registry when new inbox/responses files arrive.
----  4. Upserts `<root>/<id>/bootstrap-mailbox.md` from the canonical
----     template. Always rewritten — agents detect protocol changes
----     via the doc's `revision:` frontmatter field.
----  5. Publishes `core.mailbox:registered`.
+---  5. Upserts `<root>/bootstrap-mailbox.md` from the canonical
+---     template (per-tool-root, shared across every mailbox in
+---     that root — v0.1.8 hoist). v0.1.7's revision-skip keeps
+---     this cheap on repeat calls.
+---  6. Publishes `core.mailbox:registered`.
 ---
 ---Re-registering a mailbox is idempotent for filesystem state (it
----does NOT clear inbox / processing / archive contents) but it
----DOES re-upsert the bootstrap doc with current template content.
----The `core.mailbox:registered` event fires every time — consumers
+---does NOT clear inbox / processing / archive contents). The
+---`core.mailbox:registered` event fires every time — consumers
 ---that want first-time-only behavior can dedupe on the `mailbox`
 ---field.
 ---
@@ -49,13 +59,14 @@ local _by_id = {}
 ---@field executioner boolean?                   -- when true, the central router auto-claims+dispatches command messages via the registry and writes the response; default true for id='nvim', false elsewhere
 
 ---@class AutoCoreMailboxRecord
----@field id            string
+---@field id            string                       -- full id including `:<instance_id>` suffix
+---@field bare_id       string                       -- caller's input form (without instance suffix)
 ---@field root          string                       -- resolved fallback or explicit root
----@field dir           string                       -- `<root>/<id>/`
+---@field dir           string                       -- `<root>/<full_id>/`
 ---@field subs          table<string, string>        -- subdir name → absolute path
 ---@field wake          AutoCoreMailboxWakeSpec?
 ---@field executioner   boolean                      -- when true, router auto-dispatches commands addressed to this mailbox
----@field bootstrap     { path: string, revision: string }
+---@field bootstrap     { path: string, revision: string, wrote: boolean }
 ---@field registered_at string
 
 -- ── helpers ──────────────────────────────────────────────────
@@ -68,21 +79,28 @@ end
 
 -- ── public API ───────────────────────────────────────────────
 
----Register `id` as a mailbox. Returns the record. Always upserts
----the bootstrap doc.
----@param id   string
+---Register `id` as a mailbox. Returns the record. Auto-suffixes
+---bare ids with the current nvim's instance_id (v0.1.8).
+---@param id   string  -- bare ("agent:lector") or full ("agent:lector:111-222")
 ---@param opts AutoCoreMailboxRegisterOpts?
 ---@return AutoCoreMailboxRecord
 function M.register(id, opts)
   opts = opts or {}
-  local ok, err = mb_path.validate_id(id)
+  -- Capture the caller's bare form for display + executioner checks
+  -- BEFORE we suffix it. This way "nvim" still triggers the
+  -- executioner default even though the on-disk dir becomes
+  -- `nvim:<instance_id>/`.
+  local bare = mb_path.bare_id(id)
+  local full_id = mb_path.full_id(id)
+
+  local ok, err = mb_path.validate_id(full_id)
   if not ok then
     error("auto-core.mailbox.registry: " .. tostring(err))
   end
 
   local root = opts.root and mb_path.normalize_root(opts.root)
                        or mb_path.host_fallback_root()
-  local dir = fs_path.join(root, id)
+  local dir = fs_path.join(root, full_id)
   ensure_dir(dir)
 
   local subs = {}
@@ -92,26 +110,29 @@ function M.register(id, opts)
     subs[sub] = p
   end
 
-  local previous = _by_id[id]
+  local previous = _by_id[full_id]
   local registered_at = previous and previous.registered_at or message.now_iso()
 
-  -- Upsert the bootstrap doc with the current template. Always.
-  local boot = bootstrap.upsert({ id = id, dir = dir, wake = opts.wake })
+  -- v0.1.8: bootstrap doc is per-tool-root (one doc shared across
+  -- every mailbox under this root), not per-mailbox. v0.1.7's
+  -- revision-skip keeps repeat calls free.
+  local boot = bootstrap.upsert({ tool_root = root })
 
-  -- Executioner default: nvim is the host-side executioner by
-  -- convention (ADR 0013 §4). Other mailboxes default off; callers
-  -- can flip it on explicitly per mailbox.
+  -- Executioner default keyed on the BARE id, so "nvim" still
+  -- triggers the host-side executioner convention after the
+  -- instance suffix is applied.
   local executioner
   if opts.executioner ~= nil then
     executioner = opts.executioner == true
-  elseif id == "nvim" then
+  elseif bare == "nvim" then
     executioner = true
   else
     executioner = false
   end
 
   local record = {
-    id            = id,
+    id            = full_id,
+    bare_id       = bare,
     root          = root,
     dir           = dir,
     subs          = subs,
@@ -120,10 +141,11 @@ function M.register(id, opts)
     bootstrap     = boot,
     registered_at = registered_at,
   }
-  _by_id[id] = record
+  _by_id[full_id] = record
 
   events.publish("core.mailbox:registered", {
-    mailbox            = id,
+    mailbox            = full_id,
+    bare_id            = bare,
     dir                = dir,
     root               = root,
     wake               = opts.wake,
@@ -137,11 +159,16 @@ end
 
 ---Get an already-registered mailbox record. Returns nil if not
 ---registered (does NOT auto-register — callers that want
----auto-register should call `register`).
+---auto-register should call `register`). Accepts bare or full ids;
+---a bare id resolves against THIS nvim's instance_id, so cross-
+---instance lookups must use the full id explicitly. This is
+---intentional — bare addressing always means "in my instance."
 ---@param id string
 ---@return AutoCoreMailboxRecord?
 function M.get(id)
-  return _by_id[id]
+  if type(id) ~= "string" or id == "" then return nil end
+  local full_id = mb_path.full_id(id)
+  return _by_id[full_id]
 end
 
 ---List all registered mailbox ids.
@@ -178,10 +205,12 @@ function M.unique_roots()
 end
 
 ---Forget a mailbox from the in-memory registry. Does NOT delete any
----on-disk directories — those persist for audit.
+---on-disk directories — those persist for audit. Accepts bare or
+---full ids (bare resolves against this nvim's instance_id).
 ---@param id string
 function M.unregister(id)
-  _by_id[id] = nil
+  if type(id) ~= "string" or id == "" then return end
+  _by_id[mb_path.full_id(id)] = nil
 end
 
 ---Test-only — clears the in-memory registry. Does NOT delete the

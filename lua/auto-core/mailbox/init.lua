@@ -118,13 +118,53 @@ function M.host_fallback_root() return path_mod.host_fallback_root() end
 ---Register a mailbox. The opts table carries per-mailbox `root`
 ---(typically a tool config dir like `~/.claude/mailbox`) and an
 ---optional `wake = { command, args }` for the router to dispatch
----on inbox/responses arrival.
+---on inbox/responses arrival. v0.1.8 auto-suffixes bare ids with
+---this nvim's `instance_id` — see `mailbox.get_instance_id`.
 ---@param id   string
 ---@param opts AutoCoreMailboxRegisterOpts?
 function M.register(id, opts)
   local rec = registry_mod.register(id, opts)
   if router_mod.is_running() then router_mod.refresh() end
   return rec
+end
+
+---This nvim's mailbox `instance_id` (`<unix-seconds>-<pid>` by
+---default; stable for the lifetime of this nvim process). All
+---bare mailbox ids registered via `register` are suffixed with
+---this value, so two nvims sharing a tool root get
+---non-overlapping mailbox subtrees.
+---@return string
+function M.get_instance_id() return path_mod.get_instance_id() end
+
+---Override the instance_id. Rare — primarily for tests pinning
+---to a known value, or consumers that want a project-scoped id
+---instead of the process-scoped default. Must be called before
+---any `register()` to be useful. Pass `nil` to revert to default.
+---@param id string?
+function M.set_instance_id(id) return path_mod.set_instance_id(id) end
+
+---Build the env-var table an agent needs at spawn time so it can
+---locate its own mailbox without socket access (sandbox-safe).
+---Pass a registered mailbox record; returns a flat map ready to
+---splat into the agent's spawn env.
+---
+---  AUTO_AGENTS_INSTANCE_ID            — this nvim's instance_id
+---  AUTO_AGENTS_MAILBOX_ID             — agent's full mailbox id
+---  AUTO_AGENTS_MAILBOX_DIR            — agent's mailbox dir
+---  AUTO_AGENTS_MAILBOX_BOOTSTRAP_DOC  — per-tool-root bootstrap doc
+---@param record AutoCoreMailboxRecord
+---@return table<string, string>
+function M.env_for_agent(record)
+  if type(record) ~= "table" or type(record.id) ~= "string" then
+    error("auto-core.mailbox.env_for_agent: pass a registered record "
+      .. "(result of mailbox.register)")
+  end
+  return {
+    AUTO_AGENTS_INSTANCE_ID           = path_mod.get_instance_id(),
+    AUTO_AGENTS_MAILBOX_ID            = record.id,
+    AUTO_AGENTS_MAILBOX_DIR           = record.dir,
+    AUTO_AGENTS_MAILBOX_BOOTSTRAP_DOC = record.bootstrap.path,
+  }
 end
 
 ---Send a message via the host-side helper. Writes directly to the
@@ -185,6 +225,73 @@ function M.is_running() return router_mod.is_running() end
 
 ---Force a one-shot pass over every registered mailbox.
 function M.scan_now() return router_mod.scan_now() end
+
+---Prune old per-instance mailbox dirs. Walks each registered tool
+---root (or `opts.root` if explicitly passed), removes any mailbox
+---dir whose name matches the standard id pattern, is NOT currently
+---registered in this nvim's live registry, and whose mtime is
+---older than `opts.max_age_seconds` (default: 7 days).
+---
+---Skips the per-tool-root bootstrap doc (it's a file, not a dir)
+---and skips live registered ids regardless of mtime. Bare-id
+---directories from pre-v0.1.8 layouts are also swept by age — they
+---can never be "live" in v0.1.8 since registrations are always
+---per-instance now.
+---
+---Returns `{ removed = string[], kept_alive = string[],
+--- kept_recent = string[] }`. Errors during individual rm are
+---non-fatal — the path is reported in `failed` instead.
+---@param opts { root: string?, max_age_seconds: integer? }?
+---@return { removed: string[], kept_alive: string[], kept_recent: string[], failed: string[] }
+function M.prune(opts)
+  opts = opts or {}
+  local roots
+  if type(opts.root) == "string" and opts.root ~= "" then
+    roots = { path_mod.normalize_root(opts.root) }
+  else
+    roots = registry_mod.unique_roots()
+  end
+  local max_age = tonumber(opts.max_age_seconds) or (7 * 24 * 60 * 60)
+  local now = os.time()
+
+  local live = {}
+  for _, rec in ipairs(registry_mod.records()) do live[rec.id] = true end
+
+  local out = { removed = {}, kept_alive = {}, kept_recent = {}, failed = {} }
+
+  for _, root in ipairs(roots) do
+    if vim.fn.isdirectory(root) == 1 then
+      local sd = vim.uv.fs_scandir(root)
+      if sd then
+        while true do
+          local name, type_ = vim.uv.fs_scandir_next(sd)
+          if not name then break end
+          if type_ == "directory" and name:match(path_mod.ID_PATTERN) then
+            local dir = root .. "/" .. name
+            if live[name] then
+              out.kept_alive[#out.kept_alive + 1] = dir
+            else
+              local stat = vim.uv.fs_stat(dir)
+              local mtime = stat and stat.mtime and stat.mtime.sec or now
+              if (now - mtime) >= max_age then
+                local ok = pcall(vim.fn.delete, dir, "rf")
+                if ok and vim.fn.isdirectory(dir) == 0 then
+                  out.removed[#out.removed + 1] = dir
+                else
+                  out.failed[#out.failed + 1] = dir
+                end
+              else
+                out.kept_recent[#out.kept_recent + 1] = dir
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  return out
+end
 
 ---Test-only — resets every mailbox submodule. Does NOT delete
 ---on-disk directories.

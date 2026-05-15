@@ -10,6 +10,114 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.8] — 2026-05-14 — mailbox per-instance isolation + per-tool-root bootstrap doc
+
+Major reshape of the mailbox directory layout to support running
+multiple nvim instances on the same user account without cross-
+talk. The shared `~/.<tool>/mailbox/` tree is now subdivided by
+**instance_id** (`<unix-seconds>-<pid>` of the nvim process), so
+`agent:jarvis` in nvim-A and `agent:jarvis` in nvim-B live at
+non-overlapping paths and the kernel itself enforces isolation —
+no router lock, no host-id stamping, no response-routing logic
+needed.
+
+This is technically a persisted-schema change (existing
+pre-v0.1.8 `<root>/agent:<name>/` dirs become orphaned), shipped
+as a patch bump per explicit user decision. The only known
+consumer (auto-agents) updates alongside; orphan dirs are
+eligible for the new `mailbox.prune` sweep.
+
+### Added
+
+- **`mailbox.get_instance_id()` / `mailbox.set_instance_id(id)`**
+  — read/override the per-nvim instance id. Default is computed
+  lazily as `<os.time>-<getpid>`; set_instance_id is primarily
+  for tests pinning to a known value.
+- **`mailbox.path.full_id(id)` / `path.bare_id(id)` /
+  `path.is_full_id(id)`** — id-shape helpers. Bare ids are the
+  human form (`agent:lector`); full ids carry the instance
+  suffix (`agent:lector:1747309200-3478472`). `full_id` is the
+  identity transform for already-suffixed inputs.
+- **`mailbox.path.bootstrap_doc_path(tool_or_root)`** — resolves
+  to `<tool-root>/bootstrap-mailbox.md` (per-tool-root layout).
+- **`mailbox.env_for_agent(record)`** — returns the env-var table
+  an agent needs at spawn time so it can locate its own mailbox
+  without socket access (sandbox-safe). Keys:
+  `AUTO_AGENTS_INSTANCE_ID`, `AUTO_AGENTS_MAILBOX_ID` (full),
+  `AUTO_AGENTS_MAILBOX_DIR`, `AUTO_AGENTS_MAILBOX_BOOTSTRAP_DOC`.
+- **`mailbox.prune({ root, max_age_seconds })`** — sweeps stale
+  instance dirs under `root` (or every registered root). Skips
+  currently-registered live ids; deletes anything whose mtime is
+  older than `max_age_seconds` (default 7 days). Returns
+  `{ removed, kept_alive, kept_recent, failed }`. Bare-id orphan
+  dirs from pre-v0.1.8 are pruneable by age (they can never be
+  "live" in v0.1.8 since registrations are always full now).
+
+### Changed
+
+- **`mailbox.register(id, opts)`** — auto-suffixes bare ids
+  (`agent:lector` → `agent:lector:<instance_id>`). Already-full
+  ids pass through. Returns a record with `id` = full,
+  `bare_id` = caller's input. The on-disk dir layout becomes
+  `<root>/<full_id>/{inbox,outbox,responses,processing,archive}/`.
+- **`mailbox.bootstrap.upsert(opts)`** — accepts
+  `{ tool_root }` and writes to
+  `<tool_root>/bootstrap-mailbox.md` (one doc per tool root,
+  shared across every mailbox in that root). The previous
+  `{ id, dir, wake }` shape is gone; bootstrap rendering is now
+  agent-agnostic (identity flows through env vars, not template
+  substitutions).
+- **`mailbox.bootstrap.render(opts?)`** — template-only render
+  with no per-call substitutions beyond `revision` /
+  `upserted_at`. Two calls produce identical revisions
+  regardless of caller-side state. The doc no longer bakes in
+  any specific agent id or wake hook.
+- **Bootstrap template (`templates/bootstrap.md`)** — rewritten
+  to schema_version 2. Agents discover their identity via the
+  four `AUTO_AGENTS_*` env vars at spawn; the doc walks them
+  through the audit protocol, mailbox layout, message shape,
+  and Codex writable_roots config without ever naming a
+  specific agent.
+- **Event payloads** — `core.mailbox:*` events emit **bare ids**
+  in `mailbox` / `from` / `to` fields (human-friendly for
+  filtering), with companion `_full` / `_resolved` fields
+  carrying the full instance-suffixed form when needed (e.g.,
+  for cross-instance routing).
+- **`registry.get(id)` / `registry.unregister(id)`** — accept
+  bare or full ids; bare resolves against this nvim's
+  instance_id. Cross-instance lookups must use full ids
+  explicitly.
+- **Schema version** — template frontmatter bumped 1 → 2.
+  Agent-side seen-revision check naturally catches the
+  protocol update on next wake.
+
+### Removed
+
+- **Per-mailbox `bootstrap-mailbox.md` writes** at
+  `<mailbox-dir>/bootstrap-mailbox.md` — replaced by the
+  per-tool-root layout. Orphan files at the old locations are
+  harmless (no longer read) and will be swept by `prune` once
+  their parent dir's mtime trips the age threshold.
+
+### Tests — `tests/smoke.lua`
+
+- Section `[49c]` flipped to expect `<root>/<full_id>/` dirs.
+  `lector_rec.id == FULL("agent:lector")` and friends; bare-id
+  retained on `record.bare_id` for executioner / display checks.
+- Section `[49c2]` rewritten end-to-end: doc at tool root,
+  shared across same-root agents, agent-agnostic content,
+  v0.1.7's revision-skip carried through. Adds env_for_agent
+  coverage.
+- Section `[49p]` (new) — `mailbox.prune` round trip: plant
+  stale instance dirs + a pre-v0.1.8 bare-id orphan, backdate
+  them past the threshold, assert removal vs. live-id
+  preservation vs. recent-dir retention. Bootstrap doc at
+  tool root is left intact.
+- The whole section pins `instance_id` to `"9999999999-12345"`
+  via `path.set_instance_id` so exact-equality assertions are
+  deterministic across runs. Pin is applied AFTER the
+  `[49a]` env-var resets (each reset clears the pin).
+
 ## [v0.1.7] — 2026-05-14 — mailbox bootstrap: revision-based no-op short-circuit
 
 Additive patch on the mailbox subsystem. `register(id, opts)` no

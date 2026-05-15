@@ -479,7 +479,7 @@ function M.claim(mailbox_id, message_id, opts)
   local _ = atomic_write(dst, message.encode(msg))
 
   events.publish("core.mailbox:message_claimed", {
-    mailbox    = mailbox_id,
+    mailbox    = mb_path.bare_id(mailbox_id),
     id         = message_id,
     path       = dst,
     claimed_at = msg.claimed_at,
@@ -550,7 +550,7 @@ function M.complete(mailbox_id, message_id, response)
   pcall(vim.uv.fs_unlink, proc)
 
   events.publish("core.mailbox:message_completed", {
-    mailbox       = mailbox_id,
+    mailbox       = mb_path.bare_id(mailbox_id),
     id            = message_id,
     path          = arch,
     response_path = response_path,
@@ -615,7 +615,7 @@ function M.fail(mailbox_id, message_id, err_info, opts)
   pcall(vim.uv.fs_unlink, proc)
 
   events.publish("core.mailbox:message_failed", {
-    mailbox       = mailbox_id,
+    mailbox       = mb_path.bare_id(mailbox_id),
     id            = message_id,
     path          = arch,
     error         = err_msg,
@@ -701,7 +701,7 @@ function M.recover_stale(mailbox_id, opts)
               age_ms = age_s * 1000, attempt = msg.attempt,
             }
             events.publish("core.mailbox:stale_recovered", {
-              mailbox    = mailbox_id,
+              mailbox    = mb_path.bare_id(mailbox_id),
               id         = mid,
               policy     = "requeue",
               age_ms     = age_s * 1000,
@@ -749,7 +749,7 @@ function M.recover_stale(mailbox_id, opts)
               age_ms = age_s * 1000, attempt = msg.attempt,
             }
             events.publish("core.mailbox:stale_recovered", {
-              mailbox       = mailbox_id,
+              mailbox       = mb_path.bare_id(mailbox_id),
               id            = mid,
               policy        = "fail",
               age_ms        = age_s * 1000,
@@ -758,7 +758,7 @@ function M.recover_stale(mailbox_id, opts)
               response_path = resp_path,
             })
             events.publish("core.mailbox:message_failed", {
-              mailbox       = mailbox_id,
+              mailbox       = mb_path.bare_id(mailbox_id),
               id            = mid,
               path          = arch,
               error         = "stale_processing_timeout",

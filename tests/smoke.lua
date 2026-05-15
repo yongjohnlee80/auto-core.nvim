@@ -2821,6 +2821,14 @@ vim.env.AUTO_AGENTS_KB_ROOT      = nil
 -- ── 49a. host-fallback root resolution (used for nvim/user) ─
 mailbox._reset_for_tests()
 events_m._reset_for_tests()
+
+-- v0.1.8: forward-declare the instance_id pin + FULL helper. We
+-- can't pin yet because [49a] calls _reset_for_tests several more
+-- times to exercise env-var precedence (each reset would wipe the
+-- pin via path._reset_for_tests). Pin is applied just before [49c]
+-- registrations below.
+local TEST_INSTANCE_ID = "9999999999-12345"
+local function FULL(bare) return bare .. ":" .. TEST_INSTANCE_ID end
 ok("host_fallback_root is durable global location (.auto-agents-config/mailbox)",
   mailbox.host_fallback_root():find("%.auto%-agents%-config/mailbox$") ~= nil,
   "got: " .. mailbox.host_fallback_root())
@@ -2916,6 +2924,10 @@ ok("validate_id rejects leading dot '.hidden'",
   not mb_path.validate_id(".hidden"))
 
 -- ── 49c. registration uses per-mailbox roots + upserts bootstrap doc ──
+-- Pin the instance_id NOW (after all the [49a] env-var resets) so
+-- the rest of [49] sees stable full ids in assertions.
+mb_path.set_instance_id(TEST_INSTANCE_ID)
+
 local registered_payloads = {}
 local sub = events_m.subscribe("core.mailbox:registered", function(p)
   registered_payloads[#registered_payloads + 1] = p
@@ -2926,16 +2938,17 @@ local lector_rec = mailbox.register("agent:lector", {
   root = codex_like_root,
   wake = { command = "send_slot", args = { slot = "lector" } },
 })
-ok("register returns record with per-mailbox root + dir + subs + wake",
+ok("register returns record with per-mailbox root + dir + subs + wake (v0.1.8: id is full)",
   type(lector_rec) == "table"
-    and lector_rec.id == "agent:lector"
+    and lector_rec.id == FULL("agent:lector")
+    and lector_rec.bare_id == "agent:lector"
     and lector_rec.root == codex_like_root
-    and lector_rec.dir == codex_like_root .. "/agent:lector"
+    and lector_rec.dir == codex_like_root .. "/" .. FULL("agent:lector")
     and type(lector_rec.subs) == "table"
     and type(lector_rec.wake) == "table"
     and lector_rec.wake.command == "send_slot")
-ok("lector's mailbox dir lives under Codex's config root (~/.codex/mailbox/agent:lector)",
-  lector_rec.dir == codex_like_root .. "/agent:lector",
+ok("lector's mailbox dir lives under Codex's tool root with instance suffix",
+  lector_rec.dir == codex_like_root .. "/" .. FULL("agent:lector"),
   "got: " .. lector_rec.dir)
 ok("inbox/outbox/processing/archive/responses all exist on disk",
   vim.fn.isdirectory(lector_rec.subs.inbox)      == 1
@@ -2955,7 +2968,7 @@ local jarvis_rec = mailbox.register("agent:jarvis", {
 })
 ok("claude-backed agent uses Claude's tool root",
   jarvis_rec.root == claude_like_root
-    and jarvis_rec.dir == claude_like_root .. "/agent:jarvis",
+    and jarvis_rec.dir == claude_like_root .. "/" .. FULL("agent:jarvis"),
   "got: " .. jarvis_rec.dir)
 
 -- Add a second claude-backed agent to exercise the
@@ -2965,9 +2978,9 @@ local hephaestus_rec = mailbox.register("agent:hephaestus", {
   root = claude_like_root,
   wake = { command = "send_slot", args = { slot = "hephaestus" } },
 })
-ok("multiple claude-backed agents share the root, subdivided by id",
+ok("multiple claude-backed agents share the root, subdivided by full id",
   hephaestus_rec.root == claude_like_root
-    and hephaestus_rec.dir == claude_like_root .. "/agent:hephaestus"
+    and hephaestus_rec.dir == claude_like_root .. "/" .. FULL("agent:hephaestus")
     and jarvis_rec.root == hephaestus_rec.root,
   "jarvis.dir=" .. jarvis_rec.dir
     .. " hephaestus.dir=" .. hephaestus_rec.dir)
@@ -2978,13 +2991,15 @@ local gemini_rec = mailbox.register("agent:gemini", {
   wake = { command = "send_slot", args = { slot = "gemini" } },
 })
 ok("gemini-backed agent uses its own tool root",
-  gemini_rec.dir == gemini_like_root .. "/agent:gemini")
+  gemini_rec.dir == gemini_like_root .. "/" .. FULL("agent:gemini"))
 
 -- Host-side mailbox with no explicit root falls back.
 local nvim_rec = mailbox.register("nvim")
-ok("host-side 'nvim' mailbox falls back to host fallback root",
+ok("host-side 'nvim' mailbox falls back to host fallback root + instance suffix",
   nvim_rec.root == active_root
-    and nvim_rec.dir == active_root .. "/nvim")
+    and nvim_rec.dir == active_root .. "/" .. FULL("nvim"))
+ok("nvim retains 'nvim' as bare_id (executioner-default key)",
+  nvim_rec.bare_id == "nvim" and nvim_rec.executioner == true)
 
 ok("core.mailbox:registered fired for every register call",
   #registered_payloads == 5)
@@ -2995,15 +3010,20 @@ ok("registered payload includes bootstrap_path + bootstrap_revision",
     and type(registered_payloads[1].bootstrap_revision) == "string"
     and #registered_payloads[1].bootstrap_revision >= 16)
 
--- registry.list reflects what we've registered.
-ok("registry.list reports all five mailboxes",
+-- registry.list reflects what we've registered (full ids in v0.1.8).
+ok("registry.list reports all five mailboxes as full ids",
   (function()
     local set = {}
     for _, id in ipairs(registry.list()) do set[id] = true end
-    return set["agent:lector"] and set["agent:jarvis"]
-       and set["agent:hephaestus"] and set["agent:gemini"]
-       and set["nvim"]
+    return set[FULL("agent:lector")] and set[FULL("agent:jarvis")]
+       and set[FULL("agent:hephaestus")] and set[FULL("agent:gemini")]
+       and set[FULL("nvim")]
   end)())
+ok("registry.get accepts bare id (auto-resolves to this instance)",
+  registry.get("agent:lector") == lector_rec
+    and registry.get("agent:jarvis") == jarvis_rec)
+ok("registry.get accepts full id directly",
+  registry.get(FULL("agent:lector")) == lector_rec)
 
 -- unique_roots collapses claude+claude → one entry.
 ok("registry.unique_roots collapses shared roots (jarvis + hephaestus on claude → one entry)",
@@ -3017,83 +3037,79 @@ ok("registry.unique_roots collapses shared roots (jarvis + hephaestus on claude 
 
 events_m.unsubscribe(sub)
 
--- ── 49c2. bootstrap-mailbox.md upsert + revision stamping ──
+-- ── 49c2. bootstrap-mailbox.md per-tool-root layout (v0.1.8) ──
+-- v0.1.8 hoists the doc from per-mailbox to per-tool-root, so every
+-- agent under a given tool root shares one bootstrap doc. The doc
+-- content is agent-agnostic — agents read their identity from
+-- env vars at spawn time (see env_for_agent).
 local boot_path = lector_rec.bootstrap.path
-ok("bootstrap-mailbox.md written to <mailbox-dir>/bootstrap-mailbox.md",
-  boot_path == lector_rec.dir .. "/bootstrap-mailbox.md"
-    and vim.fn.filereadable(boot_path) == 1)
+ok("bootstrap-mailbox.md written to <tool-root>/bootstrap-mailbox.md",
+  boot_path == codex_like_root .. "/bootstrap-mailbox.md"
+    and vim.fn.filereadable(boot_path) == 1,
+  "got: " .. tostring(boot_path))
+
+-- All agents under the same root reference the same doc path.
+ok("jarvis + hephaestus share the same per-tool-root bootstrap doc",
+  jarvis_rec.bootstrap.path == hephaestus_rec.bootstrap.path
+    and jarvis_rec.bootstrap.path == claude_like_root .. "/bootstrap-mailbox.md")
+ok("different tool roots get different bootstrap docs",
+  lector_rec.bootstrap.path ~= jarvis_rec.bootstrap.path
+    and jarvis_rec.bootstrap.path ~= gemini_rec.bootstrap.path)
 
 local boot_text = table.concat(vim.fn.readfile(boot_path), "\n")
-ok("bootstrap doc body mentions the agent id",
-  boot_text:find("agent:lector", 1, true) ~= nil)
+ok("bootstrap doc body references the env-var contract (no per-call ids)",
+  boot_text:find("AUTO_AGENTS_MAILBOX_ID", 1, true) ~= nil
+    and boot_text:find("AUTO_AGENTS_MAILBOX_DIR", 1, true) ~= nil
+    and boot_text:find("AUTO_AGENTS_INSTANCE_ID", 1, true) ~= nil)
 ok("bootstrap doc frontmatter has revision field",
   boot_text:find("revision:") ~= nil)
-ok("bootstrap doc embeds the wake summary",
-  boot_text:find("send_slot", 1, true) ~= nil)
+ok("bootstrap doc body does NOT bake in any specific agent id (v0.1.8 hoist)",
+  boot_text:find("agent:lector", 1, true) == nil)
 ok("bootstrap doc carries the audit instructions",
   boot_text:find("bootstrap audit protocol") ~= nil)
-ok("bootstrap doc documents Codex writable_roots setup",
+ok("bootstrap doc still documents Codex writable_roots setup",
   boot_text:find("sandbox_workspace_write", 1, true) ~= nil
-    and boot_text:find("writable_roots", 1, true) ~= nil
-    and boot_text:find("/home/<user>/.codex/mailbox/<agent-id>", 1, true) ~= nil)
+    and boot_text:find("writable_roots", 1, true) ~= nil)
 
--- Revision is content-derived: re-render with the same inputs
--- yields the SAME revision (despite a different upserted_at).
-local _, rev_a = boot.render({ id = "agent:lector", dir = lector_rec.dir,
-  wake = lector_rec.wake })
-local _, rev_b = boot.render({ id = "agent:lector", dir = lector_rec.dir,
-  wake = lector_rec.wake })
-ok("render with identical inputs → identical revision",
+-- v0.1.8 render is agent-agnostic — identical revisions across
+-- arbitrary inputs (the template no longer substitutes per-call
+-- variables beyond revision/upserted_at).
+local _, rev_a = boot.render()
+local _, rev_b = boot.render()
+ok("render is stable across calls (no per-call inputs)",
   rev_a == rev_b, "a=" .. tostring(rev_a) .. " b=" .. tostring(rev_b))
--- Different wake command → different revision (real protocol change).
-local _, rev_c = boot.render({ id = "agent:lector", dir = lector_rec.dir,
-  wake = { command = "different_command" } })
-ok("render with different inputs → different revision",
-  rev_a ~= rev_c)
+ok("render's revision matches the on-disk doc",
+  rev_a == lector_rec.bootstrap.revision)
 
--- v0.1.7: register is content-revision-skip. Re-registering with
--- identical inputs MUST NOT rewrite the doc (mtime stays put);
--- re-registering with a different protocol input (e.g. different
--- wake command) MUST rewrite. Both shapes return the same path +
--- revision; only the `wrote` flag distinguishes them.
+-- v0.1.7's revision-skip survives the v0.1.8 hoist: re-register with
+-- ANY inputs (the doc is now agent-agnostic) leaves the per-tool-root
+-- doc untouched on disk.
 local first_mtime = vim.fn.getftime(boot_path)
-vim.wait(1100)  -- coarse-grained second-resolution mtime
-
--- Identical-input re-register → skip.
+vim.wait(1100)
 local skip_rec = mailbox.register("agent:lector", {
   root = codex_like_root,
   wake = { command = "send_slot", args = { slot = "lector" } },
 })
-ok("v0.1.7: re-register with identical inputs leaves mtime unchanged",
+ok("v0.1.8: re-register leaves per-tool-root bootstrap doc mtime unchanged",
   vim.fn.getftime(boot_path) == first_mtime,
   string.format("before=%d after=%d", first_mtime, vim.fn.getftime(boot_path)))
-ok("v0.1.7: skipped upsert returns wrote=false",
+ok("v0.1.8: skipped upsert returns wrote=false",
   skip_rec.bootstrap.wrote == false,
   "wrote=" .. tostring(skip_rec.bootstrap.wrote))
-ok("v0.1.7: revision survives a skipped upsert",
+ok("v0.1.8: revision survives a skipped upsert",
   skip_rec.bootstrap.revision == lector_rec.bootstrap.revision)
 
--- Different-wake re-register → real write.
-vim.wait(1100)
-local rewrite_rec = mailbox.register("agent:lector", {
-  root = codex_like_root,
-  wake = { command = "send_slot", args = { slot = "lector_v2" } },
-})
-ok("v0.1.7: re-register with changed wake bumps mtime",
-  vim.fn.getftime(boot_path) > first_mtime,
-  string.format("before=%d after=%d", first_mtime, vim.fn.getftime(boot_path)))
-ok("v0.1.7: real upsert returns wrote=true",
-  rewrite_rec.bootstrap.wrote == true,
-  "wrote=" .. tostring(rewrite_rec.bootstrap.wrote))
-ok("v0.1.7: real upsert produces a different revision",
-  rewrite_rec.bootstrap.revision ~= lector_rec.bootstrap.revision)
-
--- Restore original wake so downstream tests see the canonical
--- agent:lector registration that the rest of [49] relies on.
-mailbox.register("agent:lector", {
-  root = codex_like_root,
-  wake = { command = "send_slot", args = { slot = "lector" } },
-})
+-- env_for_agent helper: every spawn-time env var an agent needs to
+-- find its own mailbox without socket access.
+local env = mailbox.env_for_agent(lector_rec)
+ok("env_for_agent returns AUTO_AGENTS_INSTANCE_ID matching the pin",
+  env.AUTO_AGENTS_INSTANCE_ID == TEST_INSTANCE_ID)
+ok("env_for_agent returns AUTO_AGENTS_MAILBOX_ID = full id",
+  env.AUTO_AGENTS_MAILBOX_ID == FULL("agent:lector"))
+ok("env_for_agent returns AUTO_AGENTS_MAILBOX_DIR = record dir",
+  env.AUTO_AGENTS_MAILBOX_DIR == lector_rec.dir)
+ok("env_for_agent returns AUTO_AGENTS_MAILBOX_BOOTSTRAP_DOC = per-tool-root doc",
+  env.AUTO_AGENTS_MAILBOX_BOOTSTRAP_DOC == boot_path)
 
 -- ── 49d. message construction + validation ─────────────────
 local m1, m1_err = message.build({
@@ -4141,6 +4157,60 @@ ok("recent() returns mailbox / command events only",
     return true
   end)(),
   vim.inspect(rec_events))
+end)()
+
+-- ── 49p. mailbox.prune — sweep old per-instance dirs (v0.1.8) ─
+print("\n[49p] mailbox.prune — sweep stale per-instance dirs")
+;(function()
+  -- Plant three stale dirs under the codex-like root, alongside the
+  -- live `agent:lector:9999999999-12345` registered earlier. Two
+  -- look like full-format instance dirs (pruneable by name pattern),
+  -- one is a bare-id orphan from pre-v0.1.8 layout (also pruneable
+  -- since it can never be "live" in v0.1.8).
+  local stale_full_a = codex_like_root .. "/agent:lector:1111111111-1111"
+  local stale_full_b = codex_like_root .. "/agent:juliet:2222222222-2222"
+  local stale_bare   = codex_like_root .. "/agent:orphan"
+  vim.fn.mkdir(stale_full_a .. "/inbox", "p")
+  vim.fn.mkdir(stale_full_b .. "/outbox", "p")
+  vim.fn.mkdir(stale_bare .. "/inbox", "p")
+  -- Backdate each so they're older than the 7-day default. `touch`
+  -- with relative time tags is the cheapest path; if the platform
+  -- doesn't have it we fall back to a 1s threshold for this test.
+  local backdate = function(p)
+    os.execute("touch -d '8 days ago' " .. vim.fn.shellescape(p))
+  end
+  backdate(stale_full_a)
+  backdate(stale_full_b)
+  backdate(stale_bare)
+
+  local result = mailbox.prune({ root = codex_like_root })
+  local removed_set = {}
+  for _, d in ipairs(result.removed) do removed_set[d] = true end
+  ok("prune removed the two stale full-format instance dirs",
+    removed_set[stale_full_a] == true and removed_set[stale_full_b] == true,
+    vim.inspect(result.removed))
+  ok("prune removed the pre-v0.1.8 bare-id orphan",
+    removed_set[stale_bare] == true)
+  local kept_alive_set = {}
+  for _, d in ipairs(result.kept_alive) do kept_alive_set[d] = true end
+  ok("prune kept the live registered lector dir alive",
+    kept_alive_set[lector_rec.dir] == true,
+    vim.inspect(result.kept_alive))
+  ok("prune left the per-tool-root bootstrap doc intact",
+    vim.fn.filereadable(codex_like_root .. "/bootstrap-mailbox.md") == 1)
+
+  -- A second register of a fresh dir followed by an immediate prune
+  -- should keep it (younger than threshold).
+  local fresh_dir = codex_like_root .. "/agent:fresh:3333333333-3333"
+  vim.fn.mkdir(fresh_dir, "p")
+  local result2 = mailbox.prune({ root = codex_like_root,
+    max_age_seconds = 7 * 24 * 60 * 60 })
+  local fresh_kept = false
+  for _, d in ipairs(result2.kept_recent) do
+    if d == fresh_dir then fresh_kept = true; break end
+  end
+  ok("prune keeps recent dirs under the age threshold", fresh_kept,
+    vim.inspect(result2.kept_recent))
 end)()
 
 -- ── 49o. teardown ───────────────────────────────────────────

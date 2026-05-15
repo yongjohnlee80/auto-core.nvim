@@ -26,11 +26,21 @@
 ---@module 'auto-core.version'
 
 return {
-  -- v0.1.7: bootstrap.upsert short-circuits the atomic write when
-  -- the existing doc's revision already matches the rendered
-  -- revision, eliminating spurious mtime bumps and router fs.watch
-  -- fires on no-op `register()` calls. The return shape gains
-  -- `wrote: boolean`; `path` + `revision` keep their meaning.
-  version     = "0.1.7",
+  -- v0.1.8: per-instance mailbox isolation. `register("agent:foo")`
+  -- now stores the mailbox under `<root>/agent:foo:<instance_id>/`
+  -- where instance_id = `<unix-seconds>-<pid>` for this nvim
+  -- process. Two nvims sharing a tool root coexist cleanly — no
+  -- lock, no cross-talk, hard-isolation by directory. Bootstrap
+  -- doc hoisted to `<tool-root>/bootstrap-mailbox.md` (shared
+  -- across all mailboxes in that root) with agent identity now
+  -- carried via spawn-time env vars rather than per-call template
+  -- substitution. Adds `mailbox.env_for_agent(record)` and
+  -- `mailbox.prune({ root, max_age_seconds })` helpers. Event
+  -- payloads carry bare ids in `mailbox` / `from` fields with
+  -- `_full` / `_resolved` companions for cross-instance routing.
+  -- Persisted schema change (mailbox dir layout) shipped as patch
+  -- per user decision; only known consumer (auto-agents) updates
+  -- alongside.
+  version     = "0.1.8",
   api_version = "0.1",
 }

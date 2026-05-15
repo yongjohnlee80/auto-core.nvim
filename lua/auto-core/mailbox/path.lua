@@ -47,6 +47,18 @@ local M = {}
 
 local DEFAULT_RELATIVE = ".config/nvim/.auto-agents-config/mailbox"
 
+-- v0.1.8 instance_id state. Set once per nvim process (or overridden
+-- via M.set_instance_id by tests / consumers). Format:
+-- `<unix-seconds>-<pid>` — sortable, globally unique even when two
+-- nvims spawn in the same second.
+local _instance_id   = nil ---@type string?
+local _instance_lock = false  -- guards lazy init
+
+-- Pattern that matches the instance_id suffix at the tail of a full
+-- mailbox id (`...:<digits>-<digits>$`). Used to detect whether an
+-- incoming id is bare or already-suffixed.
+local INSTANCE_SUFFIX_PATTERN = ":[0-9]+%-[0-9]+$"
+
 -- Filesystem-safe mailbox-id pattern. Allow `[A-Za-z0-9_-]` plus `:`
 -- so the `agent:lector` form documented in the ADR works as-is on
 -- Linux. Path separators, `..`, leading dots are rejected.
@@ -199,12 +211,114 @@ function M.subdir(id, sub, root)
   return fs_path.join(M.mailbox_dir(id, root), sub)
 end
 
+-- ── instance_id (v0.1.8) ─────────────────────────────────────
+--
+-- The instance_id is the per-nvim suffix that scopes mailbox ids
+-- to a particular nvim process. ADR 0013 / v0.1.8: each nvim
+-- instance has its own subtree under the tool root, so two nvims
+-- can run `agent:jarvis` simultaneously without misdelivery.
+--
+-- Default value is `<os.time>-<getpid>`, computed lazily on first
+-- read. We don't compute at module-load to keep _reset_for_tests
+-- deterministic and to let consumers override via `set_instance_id`
+-- before the first registration.
+
+---Return the currently-resolved instance_id, computing the default
+---on first call. Stable for the lifetime of this nvim process
+---(unless explicitly overridden).
+---@return string
+function M.get_instance_id()
+  if _instance_id then return _instance_id end
+  if _instance_lock then
+    -- defensive — should not happen, but avoid recursion
+    return "0-0"
+  end
+  _instance_lock = true
+  _instance_id = string.format("%d-%d", os.time(), vim.fn.getpid())
+  _instance_lock = false
+  return _instance_id
+end
+
+---Override the instance_id. Consumers (typically tests, or auto-agents
+---when it wants to pin to a project-scoped id) call this before any
+---`register()` to set the suffix used for subsequent registrations.
+---Pass `nil` to clear and fall back to the default computation.
+---@param id string?
+function M.set_instance_id(id)
+  if id == nil then _instance_id = nil; return end
+  if type(id) ~= "string" or not id:match("^[0-9A-Za-z%-]+$") then
+    error("auto-core.mailbox.path.set_instance_id: invalid id; expected "
+      .. "non-empty [0-9A-Za-z-]+ string")
+  end
+  _instance_id = id
+end
+
+---True iff `id` already carries an instance_id suffix
+---(matches `...:<digits>-<digits>$`).
+---@param id string
+---@return boolean
+function M.is_full_id(id)
+  return type(id) == "string" and id:match(INSTANCE_SUFFIX_PATTERN) ~= nil
+end
+
+---Strip the instance_id suffix from a full id, returning the bare
+---form (`agent:lector:1747-3478` → `agent:lector`). If the id has no
+---suffix, returns it unchanged. Useful for executioner / role checks
+---and for display purposes.
+---@param id string
+---@return string
+function M.bare_id(id)
+  if type(id) ~= "string" then return id end
+  if M.is_full_id(id) then
+    return (id:gsub(INSTANCE_SUFFIX_PATTERN, ""))
+  end
+  return id
+end
+
+---Resolve a bare mailbox id to its full per-instance form. Already-
+---full ids pass through unchanged so callers can pin to a specific
+---instance (e.g. cross-instance addressing in `send`).
+---@param id string
+---@return string
+function M.full_id(id)
+  if type(id) ~= "string" or id == "" then
+    error("auto-core.mailbox.path.full_id: id must be non-empty string")
+  end
+  if M.is_full_id(id) then return id end
+  return id .. ":" .. M.get_instance_id()
+end
+
+---Path to the per-tool-root bootstrap doc. ADR 0013 v0.1.8 hoists
+---the bootstrap doc from `<mailbox-dir>/bootstrap-mailbox.md` to
+---`<tool-root>/bootstrap-mailbox.md` so a single canonical doc is
+---shared across every agent under that tool. Pass either the tool
+---name (`"codex"`) — resolves via `tool_root` — or a literal root
+---path (must already be absolute).
+---@param tool_or_root string
+---@return string
+function M.bootstrap_doc_path(tool_or_root)
+  if type(tool_or_root) ~= "string" or tool_or_root == "" then
+    error("auto-core.mailbox.path.bootstrap_doc_path: pass a tool name "
+      .. "or absolute root path")
+  end
+  local root
+  if TOOL_DIRS[tool_or_root] then
+    root = M.tool_root(tool_or_root)
+  else
+    root = M.normalize_root(tool_or_root)
+  end
+  return fs_path.join(root, "bootstrap-mailbox.md")
+end
+
 ---Test-only — clears the override so each test starts from defaults.
 function M._reset_for_tests()
   _override_root = nil
+  _instance_id   = nil
+  _instance_lock = false
 end
 
-M.DEFAULT_RELATIVE = DEFAULT_RELATIVE
-M.ID_PATTERN       = ID_PATTERN
+M.DEFAULT_RELATIVE       = DEFAULT_RELATIVE
+M.ID_PATTERN             = ID_PATTERN
+M.INSTANCE_SUFFIX_PATTERN = INSTANCE_SUFFIX_PATTERN
 
 return M

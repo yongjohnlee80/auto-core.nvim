@@ -1,27 +1,30 @@
----auto-core.mailbox.bootstrap — render the per-mailbox bootstrap doc
----from the canonical template and upsert it into the mailbox tree.
+---auto-core.mailbox.bootstrap — render the canonical bootstrap doc
+---and upsert it at the per-tool-root location.
 ---
----`register(id, opts)` calls `upsert()` to keep `bootstrap-mailbox.md`
----in sync with the canonical protocol. The `revision:` field in the
----frontmatter is the sha256 of the rendered body with placeholder
----substituted for revision + upserted_at — that way "same content"
----→ "same revision", regardless of when it was written. Agents
----compare this revision to their last-acknowledged value on wake to
----detect protocol changes (see the template body for the audit
----protocol).
+---v0.1.8 hoists the doc from `<mailbox-dir>/bootstrap-mailbox.md`
+---(per agent, content with `{{id}}` and `{{dir}}` substituted) to
+---`<tool-root>/bootstrap-mailbox.md` (one doc per tool root,
+---agent-agnostic — agents discover their identity via spawn-time
+---env vars). The template has no per-call substitutions beyond
+---`{{revision}}` / `{{upserted_at}}`, so every agent under a given
+---tool root sees the same doc and the same revision.
 ---
----v0.1.7 short-circuits the actual atomic write when the existing
----doc's revision already matches the rendered revision. This avoids:
----  - spurious mtime bumps on no-op `register()` calls,
----  - spurious `core.mailbox:bootstrap_upserted` events,
----  - spurious router fs.watch fires on the bootstrap doc.
----The return shape gains a `wrote: boolean` field so callers (and
----tests) can distinguish a real upsert from a no-op skip.
+---`register(id, opts)` calls `upsert({ tool_root })` to keep
+---`<tool-root>/bootstrap-mailbox.md` in sync with the canonical
+---protocol. The `revision:` field in the frontmatter is the sha256
+---of the rendered body with placeholders substituted — "same
+---content" → "same revision", regardless of when it was written.
+---Agents compare this revision to their last-acknowledged value on
+---wake to detect protocol changes (see template body).
+---
+---v0.1.7's no-op short-circuit is preserved: if the existing doc's
+---revision already matches the rendered revision, the atomic write
+---is skipped. The return shape carries `wrote: boolean`.
 ---
 ---Template lookup: `lua/auto-core/mailbox/templates/bootstrap.md`,
 ---resolved relative to this module's source file. Family plugins
----can supply per-tool overrides in a future patch; v0.1.6 shipped
----one template for everyone; v0.1.7 keeps that.
+---can supply per-tool overrides in a future patch; v0.1.6–v0.1.8
+---all ship one template for everyone.
 ---
 ---@module 'auto-core.mailbox.bootstrap'
 
@@ -84,49 +87,31 @@ end
 ---@return string
 local function sha256(text) return vim.fn.sha256(text) end
 
----Build the wake summary line shown in the doc for the agent to
----understand its wake mechanism.
----@param wake table?
----@return string
-local function wake_summary(wake)
-  if type(wake) ~= "table" or type(wake.command) ~= "string" then
-    return "none (this mailbox has no wake hook; consumers must poll)"
-  end
-  local args = vim.json.encode(wake.args or {})
-  return string.format("dispatch registered command `%s` with args %s",
-    wake.command, args)
-end
-
----Render a bootstrap doc for `id`. Returns (text, revision) — both
----always set. Revision is the sha256 of the rendered body WITH the
----revision placeholder substituted as "PLACEHOLDER"; that way two
----calls with identical inputs produce identical revisions even
----though `upserted_at` differs.
----@param opts { id: string, dir: string, wake: table? }
+---Render the canonical bootstrap doc. v0.1.8: agent-agnostic —
+---no per-call substitutions beyond `{{revision}}` / `{{upserted_at}}`.
+---Returns (text, revision). Revision is the sha256 of the body with
+---both placeholders substituted with literal "PLACEHOLDER" so two
+---calls produce identical revisions regardless of when they ran.
+---
+---`opts` is accepted for forward-compat but currently unused (all
+---template variables are agent-agnostic at the v0.1.8 schema).
+---@param opts table?
 ---@return string text, string revision
 function M.render(opts)
+  local _ = opts  -- reserved for future per-tool overrides
   local raw, err = M.read_template()
   if not raw then error("auto-core.mailbox.bootstrap: " .. tostring(err)) end
 
-  -- First pass: render with revision = "PLACEHOLDER" so we can hash
-  -- a stable representation that doesn't depend on the timestamp.
   local stable_vars = {
-    id           = opts.id,
-    dir          = opts.dir,
-    revision     = "PLACEHOLDER",
-    upserted_at  = "PLACEHOLDER",
-    wake_summary = wake_summary(opts.wake),
+    revision    = "PLACEHOLDER",
+    upserted_at = "PLACEHOLDER",
   }
   local stable = substitute(raw, stable_vars)
   local revision = sha256(stable)
 
-  -- Second pass: render with the real revision + timestamp.
   local final_vars = {
-    id           = opts.id,
-    dir          = opts.dir,
-    revision     = revision,
-    upserted_at  = message.now_iso(),
-    wake_summary = wake_summary(opts.wake),
+    revision    = revision,
+    upserted_at = message.now_iso(),
   }
   return substitute(raw, final_vars), revision
 end
@@ -185,19 +170,29 @@ local function read_existing_revision(path)
       or data:match("^revision:%s*([%w]+)")
 end
 
----Render and upsert `bootstrap-mailbox.md` into the mailbox dir.
----No-op short-circuit: if the existing doc on disk already carries
----the rendered revision, skip the atomic write entirely. This keeps
+---Render and upsert `bootstrap-mailbox.md` into the **tool root**
+---(v0.1.8 layout — one doc per tool root, not per-mailbox). No-op
+---short-circuit: if the existing doc on disk already carries the
+---rendered revision, skip the atomic write entirely. This keeps
 ---mtime stable and silences the router fs.watch on repeat
 ---`register()` calls with unchanged protocol inputs.
----@param opts { id: string, dir: string, wake: table? }
+---@param opts { tool_root: string }
 ---@return { path: string, revision: string, wrote: boolean }
 function M.upsert(opts)
-  local text, revision = M.render(opts)
-  local path = opts.dir .. "/bootstrap-mailbox.md"
+  if type(opts) ~= "table" or type(opts.tool_root) ~= "string"
+      or opts.tool_root == "" then
+    error("auto-core.mailbox.bootstrap.upsert: opts.tool_root "
+      .. "(absolute path) is required")
+  end
+  local text, revision = M.render()
+  local path = opts.tool_root .. "/bootstrap-mailbox.md"
   if read_existing_revision(path) == revision then
     return { path = path, revision = revision, wrote = false }
   end
+  -- Ensure tool root exists before writing — register() normally
+  -- creates the mailbox subtree which would mkdir the parent, but
+  -- a caller invoking upsert directly might not have.
+  vim.fn.mkdir(opts.tool_root, "p")
   local ok, err = atomic_write(path, text)
   if not ok then
     error("auto-core.mailbox.bootstrap.upsert: " .. tostring(err))
