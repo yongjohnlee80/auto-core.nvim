@@ -112,7 +112,7 @@ local M = {
 
   -- ── float lifecycle (Phase 6 — auto-core.ui.float) ───────────
   ["float:opened"] = {
-    doc = "An auto-core.ui.float (help_overlay / ghost / etc) just opened.",
+    doc = "An auto-core.ui.float (help_overlay / confirm) just opened.",
     payload = "{ kind = string, buf = integer, win = integer }",
     publishers = { "auto-core" },
   },

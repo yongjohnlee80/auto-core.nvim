@@ -37,7 +37,7 @@ in the auto-agents kb for the full eleven-rule contract.
 | Phase 4b — `fs.watch` + `git.status` | `v0.0.6` |
 | Phase 4c — `fs.tree` + canonical `git.worktree` | `v0.0.7` |
 | Phase 5 — tasks queue + channel + status + `:AutoCoreChannel` | `v0.0.8` |
-| Phase 6 — `ui.float` (help_overlay/ghost/confirm) + `ui.highlights` | `v0.0.9` |
+| Phase 6 — `ui.float` (help_overlay/confirm) + `ui.highlights` | `v0.0.9` |
 | Phase 7 — `log` + `health` (`:checkhealth auto-core`) | `v0.0.10` |
 | **v0.1.0 bundle** — `lsp.reset` (tech-stack-aware) + `ui.float.multi` (gitsgraph-shaped multi-pane) + `git.graph` (multi-repo discovery + commit caches) + `git.fetch` + `git.pull` + `git.worktree.destroy` (consultative round-trip) + `files` (global file-filter prefs) + `state.namespace` `VimLeavePre` flush + `doc:pinned`/`doc:unpinned` topics | **`v0.1.0` ← here** |
 | Family cleanup + post-1.0 prep | `v0.X.0` minors (additive only) |

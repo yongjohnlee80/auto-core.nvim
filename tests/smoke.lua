@@ -1717,35 +1717,7 @@ h2.close()
 ok("on_close hook fires on dismiss",
   on_close_fired)
 
--- ─────────────────────── 37. ui.float.ghost ─────────────────────────
-print("\n[37] ui.float.ghost — invisible 1×1 absorber")
-events_mod._reset_for_tests()
-f_events = { opened = {}, closed = {} }
-events_mod.subscribe("float:opened", function(p) f_events.opened[#f_events.opened + 1] = p end)
-events_mod.subscribe("float:closed", function(p) f_events.closed[#f_events.closed + 1] = p end)
-
-local g = float.ghost()
-ok("ghost returns a handle with buf+win+close",
-  type(g) == "table"
-    and g.buf ~= nil and g.win ~= nil
-    and type(g.close) == "function")
-ok("ghost window is 1×1",
-  vim.api.nvim_win_get_width(g.win) == 1
-    and vim.api.nvim_win_get_height(g.win) == 1)
-ok("ghost buffer has filetype 'auto-core-ghost'",
-  vim.bo[g.buf].filetype == "auto-core-ghost")
-ok("float:opened event fired with kind='ghost'",
-  #f_events.opened >= 1
-    and f_events.opened[#f_events.opened].kind == "ghost")
-
-g.close()
-ok("ghost.close() closes the window",
-  not vim.api.nvim_win_is_valid(g.win))
-ok("float:closed event fired with kind='ghost'",
-  #f_events.closed >= 1
-    and f_events.closed[#f_events.closed].kind == "ghost")
-
--- ─────────────────────── 38. ui.float.confirm ─────────────────────────
+-- ─────────────────────── 37. ui.float.confirm ─────────────────────────
 print("\n[38] ui.float.confirm — vim.ui.select wrapper")
 
 -- Stub vim.ui.select to capture the call without blocking.

@@ -1,7 +1,7 @@
 ---auto-core.ui — UI primitives for the AutoVim plugin family.
 ---
 ---Phase 3 ships panel/winbar/section. Phase 6 adds float (help
----overlay / ghost / confirm) and the canonical highlight registry.
+---overlay / confirm) and the canonical highlight registry.
 ---
 ---Aggregates the sub-modules into one table so consumers can
 ---`local ui = require("auto-core").ui` and reach `ui.panel.new`,

@@ -18,7 +18,7 @@
 ---  AutoCoreSectionActive  -- the active tab in a panel winbar tab strip
 ---  AutoCoreSectionInactive -- inactive tabs
 ---  AutoCorePanelTitle     -- panel-level winbar title text
----  AutoCoreFloatNormal    -- normal text in a help overlay / ghost / confirm
+---  AutoCoreFloatNormal    -- normal text in a help overlay / confirm
 ---  AutoCoreFloatBorder    -- border around floats
 ---  AutoCoreFloatTitle     -- centered title on a float (when set)
 ---  AutoCoreDimmed         -- de-emphasized inline text

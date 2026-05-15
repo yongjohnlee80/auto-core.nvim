@@ -1,9 +1,8 @@
 ---Float helpers for the AutoVim family.
 ---
----Phase 6 per ADR 0006 + auto-core-todos. Three primitives:
+---Phase 6 per ADR 0006 + auto-core-todos. Two primitives:
 ---
 ---  M.help_overlay(lines, opts?)   → handle    -- centered help float
----  M.ghost(opts?)                 → handle    -- invisible 1×1 keystroke target
 ---  M.confirm(prompt, opts?)                   -- yes/no via vim.ui.select
 ---
 ---Each primitive that creates a window publishes:
@@ -14,8 +13,6 @@
 ---  - help_overlay closes on `q`, `<esc>`, `<cr>`, or any of the
 ---    user-overridable keys in `opts.dismiss_keys`. Also auto-
 ---    closes when focus leaves the float (BufLeave).
----  - ghost provides an explicit `:close()` method on its handle.
----    No auto-close — ghosts are intentional.
 ---  - confirm is a thin wrapper around `vim.ui.select`; its
 ---    lifecycle is whatever the active select-implementation does.
 ---
@@ -155,72 +152,6 @@ function M.help_overlay(lines, opts)
 
   events.publish("float:opened", {
     kind = "help_overlay", buf = buf, win = win,
-  })
-
-  return { buf = buf, win = win, close = do_close }
-end
-
--- ── ghost ─────────────────────────────────────────────
-
----@class AutoCoreGhostOpts
----@field focus boolean?    -- default true: take focus immediately
----@field row   integer?    -- default lines-1 (bottom-left)
----@field col   integer?    -- default 0
-
----Open an invisible 1×1 floating window — a keystroke target
----without visible UI. Used by auto-agents's diff-parity flow:
----open a ghost, set buffer-local mappings to absorb keys, close
----when done.
----@param opts AutoCoreGhostOpts?
----@return AutoCoreFloatHandle
-function M.ghost(opts)
-  hl.ensure()
-  opts = opts or {}
-  local focus = opts.focus
-  if focus == nil then focus = true end
-
-  local buf = vim.api.nvim_create_buf(false, true)
-  vim.bo[buf].buftype   = "nofile"
-  vim.bo[buf].bufhidden = "wipe"
-  vim.bo[buf].swapfile  = false
-  vim.bo[buf].filetype  = "auto-core-ghost"
-
-  local row = opts.row or math.max(0, vim.o.lines - 1)
-  local col = opts.col or 0
-
-  local win = vim.api.nvim_open_win(buf, focus, {
-    relative  = "editor",
-    width     = 1,
-    height    = 1,
-    row       = row,
-    col       = col,
-    style     = "minimal",
-    border    = "none",
-    focusable = true,
-    -- noautocmd minimizes side-effects from the window flip.
-    noautocmd = true,
-  })
-
-  -- Hide it visually: blank the cell + dim cursor presence by
-  -- tying Normal to FloatNormal (consumers can theme_override
-  -- AutoCoreFloatNormal to make it truly invisible).
-  pcall(vim.api.nvim_set_option_value, "winhl",
-    "Normal:AutoCoreFloatNormal", { win = win })
-
-  local closed = false
-  local function do_close()
-    if closed then return end
-    closed = true
-    if vim.api.nvim_win_is_valid(win) then
-      pcall(vim.api.nvim_win_close, win, true)
-    end
-    events.publish("float:closed", {
-      kind = "ghost", buf = buf, win = win,
-    })
-  end
-
-  events.publish("float:opened", {
-    kind = "ghost", buf = buf, win = win,
   })
 
   return { buf = buf, win = win, close = do_close }
