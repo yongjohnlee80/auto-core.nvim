@@ -26,11 +26,11 @@
 ---@module 'auto-core.version'
 
 return {
-  -- v0.1.5 is the last *committed* tag. The mailbox feature is
-  -- in-flight on the queue-mailbox branch; we tag the next bump
-  -- once the whole feature lands (router + bootstrap + debug
-  -- probe + family-plugin wiring). Until then, the working tree
-  -- stays at v0.1.5 even as new work is committed onto this branch.
-  version     = "0.1.6",
+  -- v0.1.7: bootstrap.upsert short-circuits the atomic write when
+  -- the existing doc's revision already matches the rendered
+  -- revision, eliminating spurious mtime bumps and router fs.watch
+  -- fires on no-op `register()` calls. The return shape gains
+  -- `wrote: boolean`; `path` + `revision` keep their meaning.
+  version     = "0.1.7",
   api_version = "0.1",
 }

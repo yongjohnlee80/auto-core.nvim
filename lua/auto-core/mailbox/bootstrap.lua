@@ -1,18 +1,27 @@
 ---auto-core.mailbox.bootstrap — render the per-mailbox bootstrap doc
 ---from the canonical template and upsert it into the mailbox tree.
 ---
----Every `register(id, opts)` rewrites `bootstrap-mailbox.md` so the
----doc always reflects the current protocol. The `revision:` field
----in the frontmatter is the sha256 of the rendered body MINUS the
----revision line itself — that way "same content" → "same revision",
----regardless of when it was written. Agents compare this revision
----to their last-acknowledged value on wake to detect protocol
----changes (see the template body for the audit protocol).
+---`register(id, opts)` calls `upsert()` to keep `bootstrap-mailbox.md`
+---in sync with the canonical protocol. The `revision:` field in the
+---frontmatter is the sha256 of the rendered body with placeholder
+---substituted for revision + upserted_at — that way "same content"
+---→ "same revision", regardless of when it was written. Agents
+---compare this revision to their last-acknowledged value on wake to
+---detect protocol changes (see the template body for the audit
+---protocol).
+---
+---v0.1.7 short-circuits the actual atomic write when the existing
+---doc's revision already matches the rendered revision. This avoids:
+---  - spurious mtime bumps on no-op `register()` calls,
+---  - spurious `core.mailbox:bootstrap_upserted` events,
+---  - spurious router fs.watch fires on the bootstrap doc.
+---The return shape gains a `wrote: boolean` field so callers (and
+---tests) can distinguish a real upsert from a no-op skip.
 ---
 ---Template lookup: `lua/auto-core/mailbox/templates/bootstrap.md`,
 ---resolved relative to this module's source file. Family plugins
----can supply per-tool overrides in a future patch; v0.1.6 ships
----one template for everyone.
+---can supply per-tool overrides in a future patch; v0.1.6 shipped
+---one template for everyone; v0.1.7 keeps that.
 ---
 ---@module 'auto-core.mailbox.bootstrap'
 
@@ -151,19 +160,49 @@ local function atomic_write(path, text)
   return true
 end
 
+---Read the `revision:` value from an existing bootstrap doc's
+---frontmatter, without parsing the full file. Returns nil if the
+---file doesn't exist or has no revision line — both cases force
+---a write in `upsert`.
+---
+---Frontmatter is fixed-shape (mailbox_id, mailbox_dir, revision,
+---upserted_at, schema_version) at the top of the file; a single
+---small read covers it on every reasonable filesystem.
+---@param path string
+---@return string?
+local function read_existing_revision(path)
+  local fd = vim.uv.fs_open(path, "r", 420)
+  if not fd then return nil end
+  -- 512 bytes is well past the largest plausible frontmatter
+  -- (current shape is ~180 bytes including the closing `---`).
+  local data = vim.uv.fs_read(fd, 512, 0)
+  pcall(vim.uv.fs_close, fd)
+  if type(data) ~= "string" or data == "" then return nil end
+  -- Match the frontmatter `revision:` line specifically. Anchor to
+  -- a newline (or start of file) so a `revision:` token inside the
+  -- body — unlikely, but cheap to guard — doesn't get mis-matched.
+  return data:match("\nrevision:%s*([%w]+)")
+      or data:match("^revision:%s*([%w]+)")
+end
+
 ---Render and upsert `bootstrap-mailbox.md` into the mailbox dir.
----Always writes (matches the "register is idempotent — protocol
----updates propagate automatically" design intent).
+---No-op short-circuit: if the existing doc on disk already carries
+---the rendered revision, skip the atomic write entirely. This keeps
+---mtime stable and silences the router fs.watch on repeat
+---`register()` calls with unchanged protocol inputs.
 ---@param opts { id: string, dir: string, wake: table? }
----@return { path: string, revision: string }
+---@return { path: string, revision: string, wrote: boolean }
 function M.upsert(opts)
   local text, revision = M.render(opts)
   local path = opts.dir .. "/bootstrap-mailbox.md"
+  if read_existing_revision(path) == revision then
+    return { path = path, revision = revision, wrote = false }
+  end
   local ok, err = atomic_write(path, text)
   if not ok then
     error("auto-core.mailbox.bootstrap.upsert: " .. tostring(err))
   end
-  return { path = path, revision = revision }
+  return { path = path, revision = revision, wrote = true }
 end
 
 return M

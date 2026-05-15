@@ -10,6 +10,68 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.7] — 2026-05-14 — mailbox bootstrap: revision-based no-op short-circuit
+
+Additive patch on the mailbox subsystem. `register(id, opts)` no
+longer rewrites `bootstrap-mailbox.md` when the existing doc's
+revision already matches the rendered revision — the most common
+case once an agent is established.
+
+Motivation: the existing always-rewrite path bumped the bootstrap
+doc's mtime on every `register()` call, even when the protocol
+hadn't changed. That fires the router's fs.watch on the same file,
+publishes spurious `core.mailbox:bootstrap_upserted` events, and
+forces any agent-side caches that watch the doc to re-evaluate
+for no gain. The skip path removes all of that without changing
+the agent-side audit semantics (agents still compare the
+`revision:` frontmatter to their persisted `seen-revision`).
+
+### Changed — `auto-core.mailbox.bootstrap.upsert`
+
+- Renders the doc into memory, computes the revision (sha256 of
+  the rendered body with `revision` + `upserted_at` placeholders),
+  then reads the **first ~512 bytes** of the existing doc on disk
+  to extract its `revision:` frontmatter line.
+- If the existing revision matches the rendered revision, returns
+  `{ path, revision, wrote = false }` and does NOT touch the file.
+- If they differ (or the doc is missing / malformed), performs
+  the same atomic write as before and returns `{ path, revision,
+  wrote = true }`.
+- The frontmatter read is anchored at line-start (`\nrevision:`)
+  so a `revision:` token appearing in the body cannot mis-match.
+
+### Added — return-shape
+
+- **`bootstrap.upsert` return value** now carries `wrote:
+  boolean`. `path` and `revision` keep their existing meaning;
+  callers that read only those fields are unaffected.
+- `registry.register` propagates the new field through the
+  `record.bootstrap` table — `record.bootstrap.wrote` is `false`
+  on a no-op upsert, `true` on a real write.
+- The published `core.mailbox:registered` event payload's
+  `bootstrap_path` + `bootstrap_revision` are unchanged.
+
+### Tests — `tests/smoke.lua` [49c2]
+
+- Flipped the long-standing "re-register bumps mtime" assertion:
+  re-registering with identical inputs now MUST leave mtime
+  unchanged, and the returned record carries `wrote == false`.
+- Added a positive-case assertion: re-registering with a different
+  `wake.args.slot` MUST bump mtime, return `wrote == true`, and
+  produce a different revision than the first registration.
+- Restored the canonical wake at the end of the section so the
+  downstream [49d]+ tests see the wake shape they expect.
+
+### Maintenance — stale literal-version assertions
+
+The smoke `[1]` and `[48]` sections carried hardcoded
+`v.version == "0.1.5"` assertions that were left "stale on
+purpose so the failure stays discoverable" (per the in-source
+comments). Updated both to assert the version matches the
+`^0%.1%.%d+$` pattern, so patch bumps stop generating
+maintenance noise. The api_version assertion (`"0.1"`) is
+unchanged.
+
 ## [v0.1.6] — 2026-05-14 — remote-branch management primitives + events for git.repo/git.worktree
 
 Additive patch-line release. Adds the git-side primitives that the
