@@ -124,24 +124,28 @@ without re-reading the entire doc. The summary should cover:
    `commands_list` to see the registry as it stands right now, and
    `addressbook` to discover peers. Then send `wake` /
    `kind="command"` / plain `kind="message"` traffic to collaborate.
-7. **Codex sandbox write access.** Codex-backed agents need
-   their mailbox directory listed as an additional writable root
-   in the Codex config before they can write `outbox/` without
-   approval. Update `$CODEX_HOME/config.toml` (normally
-   `~/.codex/config.toml`) with the agent's actual mailbox
-   path, scoped to that mailbox only:
+7. **Spawn-time permission grants are already applied.** auto-agents
+   passes your mailbox directory (and your KB read/write paths) to
+   your CLI via the standard repeatable directory flag:
 
-   ```toml
-   sandbox_mode = "workspace-write"
+   | Kind     | Flag                                  |
+   |----------|---------------------------------------|
+   | claude   | `--add-dir <path>` (repeatable)       |
+   | codex    | `--add-dir <path>` (repeatable)       |
+   | gemini   | `--include-directories <path>` (rep.) |
 
-   [sandbox_workspace_write]
-   writable_roots = [
-     "/home/<user>/.codex/mailbox/<full_agent_id>"
-   ]
-   ```
+   These flags are appended to your spawn argv every restart — the
+   grant is per-session and self-rebuilds. **The host does NOT mutate
+   your CLI's persistent config** (no `writable_roots` writes into
+   `~/.codex/config.toml`, no `~/.claude/settings.json` edits). That
+   keeps your config file from growing unbounded across nvim
+   restarts and keeps the auth surface inspectable in `ps aux`.
 
-   Restart the Codex session after changing the config. Until
-   restart, outbox writes may still require approval.
+   Implication for you: paths under `$AUTO_AGENTS_MAILBOX_DIR`,
+   `$AUTO_AGENTS_KB_READ`, and `$AUTO_AGENTS_KB_WRITE` are already
+   authorized when your terminal starts. You should not see — or
+   ask the user for — confirmation prompts for routine reads/writes
+   inside those trees.
 
 Treat this memory as durable. When you re-encounter this doc
 with a matching revision, you don't need to re-derive it — your
