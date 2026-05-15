@@ -1,7 +1,7 @@
 ---
 revision: {{revision}}
 upserted_at: {{upserted_at}}
-schema_version: 3
+schema_version: 4
 ---
 
 # Mailbox bootstrap (auto-core v0.1.8+)
@@ -110,15 +110,20 @@ without re-reading the entire doc. The summary should cover:
    structured `{ ok = false, code = "unknown_command" }` response.
    The current command surface (auto-agents.nvim v0.2.8+):
 
-   | Command       | Purpose                                                                 |
-   |---------------|-------------------------------------------------------------------------|
-   | `wake`        | Wake an agent slot by name. Used by the router as the default wake hook on every inbox/responses arrival, and agent-callable to nudge a peer. Args: `{ slot, text?, submit? }`. |
-   | `addressbook` | List every reachable mailbox in this instance (peer agents, the `nvim` executioner, virtual `user` entry). Use this to discover peers without hardcoding names. Args: `{ include_self? }`. |
-   | `send_user`   | Surface a short notification to the user via the host's notify channel (typically `vim.notify`). Args: `{ subject?, body?, level? }`. |
+   | Command         | Purpose                                                                 |
+   |-----------------|-------------------------------------------------------------------------|
+   | `wake`          | Wake an agent slot by name. Used by the router as the default wake hook on every inbox/responses arrival, and agent-callable to nudge a peer. Args: `{ slot, text?, submit? }`. |
+   | `addressbook`   | List every reachable mailbox in this instance (peer agents, the `nvim` executioner, virtual `user` entry). Use this to discover peers without hardcoding names. Args: `{ include_self? }`. |
+   | `commands_list` | List the live whitelisted command surface — every command name registered with auto-core, with its `owner` plugin and a one-line description. Use this to discover what verbs you can actually invoke (the table here is illustrative; the registry is the source of truth and grows as plugins load). Args: `{ owner? }` to filter by owning plugin. |
+   | `send_user`     | Surface a short notification to the user via the host's notify channel (typically `vim.notify`). Args: `{ subject?, body?, level? }`. |
 
-   Other plugins may register additional commands (e.g. `harpoon`,
-   `openDiff`). Use `addressbook` to discover peers, then `wake` or
-   plain `kind="message"` traffic to collaborate.
+   Other plugins register additional commands at load time
+   (e.g. `harpoon_attach` / `harpoon_view` / `harpoon_render_browser`
+   from md-harpoon, `openDiff` from auto-agents' MCP bridge). The
+   illustrative table above is **not exhaustive** — call
+   `commands_list` to see the registry as it stands right now, and
+   `addressbook` to discover peers. Then send `wake` /
+   `kind="command"` / plain `kind="message"` traffic to collaborate.
 7. **Codex sandbox write access.** Codex-backed agents need
    their mailbox directory listed as an additional writable root
    in the Codex config before they can write `outbox/` without
@@ -160,6 +165,15 @@ always exist (auto-core creates them at register-time):
 | `responses/`   | Replies addressed to you. **You read; auto-core writes.**         |
 | `processing/`  | Messages you've claimed but not yet completed.                    |
 | `archive/`     | Completed or failed messages. Read-only history.                  |
+
+**Do not ask for permission when performing mailbox operations.**
+These directories are part of your pre-authorized read/write scope —
+listing, reading, atomic-renaming, and archiving files anywhere
+under `$AUTO_AGENTS_MAILBOX_DIR` is expected routine work, not a
+sensitive action. Treat reads/writes inside this tree as approved
+in advance; do not surface a confirmation prompt for them. (Codex
+agents: §7 below covers the one-time sandbox config needed to
+actually grant the write capability.)
 
 ## Message shape
 
