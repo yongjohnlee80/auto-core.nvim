@@ -1,7 +1,7 @@
 ---
 revision: {{revision}}
 upserted_at: {{upserted_at}}
-schema_version: 2
+schema_version: 3
 ---
 
 # Mailbox bootstrap (auto-core v0.1.8+)
@@ -40,8 +40,9 @@ target instance to also be registered with auto-core.
 
 **Read this section before processing any messages.**
 
-auto-core wakes you (typically via your nvim host's `send_slot`)
-when one of the following lands in your tree:
+auto-core wakes you (typically via your nvim host's `wake`
+command — see § Whitelisted commands below) when one of the
+following lands in your tree:
 
 - a new file in `$AUTO_AGENTS_MAILBOX_DIR/inbox/` (someone sent
   you a message), or
@@ -83,7 +84,7 @@ without re-reading the entire doc. The summary should cover:
    `responses/`, `processing/`, `archive/` subdirs. Same shape
    for every agent in this system.
 2. **Inbox/outbox checking cadence.** On wake (auto-core calls
-   `send_slot` or your tool's equivalent wake mechanism), list
+   the `wake` command — see § Whitelisted commands), list
    `inbox/` and `responses/` oldest-first (sort by filename —
    message ids are time-sortable) and process before doing
    anything else.
@@ -102,12 +103,22 @@ without re-reading the entire doc. The summary should cover:
    the outcome (`approved`, `change_requested`, etc) — exact
    semantics belong to the message-defining plugin, but the
    transport shape is invariant.
-6. **Whitelisted commands only.** Executable editor actions
-   (harpoon, send_slot, openDiff, ...) MUST go through the
-   command registry — write `kind = "command"` with a recognized
-   `command` name. **Raw Lua, Vimscript, shell, or RPC strings
-   are NEVER honored**; they are rejected with a structured
-   `{ ok = false, code = "unknown_command" }` response.
+6. **Whitelisted commands only.** Executable editor actions MUST
+   go through the command registry — write `kind = "command"`
+   with a recognized `command` name. **Raw Lua, Vimscript, shell,
+   or RPC strings are NEVER honored**; they are rejected with a
+   structured `{ ok = false, code = "unknown_command" }` response.
+   The current command surface (auto-agents.nvim v0.2.8+):
+
+   | Command       | Purpose                                                                 |
+   |---------------|-------------------------------------------------------------------------|
+   | `wake`        | Wake an agent slot by name. Used by the router as the default wake hook on every inbox/responses arrival, and agent-callable to nudge a peer. Args: `{ slot, text?, submit? }`. |
+   | `addressbook` | List every reachable mailbox in this instance (peer agents, the `nvim` executioner, virtual `user` entry). Use this to discover peers without hardcoding names. Args: `{ include_self? }`. |
+   | `send_user`   | Surface a short notification to the user via the host's notify channel (typically `vim.notify`). Args: `{ subject?, body?, level? }`. |
+
+   Other plugins may register additional commands (e.g. `harpoon`,
+   `openDiff`). Use `addressbook` to discover peers, then `wake` or
+   plain `kind="message"` traffic to collaborate.
 7. **Codex sandbox write access.** Codex-backed agents need
    their mailbox directory listed as an additional writable root
    in the Codex config before they can write `outbox/` without
@@ -133,8 +144,8 @@ global memory already carries the protocol. When the revision
 changes, re-read the doc and refresh the relevant section of
 your memory.
 
-This memory is what makes `send_slot` wakes lightweight: the
-wake prompt only needs to say "you have new mail" — your global
+This memory is what makes `wake` nudges lightweight: the wake
+prompt only needs to say "you have new mail" — your global
 memory tells you how to act on that without further explanation.
 
 ## Your directories
@@ -232,6 +243,38 @@ instance.
    — it does not affect auto-core's behavior beyond keeping
    `inbox/` focused on un-processed mail.
 
+## Discovering peers — the `addressbook` command
+
+You don't have to hardcode peer names. Send a command message to
+`nvim` (the host executioner mailbox, always registered) with
+`command = "addressbook"`:
+
+```json
+{
+  "id":             "<your-id>",
+  "kind":           "command",
+  "from":           "<your AUTO_AGENTS_MAILBOX_ID>",
+  "to":             "nvim",
+  "command":        "addressbook",
+  "args":           { "include_self": false },
+  "correlation_id": "<your-id>"
+}
+```
+
+The response (arriving in your `responses/` dir keyed by
+`correlation_id`) carries `value.addresses[]` — one entry per
+registered mailbox in this instance, plus a virtual `user`
+entry pointing at the `send_user` command. Each entry has
+`id` (full), `bare_id`, `kind` (`agent` / `host` / `virtual`),
+and (for real mailboxes) `dir`, `tool_root`, and
+`executioner` flags. Use the `bare_id` of a peer when addressing
+them — auto-core resolves bare ids to full per-instance ids on
+the host side.
+
+The book is **dynamic** — it reflects the live registry, so
+peers spawned after you started will appear in subsequent
+`addressbook` queries without any manual refresh.
+
 ## Don'ts
 
 - **Don't write outside your own `outbox/`.** auto-core is the
@@ -247,5 +290,5 @@ instance.
 - ADR 0013 — Auto-Core Queue Mailbox & Command Registry.
 - Event topics: `core.mailbox:*`, `core.command:*` (consumers
   in Neovim subscribe; you do not need to).
-- Schema version: `2`. If auto-core upgrades to schema `3`, the
+- Schema version: `3`. If auto-core upgrades to schema `4`, the
   upsert will rewrite this doc; your audit step catches it.

@@ -41,6 +41,15 @@ return {
   -- Persisted schema change (mailbox dir layout) shipped as patch
   -- per user decision; only known consumer (auto-agents) updates
   -- alongside.
-  version     = "0.1.8",
+  -- v0.1.9: bootstrap template update. The agent-facing protocol
+  -- doc (`templates/bootstrap.md`) now references `wake` instead
+  -- of `send_slot` as the canonical wake command name and adds a
+  -- new section explaining the `addressbook` discovery command.
+  -- schema_version bumped 2 → 3 because the renamed command name
+  -- is a public-API contract change agents must re-acknowledge.
+  -- No Lua-API change — `mailbox.commands.register` consumers
+  -- (auto-agents v0.2.8+) already register `wake` + `addressbook`
+  -- with the registry.
+  version     = "0.1.9",
   api_version = "0.1",
 }

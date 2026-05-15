@@ -10,6 +10,43 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.9] — 2026-05-14 — bootstrap template instructs agents on `wake` + `addressbook`
+
+The agent-facing protocol doc (`mailbox/templates/bootstrap.md`)
+referenced `send_slot` as the wake command and listed legacy
+example commands (`harpoon, send_slot, openDiff, ...`). Now that
+the canonical wake command is registered as `wake` (auto-agents
+v0.2.8) and `addressbook` is the agreed peer-discovery primitive,
+the template tells agents how to use them.
+
+### Changed
+
+- **`mailbox/templates/bootstrap.md`**:
+  - `schema_version: 2` → `3`. Agents that audit revisions per
+    the protocol will re-read the doc on next wake.
+  - Wake-protocol section now references `wake` (was `send_slot`).
+  - "Whitelisted commands only" bullet replaced with a concrete
+    table of the current command surface: `wake`, `addressbook`,
+    `send_user`. Notes that other plugins may register their own.
+  - New **`## Discovering peers — the addressbook command`** section
+    showing the exact JSON shape an agent sends to query the
+    addressbook + the response shape (with `value.addresses[]`).
+  - Closing line "`send_slot` wakes lightweight" → "`wake` nudges
+    lightweight".
+- **`version.lua`** bumped to `0.1.9`.
+
+### Notes
+
+- The doc revision is sha256 of the template body, so this edit
+  auto-generates a new revision. On next `mailbox.register()`,
+  every existing per-tool-root bootstrap doc is re-upserted with
+  the new content + revision; agents detect the change via their
+  `seen-revision` audit and re-read the doc.
+- No Lua-API change. Consumers (auto-agents v0.2.8+) already
+  registered `wake` + `addressbook` with the registry; this
+  patch lets agents discover that surface from the doc instead
+  of guessing.
+
 ## [v0.1.8] — 2026-05-14 — mailbox per-instance isolation + per-tool-root bootstrap doc
 
 Major reshape of the mailbox directory layout to support running
