@@ -10,6 +10,128 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.11] — 2026-05-16 — ADR 0021 Phase 1: centralized logging surface for the family
+
+Additive minor-surface extension to `auto-core.log` per
+[ADR 0021](https://github.com/yongjohnlee80/auto-agents/blob/main/shared/adrs/0021-auto-family-centralized-logging.md).
+Every existing call site keeps working byte-identically; the new
+options-table form is opt-in via sentinel-key detection.
+
+### Added
+
+- **`AutoCoreLogEntry` schema**: optional `event_type :: string?`
+  (registered event id, e.g. `"auto-finder.scan.completed.slow"`)
+  and `fields :: table?` (structured payload preserved unflattened
+  for the eventual `:AutoCoreLog` viewer). Existing entries leave
+  both as `nil`.
+- **Options-table sentinel detection** in `level_call`. The last
+  message-parts element is interpreted as options iff it's a table
+  with at least one of `event`, `fields`, `notify`,
+  `level_override`. Backward-compatible — trailing tables WITHOUT
+  sentinel keys still render via `vim.inspect`.
+- **`log.notify(msg, opts?)`** — single-emission sugar that
+  unconditionally writes the ring AND fires `vim.notify`. Default
+  level INFO; override via `opts.level = "warn"` etc. Honors
+  `opts.component`, `opts.title`, `opts.fields`.
+- **`log.notifyIf(event, msg, opts?)`** — ring write +
+  gated toast. Toasts iff `event` is in the user's subscribed set.
+  The ring entry is always written, so the audit trail is
+  preserved for `:AutoCoreLog` regardless of notification routing.
+- **`opts.notify` three-state routing** inside `dispatch`:
+  - `true` → always toast (level → severity icon)
+  - `false` → never toast
+  - `"auto"` → toast iff `opts.event` is subscribed
+  - omitted → pre-ADR-0021 default (ERROR/WARN toast, else silent)
+- **`log.events.register / list / enable_notify / disable_notify
+  / is_notify_enabled`**. Plugins call `register(plugin, events)`
+  at setup; users toggle subscriptions via the user command below.
+  Subscriptions persist via
+  `auto-core.state.namespace("auto-core.log.events")` (json
+  backend). The registry itself is in-memory and re-declared on
+  every nvim startup.
+- **`log.<level>_throttled(key, every_ms, component?, ...)`** for
+  every level. At most one emission per `(key, every_ms)` window;
+  subsequent calls are dropped silently. Required guard for any
+  per-loop logging — see the convention page below.
+- **`:AutoCoreLogEvent list [plugin] | notify <event> | silence
+  <event>`** user command. Context-aware tab completion suggests
+  plugin names for `list`, unsubscribed events for `notify`,
+  subscribed events for `silence`.
+
+### Changed
+
+- **`level_call(level, component, ...)` arg-shape rules**: the
+  three-way distinction between `string component`,
+  `nil component`, and `non-nil-non-string component` is now
+  explicit. Pre-ADR-0021 callers that pass nil were silently
+  putting nil at `parts[1]`, creating an array-length hole that
+  corrupted `#parts`. The fix is internal — no public API change.
+- **`_reset_for_tests`** now also clears the in-memory event
+  registry and the cached state-namespace handle. Tests
+  exercising the persisted registry should additionally call
+  `auto-core.state._reset_for_tests` + a `state.configure({
+  persist_dir = tempdir })` override for isolation.
+
+### Convention
+
+A new family-wide binding convention lives in the auto-agents KB
+at `shared/conventions/auto-family-logging.md`. Highlights:
+
+- **Wrapper rule**: every consumer plugin owns exactly one
+  `lua/<plugin>/log.lua` that delegates to `auto-core.log`.
+  Feature code calls the wrapper, never `auto-core.log` directly.
+- **No bare `vim.notify`**: use `log.notify` or `log.notifyIf` so
+  every toast also lands in the ring.
+- **Required event registration** at plugin `setup()` before
+  first `notifyIf` emission.
+- **Hot-loop guard**: any emission inside a per-entry loop uses
+  `log.<level>_throttled`.
+- **In-memory only**: no background disk I/O. Persistence is
+  on-demand via the future `:AutoCoreLog` viewer's export action.
+
+### Migration
+
+This is a **patch** within the v0.1.x line per
+[`auto-core-maintenance`](https://github.com/yongjohnlee80/auto-agents/blob/main/shared/conventions/auto-core-maintenance.md)'s
+additive-only rule. Consumers pinned via `version = "^0.1.0"`
+auto-update on next `:Lazy sync`. The legacy
+`auto-finder/logger.lua` and `auto-agents/logger.lua` shims
+remain — Phase 2 renames them to `log.lua` and broadens to cover
+`notify` / `notifyIf` / `register_events`, but the rename is
+non-breaking and lives in each plugin's own repo.
+
+Soft-dep tolerance is the family discipline going forward:
+plugins that adopt the new surface (`log.notify` /
+`log.notifyIf` / `register_events`) MUST degrade gracefully
+when run against an older auto-core that lacks them. Pattern:
+
+```lua
+if type(core_log.notifyIf) ~= "function" then
+  return M.info(opts.component, msg)  -- ring-only fallback
+end
+return core_log.notifyIf(fq_event, msg, opts)
+```
+
+### Tests
+
+Smoke section `[39] log` grew from ~120 to ~370 lines:
+- 10 assertions for the schema + sentinel detection
+- 14 for `notify` / `notifyIf` / `opts.notify` routing
+- 16 for the event registry + persistence round-trip
+- 8 for the `:AutoCoreLogEvent` user command
+- 8 for the throttled emission family
+
+Suite: 662 passed, 1 failed (the pre-existing
+`bootstrap doc still documents Codex writable_roots setup`
+assertion on `comms-1` from `e4754d4`, unrelated to logging).
+
+### Files touched
+
+- `lua/auto-core/log.lua` (~290 → ~530 lines)
+- `plugin/auto-core.lua` (registers `:AutoCoreLogEvent`)
+- `lua/auto-core/version.lua` (0.1.10 → 0.1.11)
+- `tests/smoke.lua` (+250 lines under `[39]`)
+
 ## [v0.1.10] — 2026-05-16 — git.graph.fan_out: is_bare now reflects the repo, not the probed dir
 
 Bug fix. `git.graph.fan_out` was probing each candidate dir with

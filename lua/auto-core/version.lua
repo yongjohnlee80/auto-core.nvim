@@ -60,6 +60,29 @@ return {
   -- `git checkout` branch instead of `git worktree add --track`.
   -- No API shape change; AutoCoreGraphRepo.is_bare semantics
   -- clarified, not renamed.
-  version     = "0.1.10",
+  -- v0.1.11: ADR 0021 Phase 1 — centralized log surface for the
+  -- family. Additive extensions to `auto-core.log` (no removals,
+  -- no break-shape):
+  --   - AutoCoreLogEntry gains optional `event_type` and `fields`
+  --     fields; both nil for pre-ADR-0021 emissions
+  --   - level_call accepts a trailing options table whose
+  --     recognition is keyed on sentinel keys (event / fields /
+  --     notify / level_override); ordinary message-part tables
+  --     keep rendering via vim.inspect unchanged
+  --   - log.notify(msg, opts?) — single-emission ring write +
+  --     forced vim.notify toast
+  --   - log.notifyIf(event, msg, opts?) — ring write + toast iff
+  --     event is in the user's subscribed set
+  --   - log.events.{register, list, enable_notify,
+  --     disable_notify, is_notify_enabled} — plugin-registered
+  --     event registry; subscriptions persist via
+  --     auto-core.state.namespace("auto-core.log.events")
+  --   - log.<level>_throttled(key, every_ms, ...) — hot-loop guard
+  --     family for every level
+  --   - :AutoCoreLogEvent list | notify <event> | silence <event>
+  --     user command with context-aware tab completion
+  -- See ADR 0021 + shared/conventions/auto-family-logging.md for
+  -- the wrapper convention each consumer plugin should follow.
+  version     = "0.1.11",
   api_version = "0.1",
 }

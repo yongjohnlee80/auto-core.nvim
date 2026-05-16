@@ -98,6 +98,163 @@ s:set("panel.user_width", 42)  -- publishes state.auto-finder:panel.user_width:c
 local w = s:watch("panel.user_width", function(new, old) ... end)
 ```
 
+## Logging — the family contract (ADR 0021 / v0.1.11+)
+
+`auto-core.log` is the single ring for the entire AutoVim family.
+Every plugin's emissions land here; users inspect, filter, and
+route notifications from one place. Three rules govern adoption:
+
+### 1. Wrapper rule — each plugin owns one `lua/<plugin>/log.lua`
+
+Feature code in a consumer plugin calls **its own wrapper module**,
+never `require("auto-core").log` directly. The wrapper:
+
+- Auto-prefixes `component` and `event_type` with the plugin's
+  namespace (`"scan"` → `"auto-finder.scan"`).
+- Exposes `notify` / `notifyIf` / `register_events` as thin
+  pass-throughs to auto-core.
+- Soft-deps the new surface so the plugin keeps working on an
+  older auto-core that lacks Phase 1 — degraded to a ring-only
+  fallback, no crash.
+
+Skeleton (per ADR 0021 §6):
+
+```lua
+-- lua/auto-finder/log.lua
+local core_log = require("auto-core").log
+local NS = "auto-finder"
+local M = { levels = core_log.levels }
+
+local function ns(c)
+  if type(c) ~= "string" or c == "" then return NS end
+  if c == NS or c:sub(1, #NS + 1) == NS .. "." then return c end
+  return NS .. "." .. c
+end
+
+function M.error(c, ...) core_log.error(ns(c), ...) end
+function M.warn (c, ...) core_log.warn (ns(c), ...) end
+function M.info (c, ...) core_log.info (ns(c), ...) end
+function M.debug(c, ...) core_log.debug(ns(c), ...) end
+function M.trace(c, ...) core_log.trace(ns(c), ...) end
+
+function M.notify(msg, opts)
+  opts = opts or {}
+  if opts.component then opts.component = ns(opts.component) end
+  if type(core_log.notify) ~= "function" then        -- soft-dep
+    return M.info(opts.component, msg)
+  end
+  return core_log.notify(msg, opts)
+end
+
+function M.notifyIf(event, msg, opts)
+  opts = opts or {}
+  if opts.component then opts.component = ns(opts.component) end
+  local fq = (event == NS or event:sub(1, #NS + 1) == NS .. ".")
+    and event or (NS .. "." .. event)
+  if type(core_log.notifyIf) ~= "function" then      -- soft-dep
+    return M.info(opts.component, msg)
+  end
+  return core_log.notifyIf(fq, msg, opts)
+end
+
+function M.register_events(events)
+  if type(core_log.events) ~= "table"
+      or type(core_log.events.register) ~= "function" then
+    return                                            -- soft-dep
+  end
+  return core_log.events.register(NS, events)
+end
+
+return M
+```
+
+### 2. No bare `vim.notify`
+
+Use `log.notify` or `log.notifyIf` so every toast also lands in
+the ring. Direct `vim.notify` leaves no trail and silently breaks
+`:AutoCoreLog` triage. Enforce at PR review:
+
+```bash
+grep -rnE 'vim\.notify' lua/ | grep -v 'lua/<plugin>/log\.lua'
+```
+
+Exempt cases (rare): pre-`setup()` bootstrap toasts that must
+survive auto-core not being loaded.
+
+### 3. Register events at setup; user controls toasts
+
+Plugins declare their event types in `M.setup()`:
+
+```lua
+require("auto-finder.log").register_events({
+  "scan.started",
+  "scan.completed.slow",
+  "panel.section.switched",
+})
+```
+
+Users toggle notification per event:
+
+```vim
+:AutoCoreLogEvent list                              " show all registered + subscription state
+:AutoCoreLogEvent notify auto-finder.scan.completed.slow
+:AutoCoreLogEvent silence auto-finder.scan.completed.slow
+```
+
+The subscription set persists via `auto-core.state.namespace(
+"auto-core.log.events")` — survives `:qa`.
+
+### Hot-loop guard
+
+Logging inside a per-entry loop MUST use the throttled variant or
+have a written exemption in the PR description:
+
+```lua
+log.info_throttled("scan-progress", 250, "scan", "found", path)
+```
+
+`every_ms` is the window per `key`. Stable keys (per-call-site or
+per-resource within a bounded set) keep the throttle map bounded.
+
+### What auto-core provides
+
+```lua
+local log = require("auto-core").log
+
+-- v0.1.0 base surface
+log.error(component?, ...) / .warn / .info / .debug / .trace
+log.is_level_enabled(name)         -- "debug" → boolean
+log.recent(n?)                     -- AutoCoreLogEntry[]
+log.clear()
+log.configure({ level?, ring_capacity?, notify? })
+log.namespace(component)           -- pre-bound handle
+log.inspect()                      -- config snapshot
+log.levels                         -- { ERROR=1, WARN=2, INFO=3, DEBUG=4, TRACE=5 }
+
+-- v0.1.11 additions (ADR 0021 Phase 1)
+log.notify(msg, opts?)             -- force toast + ring
+log.notifyIf(event, msg, opts?)    -- ring + gated toast
+log.error_throttled(key, every_ms, component?, ...)
+log.warn_throttled  (...)
+log.info_throttled  (...)
+log.debug_throttled (...)
+log.trace_throttled (...)
+log.events.register(plugin, events)
+log.events.list(plugin?)           -- → { { event, plugin }, ... }
+log.events.enable_notify(event)
+log.events.disable_notify(event)
+log.events.is_notify_enabled(event)
+```
+
+Ring: 500 entries default, configurable, in-memory, FIFO eviction.
+Filtered by level BEFORE write — DEBUG/TRACE at default INFO level
+never reach the ring.
+
+See the binding [`auto-family-logging`](https://github.com/yongjohnlee80/auto-agents)
+convention page in the auto-agents kb for the full enforcement
+contract (PR-review checklist, detection grep recipes, exemption
+rules).
+
 ## Hard rules
 
 1. **`auto-core` never `require`s a family plugin.** Dependency
@@ -112,6 +269,10 @@ local w = s:watch("panel.user_width", function(new, old) ... end)
    `lua-nvim-plugin-development` convention in the project's
    auto-agents kb: `tests/smoke.lua` extends every iteration; the
    suite runs green headless before any commit is reported done.
+5. **No bare `vim.notify` in family plugins.** Route through
+   `lua/<plugin>/log.lua` so every toast lands in the ring (rule
+   1 of the [`auto-family-logging`](https://github.com/yongjohnlee80/auto-agents)
+   convention).
 
 ## License
 
