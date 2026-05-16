@@ -268,24 +268,30 @@ local M = {
     payload = "{ id = string, name = string?, type = string? }",
     publishers = { "auto-finder.nvim" },
   },
+  -- NOTE on `conn_id` on call.* topics: best-effort, may be nil.
+  -- dbee's CallDetails shape (`nvim-dbee/lua/dbee/doc.lua:51-58`) does
+  -- not carry a connection id, so the bridge enriches via
+  -- `get_current_connection()`. For archived calls fired late or while
+  -- a different connection is active, conn_id may not resolve. Marked
+  -- optional per lector review nit §1 (2026-05-16).
   ["dbase.call:started"] = {
     doc = "A dbee query was submitted (call enters pending/executing state).",
-    payload = "{ call_id = string, conn_id = string, query = string }",
+    payload = "{ call_id = string, conn_id = string?, query = string }",
     publishers = { "auto-finder.nvim" },
   },
   ["dbase.call:state_changed"] = {
     doc = "A dbee call's internal state transitioned (e.g. pending → executing → archived). Use this for fine-grained progress UIs; the discrete completed/failed topics below are the standard terminal signals.",
-    payload = "{ call_id = string, conn_id = string, from = string?, to = string }",
+    payload = "{ call_id = string, conn_id = string?, from = string?, to = string }",
     publishers = { "auto-finder.nvim" },
   },
   ["dbase.call:completed"] = {
     doc = "A dbee call finished successfully.",
-    payload = "{ call_id = string, conn_id = string, rows = integer?, duration_ms = integer? }",
+    payload = "{ call_id = string, conn_id = string?, rows = integer?, duration_ms = integer? }",
     publishers = { "auto-finder.nvim" },
   },
   ["dbase.call:failed"] = {
     doc = "A dbee call ended in error.",
-    payload = "{ call_id = string, conn_id = string, err = string }",
+    payload = "{ call_id = string, conn_id = string?, err = string }",
     publishers = { "auto-finder.nvim" },
   },
   ["dbase.result:shown"] = {
