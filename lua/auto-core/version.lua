@@ -83,6 +83,16 @@ return {
   --     user command with context-aware tab completion
   -- See ADR 0021 + shared/conventions/auto-family-logging.md for
   -- the wrapper convention each consumer plugin should follow.
-  version     = "0.1.11",
+  -- v0.1.12: mailbox.router executor `ctx` now surfaces the
+  -- sender's identity as `sender` (msg.from verbatim) and
+  -- `sender_bare` (`mb_path.bare_id(from)`) alongside the existing
+  -- `mailbox` / `mailbox_full` executor fields. Closes a latent
+  -- attribution gap: command handlers that wanted "who asked me to
+  -- do this" had to guess from `ctx.mailbox`, which is the EXECUTOR
+  -- (always `nvim`), not the sender. Surfaced for the auto-agents
+  -- `diff_queue` handler — see auto-agents v0.2.12 Patch 4 + ADR
+  -- 0011 §D3 for the consumer side. Additive; no removals; existing
+  -- consumers reading `ctx.mailbox` continue to work unchanged.
+  version     = "0.1.12",
   api_version = "0.1",
 }

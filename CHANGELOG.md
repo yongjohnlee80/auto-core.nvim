@@ -132,6 +132,55 @@ assertion on `comms-1` from `e4754d4`, unrelated to logging).
 - `lua/auto-core/version.lua` (0.1.10 → 0.1.11)
 - `tests/smoke.lua` (+250 lines under `[39]`)
 
+## [v0.1.12] — 2026-05-16 — mailbox.router: ctx.sender / ctx.sender_bare on executor dispatch
+
+Additive ctx fields on the executor-path dispatch — closes a latent
+attribution gap reported via auto-agents ADR 0011 §D3. Renumbered
+from the pre-rebase v0.1.11 because v0.1.11 was claimed upstream by
+the ADR 0021 Phase 1 logging surface; this change rebases on top of
+that work and bumps to v0.1.12.
+
+Pre-patch, `mailbox.router.execute_command` populated the
+`commands.handle_message` ctx with `mailbox = rec.bare_id` and
+`mailbox_full = rec.id` — both pointing at the EXECUTOR (always
+`nvim` for the host-side dispatcher). Command handlers that wanted
+the SENDER's identity ("who asked me to do this work?") had no
+field for it and resorted to guessing from `ctx.mailbox` — which
+returned `"nvim"`. The auto-agents `diff_queue` mailbox handler hit
+this exact wall: it tried to parse `agent:<name>` from
+`ctx.mailbox`, always got `"nvim"`, and rendered every
+mailbox-routed diff with the wrong attribution.
+
+### Added
+
+- **`auto-core/mailbox/router.lua`** `execute_command` ctx now
+  carries two new fields alongside the existing `mailbox` /
+  `mailbox_full`:
+  - `sender` — `msg.from` verbatim (the sender's full mailbox id,
+    e.g. `agent:jarvis:1778927609-1176981`).
+  - `sender_bare` — `mb_path.bare_id(msg.from)` (the bare form,
+    e.g. `agent:jarvis`). Stable across instance restarts.
+  Both are nil when `msg.from` isn't a string (defensive — should
+  not happen in practice; transport validates on receive).
+
+### Tests
+
+- `tests/smoke.lua` §49 (executioner-path test) extended with two
+  new assertions: `ctx.sender == cmd_msg.from` and
+  `ctx.sender_bare == "agent:jarvis"`. Existing executor
+  assertions (`ctx.reason`, `ctx.mailbox`) unchanged.
+
+### Notes
+
+- **Additive only.** Existing handlers reading `ctx.mailbox` /
+  `ctx.mailbox_full` continue to work unchanged. New handlers opt
+  into `ctx.sender_bare` (the recommended field for attribution).
+- Per the `auto-core-maintenance` convention §additive-only
+  minor-bump rule, this is a patch bump (additive ctx field on the
+  same dispatch path). `api_version` stays at `0.1`.
+- Companion consumer change: auto-agents v0.2.12 Patch 4 (mailbox
+  `diff_queue` handler) reads `ctx.sender_bare` here.
+
 ## [v0.1.10] — 2026-05-16 — git.graph.fan_out: is_bare now reflects the repo, not the probed dir
 
 Bug fix. `git.graph.fan_out` was probing each candidate dir with

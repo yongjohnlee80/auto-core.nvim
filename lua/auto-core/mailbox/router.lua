@@ -322,10 +322,23 @@ local function execute_command(rec, mid, msg)
     -- owns the response now.
     return
   end
+  -- ctx surfaces TWO distinct identities to the command handler:
+  --   * mailbox / mailbox_full — the EXECUTOR's mailbox (where this code is
+  --     dispatching from; usually `nvim`).
+  --   * sender / sender_bare   — the SENDER's mailbox (the agent that
+  --     authored msg.from). Handlers that care about "who asked me to do
+  --     this" (audit logs, capability checks, per-sender attribution like
+  --     the diff_queue handler in auto-agents) read sender_bare. Without
+  --     these fields, handlers historically had to guess from
+  --     `ctx.mailbox` — which is the executor, not the sender.
   local response = commands.handle_message(claimed, {
     reason       = "mailbox_executioner",
     mailbox      = rec.bare_id,
     mailbox_full = rec.id,
+    sender       = claimed.from,
+    sender_bare  = type(claimed.from) == "string"
+                     and mb_path.bare_id(claimed.from)
+                     or nil,
   })
   -- complete() handles the response envelope routing back to the
   -- sender. Errors during complete are logged but don't propagate;

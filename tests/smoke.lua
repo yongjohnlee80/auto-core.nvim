@@ -4248,6 +4248,18 @@ ok("executioner dispatched the file-routed command via registry",
     and handler_invocations[1].ctx.reason == "mailbox_executioner"
     and handler_invocations[1].ctx.mailbox == "nvim",
   vim.inspect(handler_invocations))
+-- v0.1.11: ctx surfaces the SENDER's identity alongside the executor's
+-- mailbox so command handlers can attribute the call to who actually
+-- asked for it (the executor is always `nvim`, which historically
+-- forced handlers to guess or to require an explicit `args.sender`).
+ok("ctx.sender carries the sender's full mailbox id (msg.from)",
+  #handler_invocations >= 1
+    and handler_invocations[1].ctx.sender == cmd_msg.from,
+  vim.inspect(handler_invocations[1] and handler_invocations[1].ctx))
+ok("ctx.sender_bare carries the bare form (agent:jarvis without instance suffix)",
+  #handler_invocations >= 1
+    and handler_invocations[1].ctx.sender_bare == "agent:jarvis",
+  vim.inspect(handler_invocations[1] and handler_invocations[1].ctx))
 ok("core.command:executed fired with name='harpoon'",
   #executed_events >= 1 and executed_events[1].name == "harpoon")
 ok("core.mailbox:message_completed fired for the executioner-handled message",
