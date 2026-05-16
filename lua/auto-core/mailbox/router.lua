@@ -145,6 +145,16 @@ end
 ---into (mailbox_record, sub, message_id). Returns nil on no-match
 ---(e.g. the bootstrap-mailbox.md doc, or a file under an unknown
 ---subdir, or a non-json file).
+---
+---ADR 0023 Track D: when the path matches the expected layout but
+---the mailbox isn't registered with the live router (i.e. it's an
+---orphan from a decommissioned nvim instance, or a stale dir from
+---a resumed agent writing to its old instance's path), we now
+---emit `core.mailbox:stale_orphan_detected` BEFORE returning nil.
+---The router itself still doesn't deliver these files — the event
+---is for observability + cleanup hooks (`prune({ drop_orphans =
+---true })`). Pre-ADR-0023 behavior was a silent drop with zero
+---surface for diagnostics.
 ---@param root string
 ---@param path string
 ---@return AutoCoreMailboxRecord?, string?, string?
@@ -155,8 +165,24 @@ local function classify(root, path)
   local rel = path:sub(#root + 2)
   local mid, sub, fname = rel:match("^([^/]+)/([^/]+)/([^/]+)$")
   if not mid or not sub or not fname then return nil end
+
+  -- Layout matched. Two reject cases below — emit the orphan
+  -- event for the registry-rejection case ONLY (the
+  -- "unknown-subdir" case is benign file noise; we don't want
+  -- to flood observability for those).
   local rec = registry.get(mid)
-  if not rec or rec.root ~= root then return nil end
+  if not rec or rec.root ~= root then
+    events.publish("core.mailbox:stale_orphan_detected", {
+      path        = path,
+      mailbox_id  = mid,
+      sub         = sub,
+      message_id  = id_from_filename(path),
+      reason      = (not rec) and "unregistered_mailbox" or "wrong_root",
+      context     = "router.classify",
+    })
+    return nil
+  end
+
   -- Subdir must be in the standard list, otherwise ignore.
   local valid = false
   for _, s in ipairs({ "inbox", "outbox", "processing", "archive", "responses" }) do
@@ -227,6 +253,18 @@ local function dispatch_wake(rec, kind, mid)
     mailbox_full = rec.id,
     arrival_kind = kind,
     arrival_id   = mid,
+    -- ADR 0023 Track A — agent-side drift detection. Carries the
+    -- LIVE host's authoritative identity for the addressed mailbox
+    -- so a resumed agent (whose AUTO_AGENTS_* env is fork-frozen
+    -- with the OLD instance) can compare on every wake and
+    -- self-correct via `refresh_agent_id`. The hint is wire-format
+    -- only at this layer — auto-agents Phase 2 owns the consumer-
+    -- side comparison + recovery logic.
+    identity_hint = {
+      expected_instance_id = mb_path.get_instance_id(),
+      expected_mailbox_id  = rec.id,
+      expected_bare_id     = rec.bare_id,
+    },
   }
   -- handle_message never raises; failures come back in the response
   -- table. We don't surface those further — wake is fire-and-forget.

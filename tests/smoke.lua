@@ -4751,6 +4751,118 @@ ok("recent() returns mailbox / command events only",
   vim.inspect(rec_events))
 end)()
 
+-- ── 49o. ADR 0023 Phase 1 — stale-orphan event + wake identity_hint ─
+print("\n[49o] ADR 0023 Phase 1 — stale orphan event + wake identity_hint")
+;(function()
+  local mailbox_m  = require("auto-core.mailbox")
+  local router_m   = require("auto-core.mailbox.router")
+  local registry_m = require("auto-core.mailbox.registry")
+  local transport_m = require("auto-core.mailbox.transport")
+  local message_m  = require("auto-core.mailbox.message")
+  local commands_m = require("auto-core.mailbox.commands")
+  local path_m     = require("auto-core.mailbox.path")
+
+  -- Don't reset registry/commands/events — section 49p downstream
+  -- depends on the `agent:lector` registration that section 49
+  -- planted. Just stop the router, swap in a fresh tmp root, and
+  -- restart so this section's orphan event doesn't get polluted by
+  -- the prior root's activity.
+  router_m.stop()
+
+  local tmp_root = vim.fn.tempname() .. "_adr0023_orphan"
+  vim.fn.mkdir(tmp_root, "p")
+  mailbox_m.configure({ host_fallback_root = tmp_root, mode = "watch" })
+
+  -- Register a live mailbox so the router has something to scope to.
+  local rec = mailbox_m.register("agent:live-peer", {
+    root = tmp_root,
+    wake = { command = "test_wake_hint" },
+  })
+  -- Stage a stale orphan mailbox dir layout under the same root —
+  -- never registered. Path matches the classify-expected shape
+  -- `<root>/<mailbox-id>/<sub>/<id>.json` so it would otherwise
+  -- pass parsing.
+  local orphan_id  = "agent:orphan-ghost:9999999999-99999"
+  local orphan_dir = tmp_root .. "/" .. orphan_id .. "/outbox"
+  vim.fn.mkdir(orphan_dir, "p")
+  local orphan_file = orphan_dir .. "/orphan-msg-id-001.json"
+
+  -- Start router + collect orphan events as they fire.
+  router_m.start()
+  local orphan_events = {}
+  local orphan_sub = events_m.subscribe(
+    "core.mailbox:stale_orphan_detected",
+    function(p) orphan_events[#orphan_events + 1] = p end)
+
+  -- Plant the orphan file; router's fs.watch on the recursive root
+  -- catches the write OR a manual scan_now() catches it on poll.
+  vim.fn.writefile({ "{}" }, orphan_file)
+  mailbox_m.scan_now()
+  vim.wait(150, function() return #orphan_events > 0 end, 20)
+
+  ok("ADR 0023 §3.6: stale orphan write under unregistered mailbox emits event",
+    #orphan_events >= 1, vim.inspect(orphan_events))
+  ok("ADR 0023 §3.6: orphan event payload carries mailbox_id + reason",
+    orphan_events[1]
+      and orphan_events[1].mailbox_id == orphan_id
+      and orphan_events[1].reason == "unregistered_mailbox",
+    vim.inspect(orphan_events[1]))
+  ok("ADR 0023 §3.6: orphan event payload carries sub + message_id + path",
+    orphan_events[1]
+      and orphan_events[1].sub == "outbox"
+      and orphan_events[1].message_id == "orphan-msg-id-001"
+      and orphan_events[1].path == orphan_file)
+
+  events_m.unsubscribe(orphan_sub)
+
+  -- ── Track A — wake-payload identity_hint round trip ──
+  -- Register a fake wake-command handler that captures the ctx it
+  -- received. Plant an inbox arrival on the live mailbox; the
+  -- router's dispatch_wake should fire the handler with the new
+  -- identity_hint slot populated.
+  local captured_ctx
+  commands_m.register("test_wake_hint", {
+    owner       = "smoke",
+    description = "ADR 0023 wake hint probe",
+    schema      = nil,
+    handler     = function(_args, ctx)
+      captured_ctx = ctx
+      return { ok = true, value = {} }
+    end,
+  })
+
+  -- Write a minimal inbox message and trigger a scan.
+  local arrival_mid = message_m.new_id()
+  local arrival = {
+    id   = arrival_mid,
+    kind = "command",
+    from = "auto-core",
+    to   = rec.id,
+    command = "test_wake_hint",
+    args = {},
+  }
+  local arrival_path = rec.subs.inbox .. "/" .. arrival_mid .. ".json"
+  vim.fn.writefile({ vim.fn.json_encode(arrival) }, arrival_path)
+  mailbox_m.scan_now()
+  vim.wait(200, function() return captured_ctx ~= nil end, 20)
+
+  ok("ADR 0023 §3.5: wake handler receives ctx with identity_hint slot",
+    type(captured_ctx) == "table"
+      and type(captured_ctx.identity_hint) == "table",
+    vim.inspect(captured_ctx))
+  ok("ADR 0023 §3.5: identity_hint.expected_instance_id matches host's get_instance_id()",
+    captured_ctx and captured_ctx.identity_hint
+      and captured_ctx.identity_hint.expected_instance_id == path_m.get_instance_id())
+  ok("ADR 0023 §3.5: identity_hint.expected_mailbox_id matches the addressed mailbox's full id",
+    captured_ctx and captured_ctx.identity_hint
+      and captured_ctx.identity_hint.expected_mailbox_id == rec.id)
+  ok("ADR 0023 §3.5: identity_hint.expected_bare_id matches the addressed mailbox's bare id",
+    captured_ctx and captured_ctx.identity_hint
+      and captured_ctx.identity_hint.expected_bare_id == "agent:live-peer")
+
+  router_m.stop()
+end)()
+
 -- ── 49p. mailbox.prune — sweep old per-instance dirs (v0.1.8) ─
 print("\n[49p] mailbox.prune — sweep stale per-instance dirs")
 ;(function()
