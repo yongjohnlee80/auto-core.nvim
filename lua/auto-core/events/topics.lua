@@ -251,6 +251,49 @@ local M = {
     publishers = { "auto-core" },
   },
 
+  -- ── dbase section (auto-finder.dbase wrapping nvim-dbee — ADR 0020) ──
+  -- Lector ADR 0020 §Events + the synthesized preferred method §8
+  -- (white-vision feasibility doc) ratify these six topics for the
+  -- dbase section's event bridge. The bridge subscribes to dbee's
+  -- internal `Handler:register_event_listener` events and forwards
+  -- them here so other auto-family plugins can react without coupling
+  -- to dbee internals.
+  --
+  -- Payload shapes below are the contract for slice 2 of Phase 1 to
+  -- conform to; if dbee's actual event payloads expose richer fields
+  -- worth surfacing, extend the payload doc here as an additive
+  -- change and bump the slice 2 wiring accordingly.
+  ["dbase.connection:changed"] = {
+    doc = "The active dbee connection switched.",
+    payload = "{ id = string, name = string?, type = string? }",
+    publishers = { "auto-finder.nvim" },
+  },
+  ["dbase.call:started"] = {
+    doc = "A dbee query was submitted (call enters pending/executing state).",
+    payload = "{ call_id = string, conn_id = string, query = string }",
+    publishers = { "auto-finder.nvim" },
+  },
+  ["dbase.call:state_changed"] = {
+    doc = "A dbee call's internal state transitioned (e.g. pending → executing → archived). Use this for fine-grained progress UIs; the discrete completed/failed topics below are the standard terminal signals.",
+    payload = "{ call_id = string, conn_id = string, from = string?, to = string }",
+    publishers = { "auto-finder.nvim" },
+  },
+  ["dbase.call:completed"] = {
+    doc = "A dbee call finished successfully.",
+    payload = "{ call_id = string, conn_id = string, rows = integer?, duration_ms = integer? }",
+    publishers = { "auto-finder.nvim" },
+  },
+  ["dbase.call:failed"] = {
+    doc = "A dbee call ended in error.",
+    payload = "{ call_id = string, conn_id = string, err = string }",
+    publishers = { "auto-finder.nvim" },
+  },
+  ["dbase.result:shown"] = {
+    doc = "The result tile rendered a call's output (or paged within it).",
+    payload = "{ call_id = string, page = integer?, total_pages = integer? }",
+    publishers = { "auto-finder.nvim" },
+  },
+
   -- ── doc pinning (md-harpoon — ADR 0006 + auto-core-todos) ───────
   ["doc:pinned"] = {
     doc = "A document was pinned to one of md-harpoon's slots (or repinned to a different path).",
