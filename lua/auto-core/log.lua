@@ -130,6 +130,42 @@ local _OPTS_SENTINELS = {
   level_override = true,
 }
 
+---Map a logger level to `vim.log.levels.*` for `vim.notify`.
+---@param level integer
+---@return integer
+local function to_vim_log_level(level)
+  if level == M.levels.ERROR then return vim.log.levels.ERROR end
+  if level == M.levels.WARN  then return vim.log.levels.WARN  end
+  if level == M.levels.INFO  then return vim.log.levels.INFO  end
+  if level == M.levels.DEBUG then return vim.log.levels.DEBUG end
+  return vim.log.levels.TRACE
+end
+
+---Resolve `opts.notify` to a routing decision per ADR 0021 §4.
+---  - `true`           → always toast
+---  - `false`          → never toast
+---  - `"auto"`         → toast iff `opts.event` is subscribed via
+---                       `M.events.is_notify_enabled` (Step 3
+---                       registry; Phase 1 stub returns false)
+---  - `nil` (omitted)  → defer to the level's default sink
+---                       (ERROR/WARN → toast, else silent)
+---@param opts AutoCoreLogCallOpts?
+---@param level integer
+---@return boolean
+local function should_toast(opts, level)
+  local n = opts and opts.notify
+  if n == true  then return true  end
+  if n == false then return false end
+  if n == "auto" then
+    if opts and opts.event and M.events and M.events.is_notify_enabled then
+      return M.events.is_notify_enabled(opts.event) == true
+    end
+    return false
+  end
+  -- Default routing (n == nil): keep the pre-ADR-0021 behavior.
+  return level == M.levels.ERROR or level == M.levels.WARN
+end
+
 local function dispatch(level, component, message_parts, opts)
   if level > _cfg.level then return end
 
@@ -150,13 +186,14 @@ local function dispatch(level, component, message_parts, opts)
 
   if not _cfg.notify then return end
 
+  local toast = should_toast(opts, level)
+  local title = (opts and opts.title) or "auto-core"
+
   -- vim.schedule the user-visible side-effect: dispatch may be
   -- called from libuv callbacks where `vim.notify` is unsafe.
   vim.schedule(function()
-    if level == M.levels.ERROR then
-      pcall(vim.notify, full, vim.log.levels.ERROR, { title = "auto-core" })
-    elseif level == M.levels.WARN then
-      pcall(vim.notify, full, vim.log.levels.WARN,  { title = "auto-core" })
+    if toast then
+      pcall(vim.notify, full, to_vim_log_level(level), { title = title })
     else
       pcall(vim.api.nvim_echo, { { full, "Normal" } }, true, {})
     end
@@ -223,18 +260,26 @@ end
 
 local function level_call(level, component, ...)
   -- Arg-shape rules:
-  --   1. If `component` is not a string, treat it as the first message
-  --      part and emit with component=nil. Preserves the
-  --      auto-agents/claudecode legacy signature.
-  --   2. After (1), check whether the LAST parts element is an
+  --   1a. `component` is a string → use as component, rest is parts.
+  --   1b. `component` is nil      → no component, rest is parts.
+  --       (Distinguishing nil from non-nil-non-string matters: a leading
+  --       nil prepended to `parts` produces an array-length hole that
+  --       corrupts `#parts` and any iteration. `M.notify`/`notifyIf`
+  --       route here with component=nil when opts.component is omitted.)
+  --   1c. `component` is anything else (table / boolean / number) →
+  --       treat it as a leading message part for the auto-agents /
+  --       claudecode legacy signature compat.
+  --   2. After 1a/1b/1c, check whether the LAST parts element is an
   --      options table (sentinel-key detection — see extract_opts).
   --      If so, pop it and pass through to dispatch as the 4th arg.
   local parts
-  if type(component) ~= "string" then
+  if type(component) == "string" then
+    parts = { ... }
+  elseif component == nil then
+    parts = { ... }
+  else
     parts = { component, ... }
     component = nil
-  else
-    parts = { ... }
   end
   local opts = extract_opts(parts)
   dispatch(level, component, parts, opts)
@@ -318,6 +363,88 @@ function M.namespace(component)
     trace = function(...) level_call(M.levels.TRACE, component, ...) end,
   }
 end
+
+-- ── notify / notifyIf (ADR 0021 §5 — single-emission sugar) ─
+
+---@class AutoCoreLogNotifyOpts
+---@field level     (string|integer)?  -- default INFO; "warn" / `M.levels.ERROR` etc.
+---@field component string?
+---@field title     string?            -- vim.notify title; default "auto-core"
+---@field fields    table?             -- structured payload preserved on the ring entry
+
+---Single-emission toast + ring write. Use this instead of bare
+---`vim.notify(...)` so every visible toast also lands in the ring
+---for `:AutoCoreLog` triage. Default level INFO — pass
+---`opts.level = "warn"` or similar to escalate. The level filter is
+---honored: emissions below the active config level are dropped from
+---BOTH ring and toast.
+---@param msg any
+---@param opts AutoCoreLogNotifyOpts?
+function M.notify(msg, opts)
+  opts = opts or {}
+  local level = opts.level or M.levels.INFO
+  if type(level) == "string" then
+    level = NAME_TO_LEVEL[level] or M.levels.INFO
+  end
+  -- Pass via the standard level_call path so the trailing-table
+  -- sentinel detection is exercised end-to-end. `notify = true`
+  -- forces the toast regardless of severity default.
+  level_call(level, opts.component, msg, {
+    notify = true,
+    fields = opts.fields,
+    title  = opts.title,
+  })
+end
+
+---Ring write + conditional toast. Toasts iff `event` is in the
+---user's subscribed set (the registry lookup goes through
+---`M.events.is_notify_enabled`). Default level INFO.
+---
+---Phase 1 note: `M.events.is_notify_enabled` is a stub that always
+---returns false until Phase 1 Step 3 lands the persistent event-type
+---registry. Until then, `notifyIf` writes to the ring (so the
+---record exists) but never toasts. Callers can wire up unconditional
+---toasts via `M.notify(...)` in the meantime.
+---@param event string                     -- registered event id (ADR 0021 §5)
+---@param msg any
+---@param opts AutoCoreLogNotifyOpts?
+function M.notifyIf(event, msg, opts)
+  opts = opts or {}
+  local level = opts.level or M.levels.INFO
+  if type(level) == "string" then
+    level = NAME_TO_LEVEL[level] or M.levels.INFO
+  end
+  level_call(level, opts.component, msg, {
+    event  = event,
+    notify = "auto",
+    fields = opts.fields,
+    title  = opts.title,
+  })
+end
+
+-- ── events sub-namespace (Phase 1 Step 3 registry lives here) ─
+
+---@class AutoCoreLogEventsAPI
+---@field is_notify_enabled fun(event: string): boolean
+---@field register          (fun(plugin: string, events: string[]))?
+---@field list              (fun(plugin: string?): table)?
+---@field enable_notify     (fun(event: string))?
+---@field disable_notify    (fun(event: string))?
+
+---Event-type registry surface. Step 2 ships only the
+---`is_notify_enabled` stub (always returns false) so the `notify =
+---"auto"` routing in `dispatch` has a deterministic answer. Step 3
+---replaces the stub with a real registry backed by
+---`auto-core.state.namespace("auto-core.log.events")`. The shape of
+---the API is published now so wrapper modules (`auto-finder.log` /
+---`auto-agents.log`) can wire `M.notifyIf` calls without waiting on
+---Step 3.
+---@type AutoCoreLogEventsAPI
+M.events = {
+  is_notify_enabled = function(_event)
+    return false
+  end,
+}
 
 -- ── inspection helpers (used by :checkhealth) ────────────────
 

@@ -1996,6 +1996,129 @@ do
       and r[1].event_type == "auto-core.watcher.armed")
 end
 
+-- ── ADR 0021 Phase 1 Step 2: notify / notifyIf + opts.notify routing ─
+do
+  -- log.notify(msg) — default level INFO, toasts + ring.
+  log._reset_for_tests()
+  notify_calls = {}
+  log.notify("hello world")
+  vim.wait(20)
+  local r = log.recent()
+  ok("ADR 0021 §5: log.notify writes the ring entry",
+    #r == 1 and r[1].level_name == "INFO"
+      and r[1].message:find("hello world") ~= nil,
+    vim.inspect(r))
+  ok("ADR 0021 §5: log.notify fires vim.notify (forces toast at INFO)",
+    #notify_calls == 1
+      and notify_calls[1].level == vim.log.levels.INFO,
+    vim.inspect(notify_calls))
+
+  -- log.notify(msg, { level = "warn", component = "scan", title = "Custom" })
+  log._reset_for_tests()
+  notify_calls = {}
+  log.notify("watch out", {
+    level     = "warn",
+    component = "scan",
+    title     = "Custom Title",
+    fields    = { path = "/tmp" },
+  })
+  vim.wait(20)
+  r = log.recent()
+  ok("ADR 0021 §5: log.notify honors opts.level (warn)",
+    #r == 1 and r[1].level_name == "WARN" and r[1].component == "scan")
+  ok("ADR 0021 §5: log.notify preserves opts.fields on the ring entry",
+    type(r[1].fields) == "table" and r[1].fields.path == "/tmp")
+  ok("ADR 0021 §5: log.notify uses opts.title for the toast",
+    #notify_calls == 1
+      and notify_calls[1].opts.title == "Custom Title"
+      and notify_calls[1].level == vim.log.levels.WARN)
+
+  -- log.notifyIf with the default stub (always returns false) — ring
+  -- entry written, NO toast.
+  log._reset_for_tests()
+  notify_calls = {}
+  log.notifyIf("auto-finder.scan.started", "mapping ~/proj")
+  vim.wait(20)
+  r = log.recent()
+  ok("ADR 0021 §5: notifyIf writes ring entry even when event unsubscribed",
+    #r == 1
+      and r[1].event_type == "auto-finder.scan.started"
+      and r[1].message:find("mapping") ~= nil)
+  ok("ADR 0021 §5: notifyIf stays silent when stub returns false",
+    #notify_calls == 0,
+    string.format("got %d notifies", #notify_calls))
+
+  -- log.notifyIf when the registry says subscribed — toast fires.
+  log._reset_for_tests()
+  notify_calls = {}
+  local saved_is_enabled = log.events.is_notify_enabled
+  log.events.is_notify_enabled = function(e) return e == "auto-finder.scan.completed.slow" end
+  log.notifyIf("auto-finder.scan.completed.slow", "mapped ~/proj (3.1s)")
+  log.notifyIf("auto-finder.scan.started",         "mapping ~/proj")  -- not subscribed
+  vim.wait(20)
+  ok("ADR 0021 §5: notifyIf toasts when event is subscribed",
+    #notify_calls == 1
+      and notify_calls[1].msg:find("3%.1s") ~= nil,
+    vim.inspect(notify_calls))
+  log.events.is_notify_enabled = saved_is_enabled
+
+  -- Per-call opts.notify = true forces toast even for INFO.
+  log._reset_for_tests()
+  notify_calls = {}
+  log.info("comp", "force-toast", { notify = true })
+  vim.wait(20)
+  ok("ADR 0021 §4: opts.notify=true forces toast at INFO",
+    #notify_calls == 1
+      and notify_calls[1].level == vim.log.levels.INFO)
+
+  -- Per-call opts.notify = false suppresses toast even for ERROR.
+  log._reset_for_tests()
+  notify_calls = {}
+  log.error("comp", "silent-error", { notify = false })
+  vim.wait(20)
+  r = log.recent()
+  ok("ADR 0021 §4: opts.notify=false suppresses toast at ERROR (ring entry still written)",
+    #notify_calls == 0 and #r == 1 and r[1].level_name == "ERROR",
+    string.format("notify_calls=%d ring=%d", #notify_calls, #r))
+
+  -- Default routing preserved: no opts → ERROR/WARN toast, INFO+ silent.
+  log._reset_for_tests()
+  notify_calls = {}
+  log.error("c", "e")
+  log.warn ("c", "w")
+  log.info ("c", "i")
+  vim.wait(20)
+  ok("ADR 0021 §4: omitted opts.notify keeps the pre-existing default routing",
+    #notify_calls == 2
+      and notify_calls[1].level == vim.log.levels.ERROR
+      and notify_calls[2].level == vim.log.levels.WARN)
+
+  -- Below-level filter applies to notify too: log.notify at INFO is
+  -- dropped when active level is WARN (both ring and toast).
+  log._reset_for_tests()
+  log.configure({ level = "warn" })
+  notify_calls = {}
+  log.notify("dropped")
+  vim.wait(20)
+  ok("ADR 0021 §5: log.notify still honors the active level filter",
+    #notify_calls == 0 and #log.recent() == 0)
+
+  -- M.events stub callable + default-false.
+  log._reset_for_tests()
+  ok("ADR 0021 §5: M.events.is_notify_enabled is callable + returns false (stub)",
+    type(log.events) == "table"
+      and type(log.events.is_notify_enabled) == "function"
+      and log.events.is_notify_enabled("any.event") == false)
+
+  -- notify=auto without event → never toasts.
+  log._reset_for_tests()
+  notify_calls = {}
+  log.info("c", "auto-no-event", { notify = "auto" })
+  vim.wait(20)
+  ok("ADR 0021 §4: notify='auto' without event silences (no key to look up)",
+    #notify_calls == 0)
+end
+
 -- Restore stubs.
 vim.notify = orig_notify
 vim.api.nvim_echo = orig_echo
