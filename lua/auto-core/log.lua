@@ -291,6 +291,51 @@ function M.info(component, ...)  level_call(M.levels.INFO,  component, ...) end
 function M.debug(component, ...) level_call(M.levels.DEBUG, component, ...) end
 function M.trace(component, ...) level_call(M.levels.TRACE, component, ...) end
 
+-- ── throttled emission (ADR 0021 §11 — hot-loop guard) ──────
+
+---@type table<string, integer>
+local _throttle_last = {}
+
+---Emit at most once per `every_ms` window, bucketed by `key`. Within
+---the window subsequent calls are silently dropped — no ring write,
+---no toast. Keys are arbitrary strings; use a stable identifier per
+---call site (typically a call-site name or a bounded resource
+---identifier — never an unbounded stream value, which would leak
+---one map entry per distinct value).
+---@param level    integer
+---@param key      string
+---@param every_ms number
+---@param component any
+local function _throttled_call(level, key, every_ms, component, ...)
+  assert(type(key) == "string" and #key > 0,
+    "log.<level>_throttled: key must be a non-empty string")
+  assert(type(every_ms) == "number" and every_ms > 0,
+    "log.<level>_throttled: every_ms must be a positive number")
+  local now = vim.uv.now()
+  local last = _throttle_last[key]
+  if last and (now - last) < every_ms then
+    return
+  end
+  _throttle_last[key] = now
+  level_call(level, component, ...)
+end
+
+function M.error_throttled(key, every_ms, component, ...)
+  _throttled_call(M.levels.ERROR, key, every_ms, component, ...)
+end
+function M.warn_throttled(key, every_ms, component, ...)
+  _throttled_call(M.levels.WARN, key, every_ms, component, ...)
+end
+function M.info_throttled(key, every_ms, component, ...)
+  _throttled_call(M.levels.INFO, key, every_ms, component, ...)
+end
+function M.debug_throttled(key, every_ms, component, ...)
+  _throttled_call(M.levels.DEBUG, key, every_ms, component, ...)
+end
+function M.trace_throttled(key, every_ms, component, ...)
+  _throttled_call(M.levels.TRACE, key, every_ms, component, ...)
+end
+
 ---True if `level_name` would currently produce output. Useful for
 ---guarding expensive `vim.inspect` formatting at debug+ levels.
 ---@param level_name string
@@ -576,6 +621,7 @@ function M._reset_for_tests()
   _cfg.ring_capacity = DEFAULT_RING_CAPACITY
   _registered   = {}
   _events_ns    = nil
+  _throttle_last = {}
 end
 
 return M

@@ -2363,6 +2363,96 @@ do
   pcall(vim.fn.delete, persist_dir, "rf")
 end
 
+-- ── ADR 0021 Phase 1 Step 5: throttled emission (hot-loop guard) ────
+do
+  -- First call passes the throttle; second call within the window
+  -- is silently dropped; after the window elapses, the next call
+  -- passes again.
+  log._reset_for_tests()
+  log.configure({ notify = false })
+  log.info_throttled("test-scan", 100, "comp", "msg-1")
+  log.info_throttled("test-scan", 100, "comp", "msg-2")  -- dropped
+  log.info_throttled("test-scan", 100, "comp", "msg-3")  -- dropped
+  local r = log.recent()
+  ok("ADR 0021 §11: throttled emission drops calls within window",
+    #r == 1 and r[1].message:find("msg%-1") ~= nil,
+    string.format("got %d entries", #r))
+
+  -- Wait past the window, then the next call passes.
+  vim.wait(120)
+  log.info_throttled("test-scan", 100, "comp", "msg-4")
+  r = log.recent()
+  ok("ADR 0021 §11: throttled emission re-emits after window elapses",
+    #r == 2 and r[2].message:find("msg%-4") ~= nil)
+
+  -- Different keys throttle independently — neither leaks into the
+  -- other's bucket.
+  log._reset_for_tests()
+  log.configure({ notify = false })
+  log.info_throttled("key-A", 1000, "comp", "A1")
+  log.info_throttled("key-B", 1000, "comp", "B1")  -- different bucket
+  log.info_throttled("key-A", 1000, "comp", "A2")  -- dropped
+  log.info_throttled("key-B", 1000, "comp", "B2")  -- dropped
+  r = log.recent()
+  ok("ADR 0021 §11: throttle buckets are key-keyed (independent)",
+    #r == 2
+      and r[1].message:find("A1") ~= nil
+      and r[2].message:find("B1") ~= nil,
+    vim.inspect(r))
+
+  -- All five level variants exist and route to the matching level.
+  log._reset_for_tests()
+  log.configure({ level = log.levels.TRACE, notify = false })
+  log.error_throttled("k-e", 50, "c", "e")
+  log.warn_throttled ("k-w", 50, "c", "w")
+  log.info_throttled ("k-i", 50, "c", "i")
+  log.debug_throttled("k-d", 50, "c", "d")
+  log.trace_throttled("k-t", 50, "c", "t")
+  r = log.recent()
+  ok("ADR 0021 §11: every level has a *_throttled variant routing to the right level",
+    #r == 5
+      and r[1].level_name == "ERROR"
+      and r[2].level_name == "WARN"
+      and r[3].level_name == "INFO"
+      and r[4].level_name == "DEBUG"
+      and r[5].level_name == "TRACE",
+    vim.inspect(r))
+
+  -- Argument validation.
+  log._reset_for_tests()
+  ok("ADR 0021 §11: throttled rejects empty key",
+    not pcall(log.info_throttled, "", 100, "c", "x"))
+  ok("ADR 0021 §11: throttled rejects non-positive every_ms",
+    not pcall(log.info_throttled, "k", 0, "c", "x")
+      and not pcall(log.info_throttled, "k", -10, "c", "x"))
+
+  -- _reset_for_tests clears the throttle map so tests don't leak.
+  log._reset_for_tests()
+  log.configure({ notify = false })
+  log.info_throttled("k-reset", 1000, "c", "first")
+  log._reset_for_tests()
+  log.configure({ notify = false })
+  log.info_throttled("k-reset", 1000, "c", "after-reset")
+  r = log.recent()
+  ok("ADR 0021 §11: _reset_for_tests clears the throttle map",
+    #r == 1 and r[1].message:find("after%-reset") ~= nil,
+    vim.inspect(r))
+
+  -- Throttled call honors opts-table sentinel detection: a trailing
+  -- opts table flows through to dispatch (event/fields preserved).
+  log._reset_for_tests()
+  log.configure({ notify = false })
+  log.info_throttled("k-opts", 100, "scan", "started", {
+    event  = "auto-finder.scan.started",
+    fields = { path = "~/proj" },
+  })
+  r = log.recent()
+  ok("ADR 0021 §11: throttled calls flow opts through (event + fields preserved)",
+    #r == 1
+      and r[1].event_type == "auto-finder.scan.started"
+      and r[1].fields.path == "~/proj")
+end
+
 -- Restore stubs.
 vim.notify = orig_notify
 vim.api.nvim_echo = orig_echo
