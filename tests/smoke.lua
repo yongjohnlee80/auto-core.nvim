@@ -1883,6 +1883,119 @@ ok("inspect returns config snapshot",
     and snap.notify == false
     and type(snap.count) == "number")
 
+-- ── ADR 0021 Phase 1: options-table sentinel detection + schema ─────
+-- Wrapped in `do ... end` so the locals release before the smoke
+-- script's main-function 200-local cap.
+do
+  -- Backward compat: a trailing table with no sentinel keys remains a
+  -- message part (renders via vim.inspect into `message`).
+  log._reset_for_tests()
+  log.configure({ notify = false })
+  log.info("comp", "msg", { path = "/x", count = 3 })
+  local r = log.recent()
+  ok("ADR 0021: trailing table without sentinel keys stays a message part",
+    #r == 1
+      and r[1].message:find("path") ~= nil
+      and r[1].event_type == nil
+      and r[1].fields == nil,
+    vim.inspect(r))
+
+  -- Sentinel: `event` key promotes the table to options. The table is
+  -- popped off the parts; the ring entry carries event_type, not the
+  -- table-as-message-part.
+  log._reset_for_tests()
+  log.configure({ notify = false })
+  log.info("comp", "started", { event = "auto-finder.scan.started" })
+  r = log.recent()
+  ok("ADR 0021: `event` sentinel populates event_type on the ring entry",
+    #r == 1
+      and r[1].event_type == "auto-finder.scan.started"
+      and r[1].message:find("auto%-finder%.scan%.started") == nil
+      and r[1].message:find("started") ~= nil,
+    vim.inspect(r))
+
+  -- Sentinel: `fields` key preserves the structured table on the entry.
+  log._reset_for_tests()
+  log.configure({ notify = false })
+  log.info("comp", "completed", {
+    fields = { path = "/proj", elapsed_ms = 314 },
+  })
+  r = log.recent()
+  ok("ADR 0021: `fields` sentinel preserves the structured table unflattened",
+    #r == 1
+      and type(r[1].fields) == "table"
+      and r[1].fields.path == "/proj"
+      and r[1].fields.elapsed_ms == 314,
+    vim.inspect(r))
+
+  -- Sentinels combine: event + fields together.
+  log._reset_for_tests()
+  log.configure({ notify = false })
+  log.info("comp", "done", {
+    event  = "auto-finder.scan.completed.slow",
+    fields = { elapsed_ms = 3142 },
+  })
+  r = log.recent()
+  ok("ADR 0021: event + fields combine on one entry",
+    #r == 1
+      and r[1].event_type == "auto-finder.scan.completed.slow"
+      and r[1].fields.elapsed_ms == 3142)
+
+  -- `notify` and `level_override` sentinels: recognized + popped even
+  -- though Phase 1 does not yet act on them (routing lands in Phase 2).
+  log._reset_for_tests()
+  log.configure({ notify = false })
+  log.info("comp", "msg", { notify = true })
+  log.info("comp", "msg2", { level_override = log.levels.WARN })
+  r = log.recent()
+  ok("ADR 0021: `notify` sentinel pops the opts table (no message bleed)",
+    r[1].message:find("notify = true", 1, true) == nil)
+  ok("ADR 0021: `level_override` sentinel pops the opts table",
+    r[2].message:find("level_override", 1, true) == nil)
+
+  -- Multiple message parts followed by opts.
+  log._reset_for_tests()
+  log.configure({ notify = false })
+  log.info("comp", "part1", "part2", "part3", { event = "auto-core.x" })
+  r = log.recent()
+  ok("ADR 0021: parts before opts table all reach the message",
+    #r == 1
+      and r[1].message:find("part1") ~= nil
+      and r[1].message:find("part2") ~= nil
+      and r[1].message:find("part3") ~= nil
+      and r[1].event_type == "auto-core.x",
+    vim.inspect(r))
+
+  -- Existing entries (no opts) still have nil for the new fields.
+  log._reset_for_tests()
+  log.configure({ notify = false })
+  log.info("comp", "plain")
+  r = log.recent()
+  ok("ADR 0021: pre-existing call shape leaves event_type/fields nil",
+    r[1].event_type == nil and r[1].fields == nil)
+
+  -- First-arg-not-string shape combined with opts table.
+  log._reset_for_tests()
+  log.configure({ notify = false })
+  log.info({ event = "auto-core.nocomp" })
+  r = log.recent()
+  ok("ADR 0021: non-string first arg + opts table — component nil, opts applied",
+    #r == 1
+      and r[1].component == nil
+      and r[1].event_type == "auto-core.nocomp")
+
+  -- Namespace handle passes opts through.
+  log._reset_for_tests()
+  log.configure({ notify = false })
+  local h2 = log.namespace("watcher")
+  h2.info("watching", { event = "auto-core.watcher.armed" })
+  r = log.recent()
+  ok("ADR 0021: namespace handle propagates opts through to dispatch",
+    #r == 1
+      and r[1].component == "watcher"
+      and r[1].event_type == "auto-core.watcher.armed")
+end
+
 -- Restore stubs.
 vim.notify = orig_notify
 vim.api.nvim_echo = orig_echo

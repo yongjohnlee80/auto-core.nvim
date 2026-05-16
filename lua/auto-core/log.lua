@@ -69,11 +69,17 @@ local _cfg = {
 -- ── ring buffer ─────────────────────────────────────────────
 
 ---@class AutoCoreLogEntry
----@field ts        integer  -- vim.uv.now() ms
----@field level     integer  -- 1..5
+---@field ts         integer  -- vim.uv.now() ms
+---@field level      integer  -- 1..5
 ---@field level_name string   -- "ERROR" | "WARN" | "INFO" | "DEBUG" | "TRACE"
----@field component string?
----@field message   string
+---@field component  string?
+---@field message    string
+---@field event_type string?  -- registered event id, e.g. "auto-finder.scan.started"
+---@field fields     table?   -- structured payload preserved unflattened
+---
+---ADR 0021 §3 — `event_type` and `fields` are additive optional slots.
+---Entries emitted via the pre-existing API (no options table) leave
+---both as `nil`. Consumers reading `recent()` must nil-check both.
 
 ---@type AutoCoreLogEntry[]
 local _ring     = {}
@@ -112,7 +118,19 @@ local function format_prefix(level_name, component)
   return table.concat(pieces, " ")
 end
 
-local function dispatch(level, component, message_parts)
+---@class AutoCoreLogCallOpts
+---@field event          string?           -- registered event id (ADR 0021 §5)
+---@field fields         table?            -- structured payload preserved unflattened
+---@field notify         boolean|"auto"|nil -- ADR 0021 §4 routing; Phase 1 records but does NOT yet act on it
+---@field level_override integer?          -- escalate/downgrade at call site; Phase 1 reserved, not yet honored
+local _OPTS_SENTINELS = {
+  event          = true,
+  fields         = true,
+  notify         = true,
+  level_override = true,
+}
+
+local function dispatch(level, component, message_parts, opts)
   if level > _cfg.level then return end
 
   local level_name = LEVEL_NAMES[level] or "UNKNOWN"
@@ -126,6 +144,8 @@ local function dispatch(level, component, message_parts)
     level_name = level_name,
     component  = component,
     message    = full,
+    event_type = opts and opts.event or nil,
+    fields     = opts and opts.fields or nil,
   })
 
   if not _cfg.notify then return end
@@ -173,14 +193,51 @@ function M.configure(opts)
   if opts.notify ~= nil then _cfg.notify = opts.notify end
 end
 
-local function level_call(level, component, ...)
-  -- Match auto-agents/claudecode signature: when first arg isn't a
-  -- string, treat it as the first message part (no component).
-  if type(component) ~= "string" then
-    dispatch(level, nil, { component, ... })
-  else
-    dispatch(level, component, { ... })
+---Extract an options table from the tail of `parts` if (and only if)
+---the last element is a table with at least one ADR 0021 §4 sentinel
+---key (`event`, `fields`, `notify`, `level_override`). Mutates `parts`
+---in place by popping the recognized table; otherwise leaves `parts`
+---untouched and returns nil.
+---
+---**Why sentinel-key detection?** Existing callers pass structured
+---tables as ordinary message parts (e.g.
+---`log.info("comp", "msg", { path = "/x" })`) and expect them to
+---render via `vim.inspect`. A blanket "trailing table = opts" rule
+---would silently break every such call site. Sentinel keys are the
+---narrow opt-in.
+---@param parts any[]
+---@return AutoCoreLogCallOpts?
+local function extract_opts(parts)
+  local n = #parts
+  if n == 0 then return nil end
+  local last = parts[n]
+  if type(last) ~= "table" then return nil end
+  for k in pairs(_OPTS_SENTINELS) do
+    if last[k] ~= nil then
+      parts[n] = nil
+      return last
+    end
   end
+  return nil
+end
+
+local function level_call(level, component, ...)
+  -- Arg-shape rules:
+  --   1. If `component` is not a string, treat it as the first message
+  --      part and emit with component=nil. Preserves the
+  --      auto-agents/claudecode legacy signature.
+  --   2. After (1), check whether the LAST parts element is an
+  --      options table (sentinel-key detection — see extract_opts).
+  --      If so, pop it and pass through to dispatch as the 4th arg.
+  local parts
+  if type(component) ~= "string" then
+    parts = { component, ... }
+    component = nil
+  else
+    parts = { ... }
+  end
+  local opts = extract_opts(parts)
+  dispatch(level, component, parts, opts)
 end
 
 function M.error(component, ...) level_call(M.levels.ERROR, component, ...) end
