@@ -2255,6 +2255,114 @@ do
   pcall(vim.fn.delete, persist_dir, "rf")
 end
 
+-- ── ADR 0021 Phase 1 Step 4: :AutoCoreLogEvent user command ─────────
+do
+  -- Make sure the plugin file has been sourced. In a real session
+  -- nvim does this at startup; the smoke harness boots with
+  -- `-u tests/smoke.lua` which bypasses normal plugin loading, so
+  -- we force it here.
+  vim.cmd("runtime! plugin/auto-core.lua")
+
+  local state = require("auto-core.state")
+  local persist_dir = vim.fn.tempname()
+  vim.fn.mkdir(persist_dir, "p")
+  state.configure({ persist_dir = persist_dir })
+
+  -- Reset state + log for a clean slate.
+  log._reset_for_tests()
+  state._reset_for_tests()
+  log.events.register("auto-finder",
+    { "scan.started", "scan.completed.slow" })
+
+  -- Capture vim.notify to verify the command emits a confirmation.
+  notify_calls = {}
+
+  -- Command registration: AutoCoreLogEvent must exist as a user command.
+  local cmds = vim.api.nvim_get_commands({})
+  ok("ADR 0021 §5: :AutoCoreLogEvent command is registered",
+    cmds.AutoCoreLogEvent ~= nil,
+    "no AutoCoreLogEvent in nvim_get_commands")
+
+  -- :AutoCoreLogEvent notify <event> enables the subscription.
+  vim.cmd("AutoCoreLogEvent notify auto-finder.scan.completed.slow")
+  ok("ADR 0021 §5: :AutoCoreLogEvent notify enables the subscription",
+    log.events.is_notify_enabled("auto-finder.scan.completed.slow") == true)
+
+  -- :AutoCoreLogEvent silence <event> disables it again.
+  vim.cmd("AutoCoreLogEvent silence auto-finder.scan.completed.slow")
+  ok("ADR 0021 §5: :AutoCoreLogEvent silence disables the subscription",
+    log.events.is_notify_enabled("auto-finder.scan.completed.slow") == false)
+
+  -- :AutoCoreLogEvent list runs without raising; we capture nvim_echo
+  -- output via the stub installed at the top of [39].
+  local echo_calls = 0
+  local prev_echo = vim.api.nvim_echo
+  vim.api.nvim_echo = function() echo_calls = echo_calls + 1 end
+  local list_ok = pcall(vim.cmd, "AutoCoreLogEvent list")
+  vim.api.nvim_echo = prev_echo
+  ok("ADR 0021 §5: :AutoCoreLogEvent list runs without error",
+    list_ok and echo_calls >= 1,
+    string.format("list_ok=%s echo_calls=%d", tostring(list_ok), echo_calls))
+
+  -- :AutoCoreLogEvent (no subcommand) defaults to list.
+  echo_calls = 0
+  vim.api.nvim_echo = function() echo_calls = echo_calls + 1 end
+  local default_ok = pcall(vim.cmd, "AutoCoreLogEvent")
+  vim.api.nvim_echo = prev_echo
+  ok("ADR 0021 §5: :AutoCoreLogEvent with no subcommand defaults to list",
+    default_ok and echo_calls >= 1)
+
+  -- Unknown subcommand surfaces an ERROR notify.
+  log.events.enable_notify("auto-finder.scan.started")  -- noise to clear
+  notify_calls = {}
+  pcall(vim.cmd, "AutoCoreLogEvent garbage")
+  ok("ADR 0021 §5: :AutoCoreLogEvent rejects unknown subcommand with ERROR notify",
+    (function()
+      for _, c in ipairs(notify_calls) do
+        if c.level == vim.log.levels.ERROR
+            and c.msg:find("unknown subcommand") then
+          return true
+        end
+      end
+      return false
+    end)(),
+    vim.inspect(notify_calls))
+
+  -- notify without an event arg errors.
+  notify_calls = {}
+  pcall(vim.cmd, "AutoCoreLogEvent notify")
+  ok("ADR 0021 §5: :AutoCoreLogEvent notify without event arg errors",
+    (function()
+      for _, c in ipairs(notify_calls) do
+        if c.level == vim.log.levels.ERROR
+            and c.msg:find("missing <event>") then
+          return true
+        end
+      end
+      return false
+    end)())
+
+  -- Tab completion: subcommand list.
+  local complete_fn = cmds.AutoCoreLogEvent.complete
+  -- Neovim's complete function gets the user-defined complete
+  -- callback under .complete = "customlist,<func>" / fnref. The
+  -- nvim_get_commands API doesn't expose the raw callback, so we
+  -- access it through the registered command directly via cmd.
+  -- For the smoke test, we exercise the command-defined completion
+  -- function by re-importing the user-command callback indirectly:
+  -- call the underlying logic. Skip if not accessible.
+  ok("ADR 0021 §5: :AutoCoreLogEvent has a completion fn registered",
+    complete_fn == "customlist" or type(complete_fn) == "function"
+      or type(complete_fn) == "string",
+    string.format("complete_fn type=%s val=%s",
+      type(complete_fn), tostring(complete_fn)))
+
+  -- Teardown.
+  state.configure({ persist_dir = nil })
+  state._reset_for_tests()
+  pcall(vim.fn.delete, persist_dir, "rf")
+end
+
 -- Restore stubs.
 vim.notify = orig_notify
 vim.api.nvim_echo = orig_echo

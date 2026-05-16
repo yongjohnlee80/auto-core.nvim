@@ -300,6 +300,130 @@ end, {
   desc = "auto-core diagnostic probes (winlog, mailbox)",
 })
 
+-- :AutoCoreLogEvent — manage per-event notification subscriptions
+-- registered via `auto-core.log.events`. ADR 0021 §5.
+--
+--   :AutoCoreLogEvent list [plugin]   — list registered events with
+--                                       subscription state, optionally
+--                                       filtered to a single plugin
+--   :AutoCoreLogEvent notify <event>  — subscribe (toast on next emit)
+--   :AutoCoreLogEvent silence <event> — unsubscribe (ring entry only)
+--
+-- Subscriptions persist across nvim restarts via
+-- `auto-core.state.namespace("auto-core.log.events")`.
+vim.api.nvim_create_user_command("AutoCoreLogEvent", function(opts)
+  local log = require("auto-core").log
+  local args = opts.fargs
+  local sub = args[1]
+
+  if not sub or sub == "" or sub == "list" then
+    local plugin_filter = args[2]
+    local rows = log.events.list(plugin_filter)
+    if #rows == 0 then
+      if plugin_filter then
+        vim.notify(("auto-core log events: no events registered for plugin '%s'")
+          :format(plugin_filter), vim.log.levels.INFO)
+      else
+        vim.notify(
+          "auto-core log events: no events registered yet "
+            .. "(plugins call `log.events.register` in their setup)",
+          vim.log.levels.INFO)
+      end
+      return
+    end
+    local subbed = 0
+    for _, r in ipairs(rows) do
+      if log.events.is_notify_enabled(r.event) then subbed = subbed + 1 end
+    end
+    local header = ("auto-core log events — %d registered, %d subscribed%s")
+      :format(#rows, subbed, plugin_filter and (" (plugin: " .. plugin_filter .. ")") or "")
+    local lines = { header, string.rep("─", #header) }
+    for _, r in ipairs(rows) do
+      local state = log.events.is_notify_enabled(r.event)
+        and "[notify]" or "[silent]"
+      lines[#lines + 1] = ("  %s %s"):format(state, r.event)
+    end
+    vim.api.nvim_echo(
+      vim.tbl_map(function(l) return { l, "Normal" } end, lines),
+      true, {})
+    return
+  end
+
+  if sub == "notify" then
+    local event = args[2]
+    if not event or event == "" then
+      vim.notify("AutoCoreLogEvent notify: missing <event> argument",
+        vim.log.levels.ERROR)
+      return
+    end
+    log.events.enable_notify(event)
+    vim.notify(("auto-core: notify enabled for `%s`"):format(event),
+      vim.log.levels.INFO, { title = "auto-core" })
+    return
+  end
+
+  if sub == "silence" then
+    local event = args[2]
+    if not event or event == "" then
+      vim.notify("AutoCoreLogEvent silence: missing <event> argument",
+        vim.log.levels.ERROR)
+      return
+    end
+    log.events.disable_notify(event)
+    vim.notify(("auto-core: notify silenced for `%s`"):format(event),
+      vim.log.levels.INFO, { title = "auto-core" })
+    return
+  end
+
+  vim.notify(("AutoCoreLogEvent: unknown subcommand '%s' — expected list|notify|silence")
+    :format(sub), vim.log.levels.ERROR)
+end, {
+  nargs = "*",
+  complete = function(_, line)
+    local log = require("auto-core").log
+    local parts = vim.split(line, "%s+")
+    -- parts[1] is "AutoCoreLogEvent"; parts[2] is the subcommand;
+    -- parts[3+] is its argument(s).
+    if #parts <= 2 then
+      return { "list", "notify", "silence" }
+    end
+    local sub = parts[2]
+    if sub == "list" then
+      -- Suggest plugin names from the current registry.
+      local seen = {}
+      for _, r in ipairs(log.events.list()) do
+        seen[r.plugin] = true
+      end
+      local plugins = {}
+      for p in pairs(seen) do plugins[#plugins + 1] = p end
+      table.sort(plugins)
+      return plugins
+    end
+    if sub == "notify" then
+      -- Offer registered events the user hasn't subscribed to yet.
+      local out = {}
+      for _, r in ipairs(log.events.list()) do
+        if not log.events.is_notify_enabled(r.event) then
+          out[#out + 1] = r.event
+        end
+      end
+      return out
+    end
+    if sub == "silence" then
+      -- Offer currently-subscribed events.
+      local out = {}
+      for _, r in ipairs(log.events.list()) do
+        if log.events.is_notify_enabled(r.event) then
+          out[#out + 1] = r.event
+        end
+      end
+      return out
+    end
+    return {}
+  end,
+  desc = "Manage auto-core log event-type subscriptions (ADR 0021 §5)",
+})
+
 -- The auto-core module itself is required lazily on first use by a
 -- consumer plugin. We do NOT call setup() here — consumers install
 -- via lazy.nvim's `dependencies = { "yongjohnlee80/auto-core.nvim" }`
