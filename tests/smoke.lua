@@ -1796,7 +1796,10 @@ ok("ring entries carry component + level_name",
     and recent[1].level_name == "ERROR"
     and recent[2].level_name == "WARN"
     and recent[3].level_name == "INFO")
-ok("ERROR + WARN went to vim.notify; INFO went to nvim_echo",
+-- v0.1.12 behavior: ERROR + WARN toast by default; INFO is RING-ONLY
+-- (no nvim_echo → no `:messages` spam). Users who want the old behavior
+-- opt in via `log.configure({ echo = true })` or per-call `opts.echo`.
+ok("ERROR + WARN went to vim.notify; INFO is ring-only (no :messages echo)",
   #notify_calls == 2
     and notify_calls[1].level == vim.log.levels.ERROR
     and notify_calls[2].level == vim.log.levels.WARN)
@@ -1804,6 +1807,41 @@ ok("notify message includes [AutoCore] prefix",
   notify_calls[1].msg:find("%[AutoCore%]") ~= nil)
 ok("notify message includes component bracket",
   notify_calls[1].msg:find("%[comp%]") ~= nil)
+
+-- v0.1.12: `opts.echo = true` re-enables the nvim_echo path per-call
+-- (the migration knob for callers who actually wanted the :messages
+-- visibility). The ring entry is also written.
+do
+  log._reset_for_tests()
+  local echo_count = 0
+  local prev_echo = vim.api.nvim_echo
+  vim.api.nvim_echo = function() echo_count = echo_count + 1 end
+  log.info("comp", "echoed-info", { echo = true })
+  log.info("comp", "silent-info")
+  vim.wait(20)
+  vim.api.nvim_echo = prev_echo
+  ok("v0.1.12: opts.echo=true forwards INFO to nvim_echo",
+    echo_count == 1, "echo_count=" .. echo_count)
+  ok("v0.1.12: omitted opts.echo stays ring-only (silent)",
+    #log.recent() == 2 and echo_count == 1)
+end
+
+-- v0.1.12: global `configure({ echo = true })` flips the default
+-- for every emission. Mirrors the old (pre-v0.1.12) behavior for
+-- users / projects that want the :messages visibility back.
+do
+  log._reset_for_tests()
+  log.configure({ echo = true })
+  local echo_count = 0
+  local prev_echo = vim.api.nvim_echo
+  vim.api.nvim_echo = function() echo_count = echo_count + 1 end
+  log.info("comp", "echoed-via-config-1")
+  log.info("comp", "echoed-via-config-2")
+  vim.wait(20)
+  vim.api.nvim_echo = prev_echo
+  ok("v0.1.12: configure({ echo = true }) re-enables nvim_echo by default",
+    echo_count == 2, "echo_count=" .. echo_count)
+end
 
 -- is_level_enabled
 ok("is_level_enabled('error') true at default INFO", log.is_level_enabled("error"))

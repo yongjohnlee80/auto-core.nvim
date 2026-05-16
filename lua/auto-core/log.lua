@@ -58,12 +58,16 @@ local DEFAULT_RING_CAPACITY = 500
 ---@field level         (string|integer)?  -- "info" | M.levels.INFO; default "info"
 ---@field ring_capacity integer?            -- ring buffer size; default 500
 ---@field notify        boolean?            -- mirror to vim.notify; default true
+---@field echo          boolean?            -- v0.1.12+: also `nvim_echo` non-toast emissions
+---                                            into `:messages`. Default false (ring-only by
+---                                            default). Per-call override via `opts.echo`.
 
----@type { level: integer, ring_capacity: integer, notify: boolean }
+---@type { level: integer, ring_capacity: integer, notify: boolean, echo: boolean }
 local _cfg = {
   level         = M.levels.INFO,
   ring_capacity = DEFAULT_RING_CAPACITY,
   notify        = true,
+  echo          = false,
 }
 
 -- ── ring buffer ─────────────────────────────────────────────
@@ -128,6 +132,7 @@ local _OPTS_SENTINELS = {
   fields         = true,
   notify         = true,
   level_override = true,
+  echo           = true,
 }
 
 ---Map a logger level to `vim.log.levels.*` for `vim.notify`.
@@ -191,6 +196,28 @@ local function dispatch(level, component, message_parts, opts)
 
   -- vim.schedule the user-visible side-effect: dispatch may be
   -- called from libuv callbacks where `vim.notify` is unsafe.
+  --
+  -- v0.1.12 behavior change: when the routing decision is "no toast"
+  -- we now stay completely silent — no `nvim_echo` echo to
+  -- `:messages`. The ring entry above is the audit trail; `:messages`
+  -- spam was the user-visible cost we paid by default and was the
+  -- single biggest UX complaint after the Phase 1 ship (busy paths
+  -- like `auto-finder.scan` emit one INFO line per scan; over a
+  -- session that fills `:messages` with routine noise the user has no
+  -- way to opt out of). The replacement audit path is the
+  -- in-flight `:AutoCoreLog` viewer (ADR 0021 Phase 4) + the existing
+  -- `log.recent()` programmatic surface.
+  --
+  -- Migrations:
+  --   - Users who want the OLD nvim_echo behavior on a per-call
+  --     basis: pass `opts.echo = true` (recognized as a sentinel
+  --     below).
+  --   - Users who want it globally: `log.configure({ echo = true })`.
+  if not toast then
+    local explicit_echo = (opts and opts.echo == true) or _cfg.echo
+    if not explicit_echo then return end
+  end
+
   vim.schedule(function()
     if toast then
       pcall(vim.notify, full, to_vim_log_level(level), { title = title })
@@ -228,6 +255,7 @@ function M.configure(opts)
     end
   end
   if opts.notify ~= nil then _cfg.notify = opts.notify end
+  if opts.echo   ~= nil then _cfg.echo   = opts.echo   end
 end
 
 ---Extract an options table from the tail of `parts` if (and only if)
@@ -596,12 +624,13 @@ M.events = {
 
 ---Active config snapshot. Test + introspection use only — don't
 ---mutate the returned table.
----@return { level: integer, ring_capacity: integer, notify: boolean, count: integer }
+---@return { level: integer, ring_capacity: integer, notify: boolean, echo: boolean, count: integer }
 function M.inspect()
   return {
     level         = _cfg.level,
     ring_capacity = _cfg.ring_capacity,
     notify        = _cfg.notify,
+    echo          = _cfg.echo,
     count         = _count,
   }
 end
@@ -618,6 +647,7 @@ function M._reset_for_tests()
   _count        = 0
   _cfg.level    = M.levels.INFO
   _cfg.notify   = true
+  _cfg.echo     = false
   _cfg.ring_capacity = DEFAULT_RING_CAPACITY
   _registered   = {}
   _events_ns    = nil
