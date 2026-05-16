@@ -55,6 +55,14 @@ end
 ---Probe a single dir for git metadata (rev-parse common-dir +
 ---is-bare + is-inside-work-tree). Returns nil outside a repo or if
 ---git is unavailable.
+---
+---`is_bare` reflects the **underlying repo's** bareness (read from
+---`<common_dir>/config:core.bare`), not the probed dir's. Probing
+---from inside a linked worktree of a bare repo, `git -C <wt>
+---rev-parse --is-bare-repository` returns "false" because the
+---working tree itself is not bare — but consumers asking "is this a
+---worktree-style project?" need a yes for that case. Reading the
+---common-dir's config decouples the answer from cursor location.
 ---@param dir string  absolute path
 ---@return { common_dir: string, is_bare: boolean, is_working_tree: boolean }?
 local function _probe(dir)
@@ -62,15 +70,18 @@ local function _probe(dir)
     "git", "-C", dir, "rev-parse",
     "--path-format=absolute",
     "--git-common-dir",
-    "--is-bare-repository",
     "--is-inside-work-tree",
   })
-  if vim.v.shell_error ~= 0 or #out < 3 then return nil end
+  if vim.v.shell_error ~= 0 or #out < 2 then return nil end
   local common = (out[1] or ""):gsub("/+$", "")
+  local bare_out = vim.fn.systemlist({
+    "git", "--git-dir=" .. common, "config",
+    "--bool", "--default", "false", "core.bare",
+  })
   return {
     common_dir      = common,
-    is_bare         = out[2] == "true",
-    is_working_tree = out[3] == "true",
+    is_bare         = (bare_out[1] or "") == "true",
+    is_working_tree = out[2] == "true",
   }
 end
 

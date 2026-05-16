@@ -10,6 +10,47 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.10] — 2026-05-16 — git.graph.fan_out: is_bare now reflects the repo, not the probed dir
+
+Bug fix. `git.graph.fan_out` was probing each candidate dir with
+`git -C <dir> rev-parse --is-bare-repository`, which reports the
+**probed dir's** bareness rather than the underlying repo's. From
+inside a linked worktree of a bare repo, that returns `"false"`
+even though `<common_dir>/config` has `core.bare = true`. Repos
+discovered while standing inside one of their worktrees were
+therefore mis-flagged non-bare.
+
+Downstream symptom (the reproducer): in worktree.nvim's graph
+dashboard (`<leader>gt`), pressing **`C`** (Checkout) on a remote
+branch row of a bare repo fell into the non-bare branch
+(`graph.lua:766`) and ran `git checkout <branch>` against the
+current working tree instead of `git worktree add --track -b
+<local> <path> <remote-ref>`. The user lost their checked-out
+state where they expected a new tracking worktree.
+
+### Changed
+
+- **`lua/auto-core/git/graph.lua` — `_probe(dir)`**: drop
+  `--is-bare-repository` from the rev-parse batch. After
+  resolving `common_dir`, read bareness from the common-dir's
+  own config:
+  ```
+  git --git-dir=<common> config --bool --default false core.bare
+  ```
+  Adds one git invocation per probed dir (fan_out probes at most
+  a handful, bounded by `max_depth=3`).
+- **`version.lua`** bumped to `0.1.10`.
+
+### Notes
+
+- `AutoCoreGraphRepo.is_bare` is unchanged in shape; only its
+  derivation changed. Consumers that branch on it (worktree.nvim
+  `checkout_at_cursor` / `new_at_cursor`) need no source updates —
+  worktree.nvim picks the fix up via its caret pin (`^0.1.0`).
+- The smoke test for non-bare repos (`[44] fan_out repo-a not
+  bare`) continues to pass: a freshly `git init`-ed repo has no
+  `core.bare` in config and the new probe defaults to `false`.
+
 ## [v0.1.9] — 2026-05-14 — bootstrap template instructs agents on `wake` + `addressbook`
 
 The agent-facing protocol doc (`mailbox/templates/bootstrap.md`)

@@ -50,6 +50,16 @@ return {
   -- No Lua-API change — `mailbox.commands.register` consumers
   -- (auto-agents v0.2.8+) already register `wake` + `addressbook`
   -- with the registry.
-  version     = "0.1.9",
+  -- v0.1.10: git.graph.fan_out — `is_bare` now reflects the
+  -- underlying repo's bareness (read from `<common_dir>/config:
+  -- core.bare`) rather than the probed dir's. Probing from inside
+  -- a linked worktree of a bare repo previously returned
+  -- is_bare=false because `rev-parse --is-bare-repository` reports
+  -- the working-tree's bareness, not the repo's — causing
+  -- worktree.nvim's `C` (checkout) keybind to fall into the plain
+  -- `git checkout` branch instead of `git worktree add --track`.
+  -- No API shape change; AutoCoreGraphRepo.is_bare semantics
+  -- clarified, not renamed.
+  version     = "0.1.10",
   api_version = "0.1",
 }
