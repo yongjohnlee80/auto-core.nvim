@@ -2119,6 +2119,142 @@ do
     #notify_calls == 0)
 end
 
+-- ── ADR 0021 Phase 1 Step 3: event-type registry + persistence ──────
+do
+  local state = require("auto-core.state")
+  -- Use a temp persist dir so the subscription set written during
+  -- this test doesn't pollute the user's real auto-core state.
+  local persist_dir = vim.fn.tempname()
+  vim.fn.mkdir(persist_dir, "p")
+  state.configure({ persist_dir = persist_dir })
+
+  -- register: bare event name gets fully-qualified with plugin prefix.
+  log._reset_for_tests()
+  state._reset_for_tests()
+  log.events.register("auto-finder", { "scan.started", "scan.completed.slow" })
+  local listed = log.events.list("auto-finder")
+  ok("ADR 0021 §5: register auto-prefixes bare event names",
+    #listed == 2
+      and listed[1].event == "auto-finder.scan.completed.slow"
+      and listed[2].event == "auto-finder.scan.started",
+    vim.inspect(listed))
+  ok("ADR 0021 §5: list returns owning plugin per record",
+    listed[1].plugin == "auto-finder" and listed[2].plugin == "auto-finder")
+
+  -- Pre-qualified event names pass through unchanged (no double prefix).
+  log._reset_for_tests()
+  state._reset_for_tests()
+  log.events.register("auto-agents", { "auto-agents.spawn.failed" })
+  local pq = log.events.list("auto-agents")
+  ok("ADR 0021 §5: register skips re-prefixing already-qualified names",
+    #pq == 1 and pq[1].event == "auto-agents.spawn.failed",
+    vim.inspect(pq))
+
+  -- register accepts a single string for ergonomic single-event registration.
+  log._reset_for_tests()
+  state._reset_for_tests()
+  log.events.register("md-harpoon", "doc.pinned")
+  local single = log.events.list("md-harpoon")
+  ok("ADR 0021 §5: register accepts a bare string for a single event",
+    #single == 1 and single[1].event == "md-harpoon.doc.pinned")
+
+  -- register is idempotent: repeat call doesn't duplicate.
+  log._reset_for_tests()
+  state._reset_for_tests()
+  log.events.register("auto-finder", "scan.started")
+  log.events.register("auto-finder", "scan.started")
+  log.events.register("auto-finder", "scan.started")
+  ok("ADR 0021 §5: register is idempotent (no duplicates)",
+    #log.events.list("auto-finder") == 1)
+
+  -- list() with no arg returns ALL registered events.
+  log._reset_for_tests()
+  state._reset_for_tests()
+  log.events.register("auto-finder", { "scan.started" })
+  log.events.register("auto-agents", { "spawn.failed" })
+  log.events.register("auto-core",   { "mailbox.delivered" })
+  local all = log.events.list()
+  ok("ADR 0021 §5: list() with no plugin filter returns events across plugins",
+    #all == 3
+      and all[1].event == "auto-agents.spawn.failed"
+      and all[2].event == "auto-core.mailbox.delivered"
+      and all[3].event == "auto-finder.scan.started",
+    vim.inspect(all))
+
+  -- enable_notify + is_notify_enabled round trip.
+  log._reset_for_tests()
+  state._reset_for_tests()
+  log.events.enable_notify("auto-finder.scan.completed.slow")
+  ok("ADR 0021 §5: is_notify_enabled returns true after enable_notify",
+    log.events.is_notify_enabled("auto-finder.scan.completed.slow") == true)
+  ok("ADR 0021 §5: is_notify_enabled returns false for un-subscribed events",
+    log.events.is_notify_enabled("auto-finder.scan.started") == false)
+
+  -- disable_notify clears the subscription.
+  log.events.disable_notify("auto-finder.scan.completed.slow")
+  ok("ADR 0021 §5: disable_notify clears the subscription",
+    log.events.is_notify_enabled("auto-finder.scan.completed.slow") == false)
+
+  -- Tolerant of registration order: subscribe-before-register works.
+  log._reset_for_tests()
+  state._reset_for_tests()
+  log.events.enable_notify("not-yet.registered")
+  ok("ADR 0021 §5: enable_notify works on unregistered events (tolerant ordering)",
+    log.events.is_notify_enabled("not-yet.registered") == true)
+
+  -- Persistence round-trip: write subscription, flush, reset cache,
+  -- reload — subscription survives.
+  log._reset_for_tests()
+  state._reset_for_tests()
+  log.events.enable_notify("persisted.event.x")
+  -- Force a synchronous flush so the file lands before we tear down.
+  local ns_pre = state.namespace("auto-core.log.events")
+  ns_pre:persist_now()
+  -- Drop the cache so the next call re-loads from disk.
+  log._reset_for_tests()
+  state._reset_for_tests()
+  ok("ADR 0021 §5: subscriptions persist across state reset (json round-trip)",
+    log.events.is_notify_enabled("persisted.event.x") == true)
+  -- Cleanup: clear the persisted entry so we leave the temp dir clean.
+  log.events.disable_notify("persisted.event.x")
+  state.namespace("auto-core.log.events"):persist_now()
+
+  -- notifyIf with real registry: subscribed → toast; unsubscribed → silent.
+  log._reset_for_tests()
+  state._reset_for_tests()
+  log.events.register("auto-finder", { "scan.started", "scan.completed.slow" })
+  log.events.enable_notify("auto-finder.scan.completed.slow")
+  notify_calls = {}
+  log.notifyIf("auto-finder.scan.completed.slow", "mapped (slow)")
+  log.notifyIf("auto-finder.scan.started",         "mapping")
+  vim.wait(20)
+  ok("ADR 0021 §5: notifyIf consults the real registry (subscribed → toast)",
+    #notify_calls == 1
+      and notify_calls[1].msg:find("mapped %(slow%)") ~= nil)
+  ok("ADR 0021 §5: notifyIf consults the real registry (unsubscribed → silent)",
+    (function()
+      for _, c in ipairs(notify_calls) do
+        if c.msg:find("mapping") then return false end
+      end
+      return true
+    end)())
+
+  -- Argument validation.
+  log._reset_for_tests()
+  state._reset_for_tests()
+  ok("ADR 0021 §5: register rejects empty plugin name",
+    not pcall(log.events.register, "", { "x" }))
+  ok("ADR 0021 §5: register rejects non-string event names",
+    not pcall(log.events.register, "p", { 42 }))
+  ok("ADR 0021 §5: enable_notify rejects empty event",
+    not pcall(log.events.enable_notify, ""))
+
+  -- Teardown: restore default persist dir.
+  state.configure({ persist_dir = nil })
+  state._reset_for_tests()
+  pcall(vim.fn.delete, persist_dir, "rf")
+end
+
 -- Restore stubs.
 vim.notify = orig_notify
 vim.api.nvim_echo = orig_echo

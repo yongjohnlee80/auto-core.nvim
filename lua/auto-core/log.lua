@@ -422,28 +422,129 @@ function M.notifyIf(event, msg, opts)
   })
 end
 
--- ── events sub-namespace (Phase 1 Step 3 registry lives here) ─
+-- ── events sub-namespace (ADR 0021 §5 — registry + persistence) ─
+
+---@class AutoCoreLogEventRecord
+---@field event  string  -- fully-qualified, dotted, plugin-namespace-prefixed
+---@field plugin string  -- owning plugin (the `<plugin>` arg from register)
 
 ---@class AutoCoreLogEventsAPI
 ---@field is_notify_enabled fun(event: string): boolean
----@field register          (fun(plugin: string, events: string[]))?
----@field list              (fun(plugin: string?): table)?
----@field enable_notify     (fun(event: string))?
----@field disable_notify    (fun(event: string))?
+---@field register          fun(plugin: string, events: string|string[])
+---@field list              fun(plugin: string?): AutoCoreLogEventRecord[]
+---@field enable_notify     fun(event: string)
+---@field disable_notify    fun(event: string)
 
----Event-type registry surface. Step 2 ships only the
----`is_notify_enabled` stub (always returns false) so the `notify =
----"auto"` routing in `dispatch` has a deterministic answer. Step 3
----replaces the stub with a real registry backed by
----`auto-core.state.namespace("auto-core.log.events")`. The shape of
----the API is published now so wrapper modules (`auto-finder.log` /
----`auto-agents.log`) can wire `M.notifyIf` calls without waiting on
----Step 3.
+-- Module-local registry of declared event types. Re-populated on
+-- every nvim startup as plugins call `register()` in setup; NOT
+-- persisted (the source of truth is the plugin's `register_events`
+-- call in its own setup function — auto-core is just the index).
+---@type table<string, { plugin: string }>
+local _registered = {}
+
+-- Lazy handle to the persisted state namespace. Loaded on first
+-- subscription-API call so log.lua doesn't have to require
+-- auto-core.state at top of file (avoids an init-order hazard
+-- if log is touched before state is configured).
+local _events_ns = nil
+
+local function _events_namespace()
+  if _events_ns ~= nil then return _events_ns end
+  local ok, state = pcall(require, "auto-core.state")
+  if not ok or type(state) ~= "table" then return nil end
+  _events_ns = state.namespace("auto-core.log.events", { persist = "json" })
+  return _events_ns
+end
+
+local function _subs_snapshot()
+  local ns = _events_namespace()
+  if not ns then return {} end
+  return ns:get("notify_subscriptions") or {}
+end
+
+-- ADR 0021 §5: enforce plugin-namespace prefixing on registered
+-- event names. Wrappers call `register("auto-finder", "scan.started")`
+-- and auto-core fully-qualifies to `"auto-finder.scan.started"`.
+-- Pre-fully-qualified inputs (already prefixed) are passed through
+-- unchanged.
+local function _fully_qualify(plugin, event)
+  if event == plugin then return event end
+  if plugin == "" then return event end
+  if event:sub(1, #plugin + 1) == (plugin .. ".") then
+    return event
+  end
+  return plugin .. "." .. event
+end
+
+local function _register(plugin, events)
+  assert(type(plugin) == "string" and #plugin > 0,
+    "log.events.register: plugin must be a non-empty string")
+  if type(events) == "string" then events = { events } end
+  assert(type(events) == "table",
+    "log.events.register: events must be a string or array of strings")
+  for _, ev in ipairs(events) do
+    assert(type(ev) == "string" and #ev > 0,
+      "log.events.register: every event name must be a non-empty string")
+    local fq = _fully_qualify(plugin, ev)
+    _registered[fq] = { plugin = plugin }
+  end
+end
+
+local function _list(plugin)
+  local out = {}
+  for ev, meta in pairs(_registered) do
+    if plugin == nil or meta.plugin == plugin then
+      out[#out + 1] = { event = ev, plugin = meta.plugin }
+    end
+  end
+  table.sort(out, function(a, b) return a.event < b.event end)
+  return out
+end
+
+local function _enable_notify(event)
+  assert(type(event) == "string" and #event > 0,
+    "log.events.enable_notify: event must be a non-empty string")
+  local s = vim.deepcopy(_subs_snapshot())
+  s[event] = true
+  local ns = _events_namespace()
+  if ns then ns:set("notify_subscriptions", s) end
+end
+
+local function _disable_notify(event)
+  assert(type(event) == "string" and #event > 0,
+    "log.events.disable_notify: event must be a non-empty string")
+  local s = vim.deepcopy(_subs_snapshot())
+  s[event] = nil
+  local ns = _events_namespace()
+  if ns then ns:set("notify_subscriptions", s) end
+end
+
+local function _is_notify_enabled(event)
+  if type(event) ~= "string" then return false end
+  return _subs_snapshot()[event] == true
+end
+
+---Event-type registry. Plugins call `register(plugin, events)` at
+---`setup()` time; users toggle per-event notification with
+---`enable_notify` / `disable_notify`. Subscriptions persist across
+---nvim restarts via `auto-core.state.namespace("auto-core.log.events")`
+---(json-backed). The registry itself is in-memory only — plugins
+---re-declare their events every startup.
+---
+---Behavioral notes:
+---- `register` is idempotent. Re-registering the same event no-ops.
+---- `enable_notify` for an unregistered event is honored (tolerant
+---  of registration order). When the event is later registered AND
+---  emitted via `notifyIf`, the subscription kicks in.
+---- `is_notify_enabled` returns `false` if `auto-core.state` is
+---  unavailable (e.g. during early test bootstrap) — fail closed.
 ---@type AutoCoreLogEventsAPI
 M.events = {
-  is_notify_enabled = function(_event)
-    return false
-  end,
+  register          = _register,
+  list              = _list,
+  enable_notify     = _enable_notify,
+  disable_notify    = _disable_notify,
+  is_notify_enabled = _is_notify_enabled,
 }
 
 -- ── inspection helpers (used by :checkhealth) ────────────────
@@ -460,7 +561,12 @@ function M.inspect()
   }
 end
 
----Test-only — clears the ring AND restores defaults.
+---Test-only — clears the ring, restores defaults, and drops the
+---in-memory event registry + cached state-namespace handle. Callers
+---wanting a clean slate for the persisted subscription set should
+---ALSO reset `auto-core.state` (this function deliberately does
+---NOT call into the state subsystem to keep the module surface
+---narrow).
 function M._reset_for_tests()
   _ring         = {}
   _next_idx     = 1
@@ -468,6 +574,8 @@ function M._reset_for_tests()
   _cfg.level    = M.levels.INFO
   _cfg.notify   = true
   _cfg.ring_capacity = DEFAULT_RING_CAPACITY
+  _registered   = {}
+  _events_ns    = nil
 end
 
 return M
