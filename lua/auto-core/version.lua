@@ -93,6 +93,42 @@ return {
   -- `diff_queue` handler — see auto-agents v0.2.12 Patch 4 + ADR
   -- 0011 §D3 for the consumer side. Additive; no removals; existing
   -- consumers reading `ctx.mailbox` continue to work unchanged.
-  version     = "0.1.12",
+  -- v0.1.13: ADR 0023 Phase 1 + log :messages silence. Three
+  -- additive changes:
+  --   1. `log.lua`: INFO+ is RING-ONLY by default — toasts no
+  --      longer leak to `:messages` unless caller passes
+  --      `opts.echo = true` (per-call) or `configure({ echo =
+  --      true })` (global). ERROR + WARN still toast as before.
+  --      Pre-v0.1.13 behavior was firehose `:messages` echo on
+  --      every emission; new default mirrors the
+  --      auto-family-logging convention's "no noisy :messages"
+  --      stance.
+  --   2. `mailbox/router.lua`: classify() now emits the new event
+  --      topic `mailbox.stale_orphan_detected` whenever a poll
+  --      finds an outbox path whose mailbox component matches a
+  --      KNOWN bare id but at a NON-CURRENT instance suffix.
+  --      Payload carries `{ mailbox_bare, observed_instance,
+  --      current_instance, path }`. Subscribed via
+  --      `auto-core.log.events` for the resumed-agent diagnostic
+  --      (per ADR 0023 §3.1). Existing classification outcomes
+  --      unchanged; this is a pure observability addition.
+  --   3. `mailbox/router.lua` + `templates/bootstrap.md`: wake
+  --      payloads now carry `identity_hint` (the live full
+  --      mailbox id) so resumed agents can detect drift between
+  --      their fork-frozen `$AUTO_AGENTS_MAILBOX_DIR` env and the
+  --      actual mailbox the host expects them to read. Bootstrap
+  --      doc gains §"Resumed-agent identity reconciliation"
+  --      documenting the drift, the new event, the `identity_hint`
+  --      field, and the auto-agents `refresh_agent_id` verb (the
+  --      latter shipped in auto-agents v0.2.13). Bootstrap
+  --      schema_version bumped 4 → 5; resumed agents will see
+  --      revision mismatch on next wake and re-ingest. See ADR
+  --      0023 §3.1 / §3.2 / §4 for the full design.
+  -- All three are additive. No removals; no break-shape; existing
+  -- consumers ride through unchanged. Per
+  -- `auto-core-maintenance`'s additive-only minor-bump rule this
+  -- is a patch within the v0.1.x line. `api_version` stays at
+  -- `0.1`.
+  version     = "0.1.13",
   api_version = "0.1",
 }

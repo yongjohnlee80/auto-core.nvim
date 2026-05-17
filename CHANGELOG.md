@@ -10,6 +10,101 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.13] — 2026-05-16 — ADR 0023 Phase 1 (resumed-agent reconciliation) + log :messages silence
+
+Three additive surface changes:
+
+1. **`log.lua` — INFO+ is RING-ONLY by default.** Toasts no
+   longer leak to `:messages` unless the caller opts in via
+   `opts.echo = true` per-call or `configure({ echo = true })`
+   globally. ERROR + WARN still toast as before. Pre-v0.1.13
+   behavior was firehose `:messages` echo on every emission;
+   the new default mirrors the auto-family-logging convention's
+   "no noisy `:messages`" stance.
+
+2. **`mailbox/router.lua` — `mailbox.stale_orphan_detected`
+   event topic.** `classify()` now emits this event whenever a
+   poll finds an outbox path whose mailbox component matches a
+   KNOWN bare id but at a NON-CURRENT instance suffix. Payload:
+   `{ mailbox_bare, observed_instance, current_instance, path }`.
+   Subscribed via `auto-core.log.events` for the resumed-agent
+   diagnostic per [ADR 0023](https://github.com/yongjohnlee80/auto-agents/blob/main/shared/adrs/0023-resumed-agent-identity-reconciliation.md)
+   §3.1. Pure observability addition — no existing classification
+   outcome changes.
+
+3. **`mailbox/router.lua` + `templates/bootstrap.md` —
+   `identity_hint` on wake payloads + bootstrap §"Resumed-agent
+   identity reconciliation".** Wake payloads now carry
+   `identity_hint` (the live full mailbox id) so resumed agents
+   can detect drift between their fork-frozen
+   `$AUTO_AGENTS_MAILBOX_DIR` env and the actual mailbox the host
+   expects them to read. The bootstrap doc gains a new section
+   documenting the drift, the new event, the `identity_hint`
+   field, and the consumer-side `refresh_agent_id` verb (shipped
+   in auto-agents v0.2.13). Bootstrap `schema_version` bumped
+   4 → 5; resumed agents see revision mismatch on next wake and
+   re-ingest the doc.
+
+### Added
+
+- **`mailbox.stale_orphan_detected`** event topic in
+  `auto-core.log.events`. Auto-registered at module load; users
+  may subscribe via `:AutoCoreLogEvent notify
+  mailbox.stale_orphan_detected`.
+- **`identity_hint`** field on wake-message payloads dispatched
+  through `mailbox/router.lua::dispatch_wake`. Type: full mailbox
+  id string (e.g. `"agent:jarvis:1778927609-1176981"`). Nil for
+  non-agent destinations.
+- **`templates/bootstrap.md` §"Resumed-agent identity
+  reconciliation"** — agent-facing documentation of the drift
+  scenario, the new event, the `identity_hint` field, and the
+  consumer `refresh_agent_id` verb.
+
+### Changed
+
+- **`log.dispatch` routing default.** When `opts.echo` is
+  omitted, `INFO`/`WARN`/`ERROR` emissions no longer call
+  `nvim_echo` after the toast — eliminating the duplicate
+  `[AutoCore] [...] [INFO] ...` line in `:messages`. The ring
+  write and toast both still fire; only the `nvim_echo` mirror
+  is suppressed. ERROR and WARN toasts continue to use
+  `vim.notify` at their normal severities, which most users have
+  configured to surface via notify.nvim or fidget.nvim already.
+- **`templates/bootstrap.md`** `schema_version` bumped from `4`
+  to `5`. Agents that have previously acknowledged revision `4`
+  will see a mismatch on next wake and re-ingest the doc.
+
+### Tests
+
+Smoke section `[10] mailbox/router` extended with the Phase 1
+event + identity_hint assertions (7 assertions, all green). The
+`:messages` silence change validated via section `[39] log`
+behaviour checks (`opts.echo = true` → echoes; omitted → silent).
+
+### Notes
+
+- All three changes are **additive**. Existing consumers that
+  reading `ctx.mailbox`, `msg.payload.body`, ring entries via
+  `log.entries()`, or subscribing to other event topics continue
+  to work byte-identically.
+- Per the `auto-core-maintenance` convention §additive-only
+  minor-bump rule, this is a patch within the v0.1.x line.
+  `api_version` stays at `0.1`.
+- **Companion consumer change:** auto-agents v0.2.13 ships
+  `refresh_agent_id` (the agent-initiated reconciliation verb)
+  and `:AutoAgentsAdoptResumedAgent` (the host-initiated
+  reconciliation command). See ADR 0023 §3.2 + §3.3.
+
+### Files touched
+
+- `lua/auto-core/log.lua` (echo-routing logic)
+- `lua/auto-core/mailbox/router.lua` (event emission +
+  identity_hint payload field)
+- `lua/auto-core/mailbox/templates/bootstrap.md`
+  (schema_version + Resumed-agent reconciliation section)
+- `lua/auto-core/version.lua` (0.1.12 → 0.1.13)
+- `tests/smoke.lua` (Phase 1 assertions under `[10]`)
+
 ## [v0.1.11] — 2026-05-16 — ADR 0021 Phase 1: centralized logging surface for the family
 
 Additive minor-surface extension to `auto-core.log` per
