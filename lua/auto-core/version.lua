@@ -150,6 +150,34 @@ return {
   -- mailbox dir. Bootstrap schema_version bumped 5 → 6 so agents
   -- re-read the corrected audit instructions. Additive doc-only
   -- patch; `api_version` stays at `0.1`.
-  version     = "0.1.15",
+  -- v0.1.16: panel-guard observability — every bounce + lifecycle
+  -- event in `lua/auto-core/ui/panel.lua` now emits via `log.lua`
+  -- so incident triage sees the full chain in the ring. Additive
+  -- diagnostic-only patch; `api_version` stays at `0.1`.
+  -- v0.1.17: ADR 0021 Phase 4 — `:AutoCoreLog` 3-pane snapshot
+  -- viewer + JSONL dump persistence. Two new modules under
+  -- `lua/auto-core/log/`:
+  --   - dumps.lua — atomic JSONL export under
+  --     `stdpath('cache')/auto-core/dumps/dump-<UTC>.log`. ISO 8601
+  --     UTC timestamps reconstructed at export via
+  --     `now_wall - (now_mono - ts) / 1000`. `dumps.{dir, scan,
+  --     read, write, delete, iso_from_mono, normalize_for_disk}`.
+  --   - viewer.lua — 3-pane float over `auto-core.ui.float.multi`
+  --     (left = dump list, middle = entries, preview = detail).
+  --     `viewer.{open, close, toggle, is_open}`. Snapshot
+  --     semantics (no live tail). Bindings: 1..9 / <CR> / E / D /
+  --     R (re-snapshot Memory — ADR §16 Q2 = yes) on left;
+  --     / and f (substring + level filter cycle) on middle;
+  --     <Tab> / <S-Tab> / <C-h> / <C-l> on any. q / <Esc>
+  --     inherited from `ui.float.multi`.
+  -- `:AutoCoreLog [open|close|toggle]` registered in
+  -- `plugin/auto-core.lua`. Stale "Phase 1 stub" comment on
+  -- `M.notifyIf` docstring scrubbed (registry shipped through
+  -- v0.1.14). 44 new smoke tests across sections [50] dumps + [51]
+  -- viewer; suite green at 718 passed, 0 failed. Additive — no
+  -- removals, no break-shape, existing consumers ride through
+  -- unchanged. Patch within v0.1.x per `auto-core-maintenance`;
+  -- `api_version` stays at `0.1`.
+  version     = "0.1.17",
   api_version = "0.1",
 }
