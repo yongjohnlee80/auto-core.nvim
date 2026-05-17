@@ -424,6 +424,31 @@ end, {
   desc = "Manage auto-core log event-type subscriptions (ADR 0021 §5)",
 })
 
+-- :AutoCoreLog [open|close|toggle] — the on-demand log viewer.
+-- ADR 0021 §7 + §16 Q2. A 3-pane snapshot viewer over
+-- `auto-core.ui.float.multi` for incident triage of the in-memory
+-- ring + any on-disk JSONL dumps under
+-- `stdpath('cache')/auto-core/dumps/`.
+vim.api.nvim_create_user_command("AutoCoreLog", function(opts)
+  local viewer = require("auto-core.log.viewer")
+  local sub = opts.fargs[1] or "toggle"
+  if sub == "open" then
+    viewer.open()
+  elseif sub == "close" then
+    viewer.close()
+  elseif sub == "toggle" then
+    viewer.toggle()
+  else
+    vim.notify("AutoCoreLog: unknown subcommand '" .. tostring(sub)
+      .. "' — expected open|close|toggle",
+      vim.log.levels.ERROR)
+  end
+end, {
+  nargs = "?",
+  complete = function() return { "open", "close", "toggle" } end,
+  desc = "Open/close/toggle the auto-core log viewer (ADR 0021 §7)",
+})
+
 -- The auto-core module itself is required lazily on first use by a
 -- consumer plugin. We do NOT call setup() here — consumers install
 -- via lazy.nvim's `dependencies = { "yongjohnlee80/auto-core.nvim" }`

@@ -5028,6 +5028,274 @@ ok("remote branch gone after delete_remote + prune", not found)
 vim.fn.delete(tmp, "rf")
 end)()
 
+print("\n[50] log.dumps — JSONL persistence (ADR 0021 §7)")
+;(function()
+local dumps = require("auto-core.log.dumps")
+local log   = require("auto-core.log")
+log._reset_for_tests()
+
+-- Isolate the dumps dir to a tmpdir so we don't trample the user's
+-- real cache or other suite runs. Override stdpath('cache') for the
+-- length of this section.
+local tmp = vim.fn.tempname()
+vim.fn.mkdir(tmp, "p")
+local orig_stdpath = vim.fn.stdpath
+---@diagnostic disable-next-line: duplicate-set-field
+vim.fn.stdpath = function(what)
+  if what == "cache" then return tmp end
+  return orig_stdpath(what)
+end
+
+-- Path helper points at the isolated dir.
+ok("dumps.dir() resolves under stdpath('cache')",
+  dumps.dir() == tmp .. "/auto-core/dumps")
+
+-- scan() on a non-existent dir returns empty list, not an error.
+ok("scan() on missing dir returns empty", #dumps.scan() == 0)
+
+-- iso_from_mono — exercise the wall-clock reconstruction. Picking
+-- a fixed epoch (Jan 1 2020 UTC = 1577836800) keeps the assertion
+-- portable across timezones.
+local fixed_wall = 1577836800
+local iso_now = dumps.iso_from_mono(1000, fixed_wall, 1000)
+ok("iso_from_mono with ts == now_mono renders now_wall",
+  iso_now == "2020-01-01T00:00:00Z", "got " .. tostring(iso_now))
+local iso_back = dumps.iso_from_mono(0, fixed_wall, 1000)
+ok("iso_from_mono with 1s-ago mono renders 1s before now",
+  iso_back == "2019-12-31T23:59:59Z", "got " .. tostring(iso_back))
+
+-- Write a small ring snapshot and read it back.
+log.info("smoke.dumps", "first line")
+log.warn("smoke.dumps", "second line", { event = "smoke.dumps.warned" })
+log.error("smoke.dumps", "third line",
+  { fields = { code = 42, where = "section-50" } })
+vim.wait(20)
+local snapshot = log.recent()
+ok("ring captured 3 entries pre-export", #snapshot == 3)
+
+local path, werr = dumps.write(snapshot)
+ok("write() returned a path", type(path) == "string", "err=" .. tostring(werr))
+ok("write() created a real file",
+  path ~= nil and vim.fn.filereadable(path) == 1)
+ok("filename matches dump-<UTC>.log",
+  path ~= nil and path:match("/dump%-%d%d%d%d%-%d%d%-%d%dT%d%d%-%d%d%-%d%dZ%.log$") ~= nil,
+  path)
+
+local read_back, rerr = dumps.read(path)
+ok("read() succeeds", read_back ~= nil, "err=" .. tostring(rerr))
+ok("read() returned the same entry count",
+  read_back and #read_back == 3, "got " .. tostring(read_back and #read_back))
+ok("disk entries carry ts_iso instead of monotonic ts",
+  read_back and read_back[1].ts_iso ~= nil and read_back[1].ts == nil)
+ok("ts_iso is well-formed ISO 8601 UTC",
+  read_back and read_back[1].ts_iso:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%dZ$") ~= nil,
+  read_back and read_back[1].ts_iso)
+ok("structured fields survive the round trip",
+  read_back and read_back[3].fields ~= nil
+    and read_back[3].fields.code == 42
+    and read_back[3].fields.where == "section-50")
+ok("event_type survives the round trip",
+  read_back and read_back[2].event_type == "smoke.dumps.warned")
+
+-- scan() lists the file.
+local listing = dumps.scan()
+ok("scan() finds the new dump", #listing == 1
+  and listing[1].path == path)
+
+-- delete() removes the file; scan goes back to empty.
+local del_ok, derr = dumps.delete(path)
+ok("delete() returned true", del_ok, tostring(derr))
+ok("file gone after delete", vim.fn.filereadable(path) == 0)
+ok("scan() empty again", #dumps.scan() == 0)
+
+-- Atomic write: the .tmp- prefix must not survive a successful write.
+log.clear()
+log.info("smoke.dumps", "post-clean")
+vim.wait(10)
+local path2 = dumps.write(log.recent())
+ok("write #2 returned a path", type(path2) == "string")
+local leftover_tmp = vim.fn.glob(tmp .. "/auto-core/dumps/.tmp-*", false, true)
+ok("no .tmp- file lingers after successful write",
+  type(leftover_tmp) == "table" and #leftover_tmp == 0,
+  vim.inspect(leftover_tmp))
+
+-- Restore stdpath + tear down.
+---@diagnostic disable-next-line: duplicate-set-field
+vim.fn.stdpath = orig_stdpath
+vim.fn.delete(tmp, "rf")
+end)()
+
+print("\n[51] log.viewer — :AutoCoreLog 3-pane snapshot viewer (ADR 0021 §7)")
+;(function()
+local viewer = require("auto-core.log.viewer")
+local mfloat = require("auto-core.ui.float.multi")
+local log    = require("auto-core.log")
+local dumps  = require("auto-core.log.dumps")
+
+viewer._reset_for_tests()
+mfloat._reset_for_tests()
+log._reset_for_tests()
+
+-- Stub vim.notify so the viewer's user-feedback toasts don't spam
+-- test stderr. We aren't asserting on these; the convention path
+-- (log.notify / log.error) routes through vim.notify which we want
+-- silent under the suite.
+local orig_notify = vim.notify
+vim.notify = function() end
+local orig_echo = vim.api.nvim_echo
+vim.api.nvim_echo = function() end
+
+-- Isolate dumps dir for this section, same trick as [50].
+local tmp = vim.fn.tempname()
+vim.fn.mkdir(tmp, "p")
+local orig_stdpath = vim.fn.stdpath
+---@diagnostic disable-next-line: duplicate-set-field
+vim.fn.stdpath = function(what)
+  if what == "cache" then return tmp end
+  return orig_stdpath(what)
+end
+
+-- ── _apply_filters: pure-function math ──────────────────────
+do
+  local entries = {
+    { level = 1, level_name = "ERROR", component = "scan",  message = "err: boom",  event_type = "auto-finder.scan.failed" },
+    { level = 2, level_name = "WARN",  component = "scan",  message = "warn: slow", event_type = "auto-finder.scan.slow"   },
+    { level = 3, level_name = "INFO",  component = "panel", message = "ok",         event_type = "auto-finder.panel.open"  },
+    { level = 4, level_name = "DEBUG", component = "panel", message = "details",    event_type = nil },
+  }
+
+  -- ALL filter (index 1) → all 4.
+  local r = viewer._apply_filters(entries, "", 1)
+  ok("filter ALL keeps every entry", #r == 4)
+
+  -- INFO+ (index 2) → 3.
+  r = viewer._apply_filters(entries, "", 2)
+  ok("filter INFO+ drops DEBUG", #r == 3 and r[3].level_name == "INFO")
+
+  -- WARN+ (index 3) → 2.
+  r = viewer._apply_filters(entries, "", 3)
+  ok("filter WARN+ drops INFO+DEBUG", #r == 2 and r[2].level_name == "WARN")
+
+  -- ERROR (index 4) → 1.
+  r = viewer._apply_filters(entries, "", 4)
+  ok("filter ERROR keeps only ERROR", #r == 1 and r[1].level_name == "ERROR")
+
+  -- Substring filter — matches against message + component + event_type.
+  r = viewer._apply_filters(entries, "panel", 1)
+  ok("substring 'panel' matches component", #r == 2)
+  r = viewer._apply_filters(entries, "auto-finder.scan", 1)
+  ok("substring matches event_type", #r == 2)
+  r = viewer._apply_filters(entries, "boom", 1)
+  ok("substring matches message body", #r == 1 and r[1].message == "err: boom")
+  r = viewer._apply_filters(entries, "PANEL", 1)
+  ok("substring filter is case-insensitive", #r == 2)
+  r = viewer._apply_filters(entries, "nothing-matches-this", 1)
+  ok("substring with no matches returns empty", #r == 0)
+
+  -- Combined: WARN+ AND component contains "scan" → 2.
+  r = viewer._apply_filters(entries, "scan", 3)
+  ok("level + substring compose (AND)", #r == 2)
+end
+
+-- ── open / close idempotency ────────────────────────────────
+ok("is_open() false before open", not viewer.is_open())
+viewer.open()
+ok("is_open() true after open", viewer.is_open())
+
+local state = viewer._state()
+ok("viewer state populated after open",
+  state ~= nil and state.float ~= nil)
+ok("Memory is dumps[1]",
+  state.dumps[1] and state.dumps[1].kind == "memory")
+
+-- Re-calling open() must focus, not throw.
+viewer.open()
+ok("open() is idempotent — still open", viewer.is_open())
+
+-- Snapshot is read-only — mutating the live ring after open
+-- doesn't change the cached snapshot.
+log.info("after-snapshot", "this entry came after snapshot")
+vim.wait(10)
+ok("snapshot length unchanged after live ring mutation",
+  #state.memory_entries == 0)
+
+-- R re-snapshots; now we should see the new entry.
+viewer._reset_for_tests()
+log._reset_for_tests()
+log.info("before", "pre")
+log.info("before", "pre-2")
+vim.wait(10)
+viewer.open()
+state = viewer._state()
+ok("snapshot picks up entries that existed at open-time",
+  #state.memory_entries == 2)
+log.info("after", "post-1")
+log.info("after", "post-2")
+vim.wait(10)
+ok("live ring grew but snapshot is stable",
+  #state.memory_entries == 2 and #log.recent() == 4)
+
+-- Manually exercise the R path (calling internal helper because
+-- buf-local keymaps can't be triggered headlessly without simulating
+-- input).
+do
+  local mod = require("auto-core.log.viewer")
+  -- Reproduce what the `R` keymap does: re-snapshot.
+  local s = mod._state()
+  -- Inline the snapshot — the `R` keymap is a thin closure over
+  -- `_snapshot_memory` which isn't exported. Verify via the public
+  -- observable: close + open does the same thing.
+  mod.close()
+  vim.wait(10)
+  mod.open()
+  s = mod._state()
+  ok("close+reopen re-snapshots Memory (proxy for R)",
+    s and #s.memory_entries == 4)
+end
+
+-- ── delete (Memory branch) → log.clear() and re-snapshot ────
+-- Direct call into log.clear because exercising the D keymap
+-- requires vim.ui.input which is non-trivial to fake. The
+-- post-clear behavior is what we assert.
+log.clear()
+viewer.close()
+vim.wait(10)
+viewer.open()
+state = viewer._state()
+ok("post-clear, snapshot is empty",
+  state and #state.memory_entries == 0)
+
+-- ── export round-trip via dumps.write, then verify viewer picks
+--    up the new file on rescan (via close+open) ──────────────
+log._reset_for_tests()
+log.info("export-test", "entry 1")
+log.warn("export-test", "entry 2")
+vim.wait(10)
+local path = dumps.write(log.recent())
+ok("dumps.write produced an export file",
+  type(path) == "string" and vim.fn.filereadable(path) == 1)
+
+viewer.close()
+vim.wait(10)
+viewer.open()
+state = viewer._state()
+ok("viewer rescans dumps dir on open — file is visible as dumps[2]",
+  state and state.dumps[2] and state.dumps[2].kind == "file"
+    and state.dumps[2].path == path)
+
+-- ── cleanup ─────────────────────────────────────────────────
+viewer.close()
+viewer._reset_for_tests()
+mfloat._reset_for_tests()
+log._reset_for_tests()
+
+---@diagnostic disable-next-line: duplicate-set-field
+vim.fn.stdpath = orig_stdpath
+vim.fn.delete(tmp, "rf")
+vim.notify = orig_notify
+vim.api.nvim_echo = orig_echo
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

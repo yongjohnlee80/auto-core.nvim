@@ -471,13 +471,9 @@ end
 
 ---Ring write + conditional toast. Toasts iff `event` is in the
 ---user's subscribed set (the registry lookup goes through
----`M.events.is_notify_enabled`). Default level INFO.
----
----Phase 1 note: `M.events.is_notify_enabled` is a stub that always
----returns false until Phase 1 Step 3 lands the persistent event-type
----registry. Until then, `notifyIf` writes to the ring (so the
----record exists) but never toasts. Callers can wire up unconditional
----toasts via `M.notify(...)` in the meantime.
+---`M.events.is_notify_enabled` against the persistent state
+---namespace `auto-core.log.events:notify_subscriptions`). Default
+---level INFO.
 ---@param event string                     -- registered event id (ADR 0021 §5)
 ---@param msg any
 ---@param opts AutoCoreLogNotifyOpts?
