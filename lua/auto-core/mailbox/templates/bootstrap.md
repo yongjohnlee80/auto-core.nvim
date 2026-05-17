@@ -1,7 +1,7 @@
 ---
 revision: {{revision}}
 upserted_at: {{upserted_at}}
-schema_version: 4
+schema_version: 5
 ---
 
 # Mailbox bootstrap (auto-core v0.1.8+)
@@ -293,6 +293,82 @@ The book is **dynamic** — it reflects the live registry, so
 peers spawned after you started will appear in subsequent
 `addressbook` queries without any manual refresh.
 
+## Resumed-agent identity reconciliation (ADR 0023, schema v5)
+
+If you were spawned by `/resume` (claude), Codex's transcript
+restore, Gemini's session-resume, or any equivalent flow, your
+`AUTO_AGENTS_*` env vars are frozen at your **original** fork.
+They may now be stale — your live host may have a different
+`instance_id`, or you may have been resumed in a slot owned by a
+different name (jarvis / ultron-prime / white-vision are all
+claude-backed and trivially mis-routable across slots on resume).
+
+**Two signals tell you when to reconcile:**
+
+1. **Every wake message carries `ctx.identity_hint`** with the
+   live host's authoritative `{ expected_instance_id,
+   expected_mailbox_id, expected_bare_id }`. On every wake,
+   compare these against your env / cached identity. Mismatch
+   → call `refresh_agent_id`.
+
+2. **Every `addressbook` response carries `value.runtime_identity`**
+   with the same authoritative values for your caller record. On
+   every addressbook query, compare. Mismatch → call
+   `refresh_agent_id`.
+
+**Self-service recovery: the `refresh_agent_id` command.**
+
+Send a `kind="command"` message to `nvim` with `command =
+"refresh_agent_id"`:
+
+```json
+{
+  "kind":    "command",
+  "to":      "nvim",
+  "from":    "<your claimed mailbox id>",
+  "command": "refresh_agent_id",
+  "args": {
+    "claimed_instance_id":  "<your AUTO_AGENTS_INSTANCE_ID>",
+    "claimed_mailbox_id":   "<your AUTO_AGENTS_MAILBOX_ID>",
+    "actor_pid":            <your process pid>
+  }
+}
+```
+
+On success, the response carries:
+
+- `preamble` — a one-paragraph instruction telling you to
+  REPLACE your cached identity with the returned values.
+- `runtime_identity_path` — an absolute path to a sidecar JSON
+  file on disk (typically
+  `~/.local/share/auto-agents/runtime-identity-<slot>.json`) that
+  is now the **authoritative source** for your identity. Read
+  this file at the start of every mailbox operation; treat the
+  frozen env as first-boot seed only.
+- `instance_id` / `mailbox_id` / `mailbox_dir` — the canonical
+  values, also reflected in the sidecar file.
+
+On failure (`code = "unknown_actor_pid"`), the response carries
+`live_slots[]` enumerating which slots ARE registered with this
+host. Surface the list to the user — they may need to run
+`:AutoAgentsAdoptResumedAgent <slot>` in the right host, or you
+may need to be restarted.
+
+**Mandatory on every mailbox operation post-reconciliation:**
+
+1. Read `<runtime_identity_path>` if present; trust it over env.
+2. Use the values it carries for `from`, mailbox dir lookups,
+   and bare-id resolution.
+3. Sidecar absent → fall back to env (you're either pre-resume
+   or never reconciled).
+
+**The reconciliation protocol is mandatory.** Hosts cannot
+guarantee correct routing without it. Skipping the audit
+produces silent message loss — the live router will drop your
+outbox writes as orphans (and emit
+`core.mailbox:stale_orphan_detected` for observability — which
+is how the user discovers your drift if you didn't).
+
 ## Don'ts
 
 - **Don't write outside your own `outbox/`.** auto-core is the
@@ -306,7 +382,14 @@ peers spawned after you started will appear in subsequent
 ## Reference
 
 - ADR 0013 — Auto-Core Queue Mailbox & Command Registry.
+- ADR 0023 — Resumed-Agent Identity Reconciliation
+  (the `refresh_agent_id` + `identity_hint` + sidecar identity
+  file protocol layered on top of ADR 0013).
 - Event topics: `core.mailbox:*`, `core.command:*` (consumers
-  in Neovim subscribe; you do not need to).
-- Schema version: `3`. If auto-core upgrades to schema `4`, the
-  upsert will rewrite this doc; your audit step catches it.
+  in Neovim subscribe; you do not need to). Notable addition
+  in schema v5: `core.mailbox:stale_orphan_detected` fires when
+  an outbox file is written under an unregistered mailbox dir —
+  observability surface for resumed-agent drift.
+- Schema version: `5` (this doc's frontmatter). Increments on
+  protocol changes; your audit step catches each bump and
+  re-reads the doc.
