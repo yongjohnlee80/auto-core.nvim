@@ -1,7 +1,7 @@
 ---
 revision: {{revision}}
 upserted_at: {{upserted_at}}
-schema_version: 5
+schema_version: 6
 ---
 
 # Mailbox bootstrap (auto-core v0.1.8+)
@@ -54,10 +54,14 @@ Every time you wake, **before reading inbox or responses**:
 1. `stat $AUTO_AGENTS_MAILBOX_BOOTSTRAP_DOC`.
 2. Read the `revision:` field from its frontmatter.
 3. Compare it to the revision you last acknowledged. Persist your
-   last-acknowledged revision somewhere durable that you control
-   — `$AUTO_AGENTS_MAILBOX_DIR/.agent-state/seen-revision` is a
-   fine default. If you have never seen a revision before, treat
-   this as a first-time bootstrap.
+   last-acknowledged revision somewhere durable that you control.
+   The default is the tool-root state file next to the shared
+   bootstrap doc:
+   `$(dirname "$AUTO_AGENTS_MAILBOX_BOOTSTRAP_DOC")/.agent-state/seen-revision`.
+   Do not store this only under `$AUTO_AGENTS_MAILBOX_DIR`, because
+   that directory is instance-scoped and may be pruned between
+   sessions. If you have never seen a revision before, treat this
+   as a first-time bootstrap.
 4. If the revision **differs** from your last-acknowledged value,
    the protocol changed between your last wake and this one.
    **Re-read this entire document end-to-end** and update your
@@ -390,6 +394,6 @@ is how the user discovers your drift if you didn't).
   in schema v5: `core.mailbox:stale_orphan_detected` fires when
   an outbox file is written under an unregistered mailbox dir —
   observability surface for resumed-agent drift.
-- Schema version: `5` (this doc's frontmatter). Increments on
+- Schema version: `6` (this doc's frontmatter). Increments on
   protocol changes; your audit step catches each bump and
   re-reads the doc.

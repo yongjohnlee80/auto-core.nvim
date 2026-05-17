@@ -10,6 +10,30 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.15] — 2026-05-17 — mailbox bootstrap seen-revision uses tool-root state
+
+Corrects the agent-facing bootstrap audit instructions so the
+`seen-revision` marker is persisted beside the shared per-tool-root
+`bootstrap-mailbox.md`, not only inside the per-instance mailbox
+directory.
+
+### Changed
+
+- **`mailbox/templates/bootstrap.md`** now points agents at
+  `$(dirname "$AUTO_AGENTS_MAILBOX_BOOTSTRAP_DOC")/.agent-state/seen-revision`
+  as the default durable acknowledgement file.
+- The doc explicitly warns agents not to rely only on
+  `$AUTO_AGENTS_MAILBOX_DIR/.agent-state/seen-revision`, because
+  `$AUTO_AGENTS_MAILBOX_DIR` is instance-scoped and pruneable.
+- `schema_version` bumped from `5` to `6` so agents re-read the
+  corrected protocol text on their next bootstrap audit.
+- `version.lua` bumped from `0.1.14` to `0.1.15`.
+
+### Compatibility
+
+Doc/protocol clarification only. No Lua API, event, state, or
+mailbox envelope shape changed. `api_version` stays at `0.1`.
+
 ## [v0.1.14] — 2026-05-17 — dbase event topics (ADR 0020)
 
 Six new `dbase.*` event topics registered in

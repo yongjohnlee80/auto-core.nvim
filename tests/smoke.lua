@@ -3647,9 +3647,14 @@ ok("bootstrap doc body does NOT bake in any specific agent id (v0.1.8 hoist)",
   boot_text:find("agent:lector", 1, true) == nil)
 ok("bootstrap doc carries the audit instructions",
   boot_text:find("bootstrap audit protocol") ~= nil)
-ok("bootstrap doc still documents Codex writable_roots setup",
-  boot_text:find("sandbox_workspace_write", 1, true) ~= nil
-    and boot_text:find("writable_roots", 1, true) ~= nil)
+ok("bootstrap doc stores seen-revision under persistent tool-root state",
+  boot_text:find('$(dirname "$AUTO_AGENTS_MAILBOX_BOOTSTRAP_DOC")/.agent-state/seen-revision',
+    1, true) ~= nil
+    and boot_text:find("Do not store this only under `$AUTO_AGENTS_MAILBOX_DIR`",
+      1, true) ~= nil)
+ok("bootstrap doc still documents spawn-time permission grants",
+  boot_text:find("Spawn-time permission grants", 1, true) ~= nil
+    and boot_text:find("--add-dir <path>", 1, true) ~= nil)
 
 -- v0.1.8 render is agent-agnostic — identical revisions across
 -- arbitrary inputs (the template no longer substitutes per-call

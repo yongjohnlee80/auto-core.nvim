@@ -144,6 +144,12 @@ return {
   -- return nil for archived/late events. Additive — no removals, no
   -- break-shape. Patch within the v0.1.x line per
   -- `auto-core-maintenance`; `api_version` stays at `0.1`.
-  version     = "0.1.14",
+  -- v0.1.15: bootstrap mailbox protocol doc now directs agents to
+  -- persist `seen-revision` beside the shared per-tool-root
+  -- `bootstrap-mailbox.md`, not only inside the instance-scoped
+  -- mailbox dir. Bootstrap schema_version bumped 5 → 6 so agents
+  -- re-read the corrected audit instructions. Additive doc-only
+  -- patch; `api_version` stays at `0.1`.
+  version     = "0.1.15",
   api_version = "0.1",
 }
