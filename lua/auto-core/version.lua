@@ -129,6 +129,21 @@ return {
   -- `auto-core-maintenance`'s additive-only minor-bump rule this
   -- is a patch within the v0.1.x line. `api_version` stays at
   -- `0.1`.
-  version     = "0.1.13",
+  -- v0.1.14: six new `dbase.*` event topics registered in
+  -- `lua/auto-core/events/topics.lua` for the auto-finder dbase
+  -- section (ADR 0020) to publish onto:
+  --   - dbase.connection:changed
+  --   - dbase.call:started
+  --   - dbase.call:state_changed
+  --   - dbase.call:completed
+  --   - dbase.call:failed
+  --   - dbase.result:shown
+  -- `conn_id` is marked optional (`string?`) on all four call.*
+  -- topics because dbee's `CallDetails` shape carries no connection
+  -- id; the bridge enriches via `get_current_connection()` which can
+  -- return nil for archived/late events. Additive — no removals, no
+  -- break-shape. Patch within the v0.1.x line per
+  -- `auto-core-maintenance`; `api_version` stays at `0.1`.
+  version     = "0.1.14",
   api_version = "0.1",
 }

@@ -10,6 +10,56 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.14] — 2026-05-17 — dbase event topics (ADR 0020)
+
+Six new `dbase.*` event topics registered in
+`lua/auto-core/events/topics.lua` for the auto-finder dbase
+section (ADR 0020) to publish onto. The topics let other
+auto-family plugins react to database UI activity without
+coupling to nvim-dbee's internal `Handler:register_event_listener`
+surface — the section's event bridge subscribes there and
+forwards translated payloads onto these auto-core topics.
+
+### Added
+
+- **`dbase.connection:changed`** — the active dbee connection
+  switched. Payload: `{ id, name?, type? }`.
+- **`dbase.call:started`** — a dbee query was submitted (call
+  enters pending/executing state). Payload:
+  `{ call_id, conn_id?, query }`.
+- **`dbase.call:state_changed`** — a dbee call's internal state
+  transitioned (e.g. `pending → executing → archived`). Use this
+  for fine-grained progress UIs; the discrete `completed` /
+  `failed` topics below are the standard terminal signals.
+  Payload: `{ call_id, conn_id?, from?, to }`.
+- **`dbase.call:completed`** — a dbee call finished successfully.
+  Payload: `{ call_id, conn_id?, rows?, duration_ms? }`.
+- **`dbase.call:failed`** — a dbee call ended in error. Payload:
+  `{ call_id, conn_id?, err }`.
+- **`dbase.result:shown`** — the result tile rendered a call's
+  output (or paged within it). Payload:
+  `{ call_id, page?, total_pages? }`.
+
+All six topics carry `publishers = { "auto-finder.nvim" }` in
+their registry entries.
+
+### Notes
+
+- `conn_id` is optional (`string?`) on every `call.*` topic
+  because dbee's `CallDetails` shape carries no connection id —
+  the section's bridge enriches via `get_current_connection()`
+  which can return nil for archived calls fired late or while a
+  different connection is active. Subscribers should treat
+  `conn_id` as best-effort.
+
+### Compatibility
+
+Additive — no removals, no break-shape. Per
+`auto-core-maintenance`'s additive-only minor-bump rule this is
+a patch within the v0.1.x line. `api_version` stays at `0.1`.
+Consumers pinned to `version = "^0.1.0"` pick this up
+automatically.
+
 ## [v0.1.13] — 2026-05-16 — ADR 0023 Phase 1 (resumed-agent reconciliation) + log :messages silence
 
 Three additive surface changes:
