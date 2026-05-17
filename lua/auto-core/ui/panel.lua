@@ -29,6 +29,9 @@
 
 local events = require("auto-core.events")
 local winbar_mod = require("auto-core.ui.winbar")
+local log = require("auto-core.log")
+local log_guard = log.namespace("ui.panel.guard")
+local log_panel = log.namespace("ui.panel")
 
 local M = {}
 
@@ -121,24 +124,62 @@ local function _get_var(getter, target, name)
 end
 
 local function _bounce_buffer(winid)
-  if not vim.api.nvim_win_is_valid(winid) then return end
+  if not vim.api.nvim_win_is_valid(winid) then
+    log_guard.info("bounce skipped — winid no longer valid",
+      { fields = { winid = winid } })
+    return
+  end
+  local bufnr = vim.api.nvim_win_get_buf(winid)
+  local owner = _get_var(vim.api.nvim_buf_get_var, bufnr, BUF_OWNER_VAR) or ""
+  local was_current = vim.api.nvim_get_current_win() == winid
+
   -- Prefer closing the stray window outright. `nvim_win_close` errors
   -- when the target is the last window in its tabpage; the pcall
   -- swallows that and we fall back to the scratch swap below.
-  local closed = pcall(vim.api.nvim_win_close, winid, false)
-  if closed then return end
+  local closed, close_err = pcall(vim.api.nvim_win_close, winid, false)
+  if closed then
+    log_guard.info("bounce — closed stray window",
+      { fields = {
+          winid = winid, bufnr = bufnr, owner = owner,
+          was_current = was_current,
+        } })
+    return
+  end
+
+  -- `nvim_win_close` failed (last in tab, or refused for some other
+  -- reason — e.g. modified buffer). Fall back to swapping in a
+  -- private scratch so the panel buffer at least leaves THIS window.
+  log_guard.warn("bounce — close refused, trying scratch swap",
+    { fields = {
+        winid = winid, bufnr = bufnr, owner = owner,
+        was_current = was_current, close_err = tostring(close_err or ""),
+      } })
+
   local scratch = vim.api.nvim_create_buf(false, true)
   vim.bo[scratch].bufhidden = "wipe"
   vim.bo[scratch].buftype   = "nofile"
   vim.bo[scratch].swapfile  = false
-  pcall(vim.api.nvim_win_set_buf, winid, scratch)
+  local set_ok, set_err = pcall(vim.api.nvim_win_set_buf, winid, scratch)
+  if not set_ok then
+    log_guard.error("bounce — scratch swap also failed; panel buffer remains in stray window",
+      { fields = {
+          winid = winid, bufnr = bufnr, scratch = scratch, owner = owner,
+          set_err = tostring(set_err or ""),
+        } })
+  else
+    log_guard.info("bounce — scratch swap applied",
+      { fields = {
+          winid = winid, prev_bufnr = bufnr, scratch = scratch,
+          owner = owner,
+        } })
+  end
 end
 
 local _guard_group = vim.api.nvim_create_augroup(
   "AutoCorePanelGuard", { clear = true })
 vim.api.nvim_create_autocmd({ "WinEnter", "BufWinEnter" }, {
   group = _guard_group,
-  callback = function()
+  callback = function(args)
     local winid = vim.api.nvim_get_current_win()
     if not vim.api.nvim_win_is_valid(winid) then return end
     -- Floating windows opt out — overlays may legitimately preview
@@ -147,13 +188,45 @@ vim.api.nvim_create_autocmd({ "WinEnter", "BufWinEnter" }, {
 
     local win_panel = _get_var(vim.api.nvim_win_get_var, winid,
       "auto_core_panel_name")
-    if type(win_panel) == "string" and #win_panel > 0 then return end
+    if type(win_panel) == "string" and #win_panel > 0 then
+      -- Window is a legitimate panel — guard is a no-op here.
+      -- DEBUG: cheap when level >= DEBUG; off in production.
+      log_guard.debug("fired — skip (window is a panel)",
+        { fields = { event = args.event, winid = winid, panel = win_panel } })
+      return
+    end
 
     local bufnr = vim.api.nvim_win_get_buf(winid)
     local owner = _get_var(vim.api.nvim_buf_get_var, bufnr, BUF_OWNER_VAR)
     if type(owner) == "string" and #owner > 0 then
+      -- A panel-owned buffer is in a non-panel window. Bounce.
+      -- INFO level — this is the rare interesting case the guard exists for.
+      local bufname = vim.api.nvim_buf_get_name(bufnr)
+      local buftype = vim.bo[bufnr].buftype
+      local n_wins_with_buf = 0
+      for _, w in ipairs(vim.api.nvim_list_wins()) do
+        if vim.api.nvim_win_get_buf(w) == bufnr then
+          n_wins_with_buf = n_wins_with_buf + 1
+        end
+      end
+      log_guard.info("fired — bouncing panel buffer from stray window",
+        { fields = {
+            event = args.event,
+            winid = winid, bufnr = bufnr,
+            owner = owner, buftype = buftype, bufname = bufname,
+            n_wins_with_buf = n_wins_with_buf,
+            -- Lua traceback into the autocmd context — points at the
+            -- dispatcher, but useful for distinguishing direct
+            -- (vim.cmd "split") vs Lua-driven (nvim_open_win) origins
+            -- once you correlate by surrounding ring entries.
+            traceback = debug.traceback("", 2),
+          } })
       _bounce_buffer(winid)
+      return
     end
+
+    -- Normal traffic: non-panel window, non-panel buffer. No-op,
+    -- not logged (would flood the ring on every WinEnter).
   end,
 })
 
@@ -192,7 +265,21 @@ end
 function Panel:_stamp_buffer(bufnr)
   if not bufnr or bufnr == 0 then return end
   if not vim.api.nvim_buf_is_valid(bufnr) then return end
+  -- Check the prior owner so a re-stamp (legitimate panel cycling
+  -- the same buffer through with_unfixed_buf) is distinguishable
+  -- from a first stamp.
+  local prev = _get_var(vim.api.nvim_buf_get_var, bufnr, BUF_OWNER_VAR)
   pcall(vim.api.nvim_buf_set_var, bufnr, BUF_OWNER_VAR, self.opts.name)
+  -- DEBUG: stamp events happen on every with_unfixed_buf swap;
+  -- valuable for correlating "buffer X became panel-owned at time T"
+  -- with a later "buffer X leaked at T+δ" bounce event.
+  log_guard.debug("buffer stamped",
+    { fields = {
+        panel = self.opts.name, bufnr = bufnr,
+        bufname = vim.api.nvim_buf_get_name(bufnr),
+        buftype = vim.bo[bufnr].buftype,
+        prev_owner = tostring(prev or ""),
+      } })
 end
 
 ---Scan the current tabpage for an existing window carrying our
@@ -234,6 +321,7 @@ end
 ---@return boolean ok, any result_or_err
 function Panel:with_unfixed_buf(fn)
   if not self:_is_open() then return pcall(fn) end
+  local prev_buf = vim.api.nvim_win_get_buf(self.winid)
   local was = vim.wo[self.winid].winfixbuf
   if was then vim.wo[self.winid].winfixbuf = false end
   local ok, result = pcall(fn)
@@ -246,7 +334,16 @@ function Panel:with_unfixed_buf(fn)
   -- buffer, and `nvim_win_set_buf` doesn't change the current
   -- window so WinEnter doesn't fire either.
   if vim.api.nvim_win_is_valid(self.winid) then
-    self:_stamp_buffer(vim.api.nvim_win_get_buf(self.winid))
+    local new_buf = vim.api.nvim_win_get_buf(self.winid)
+    self:_stamp_buffer(new_buf)
+    if new_buf ~= prev_buf then
+      log_panel.debug("with_unfixed_buf — buffer swapped",
+        { fields = {
+            panel = self.opts.name, winid = self.winid,
+            prev_buf = prev_buf, new_buf = new_buf,
+            ok = ok,
+          } })
+    end
   end
   return ok, result
 end
@@ -319,6 +416,13 @@ function Panel:open(force)
   events.publish("panel:opened", { name = self.opts.name, winid = winid })
   if self.opts.on_open then pcall(self.opts.on_open, winid) end
 
+  log_panel.info("panel opened",
+    { fields = {
+        panel = self.opts.name, winid = winid, width = width,
+        side = self.opts.side or "left",
+        marker_var = self._marker_var,
+      } })
+
   return winid
 end
 
@@ -334,6 +438,8 @@ function Panel:close()
   events.publish("panel:closed",
     { name = self.opts.name, winid = winid or -1 })
   if self.opts.on_close then pcall(self.opts.on_close, winid or -1) end
+  log_panel.info("panel closed",
+    { fields = { panel = self.opts.name, winid = winid or -1 } })
 end
 
 ---Toggle: close if open, open otherwise.
