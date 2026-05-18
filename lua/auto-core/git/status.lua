@@ -77,8 +77,18 @@ local function resolve_root(repo_root)
   return repo_mod.root()
 end
 
--- Wire `core.file:*` once. Runs at module load time. Each event
--- with a `path` payload checks every cached root; matches drop.
+-- Wire `core.file:*` + `core.git.state:changed` once. Runs at module
+-- load time. Two invalidation paths because the two event sources are
+-- independent and cover disjoint mutations:
+--
+--   - `core.file:*` (auto-core.fs.watch) names a single working-tree
+--     path. Drop any cached repo whose root contains it. Misses
+--     `.git/`-only mutations (commit/checkout/reset) because fs.watch's
+--     DEFAULT_IGNORE excludes `/.git/` by design.
+--   - `core.git.state:changed` (auto-core.git.watch, ADR 0025) names a
+--     repo_root directly. Drop the cache entry keyed by that exact
+--     normalized root. Covers the .git/-side mutations the first
+--     subscriber misses.
 local function ensure_wired()
   if _wired then return end
   _wired = true
@@ -91,6 +101,12 @@ local function ensure_wired()
         _cache[root] = nil
       end
     end
+  end)
+  events.subscribe("core.git.state:changed", function(payload, _topic)
+    if type(payload) ~= "table" or type(payload.repo_root) ~= "string" then
+      return
+    end
+    _cache[path_mod.normalize(payload.repo_root)] = nil
   end)
 end
 

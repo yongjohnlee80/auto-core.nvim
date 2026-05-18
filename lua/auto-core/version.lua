@@ -178,6 +178,42 @@ return {
   -- removals, no break-shape, existing consumers ride through
   -- unchanged. Patch within v0.1.x per `auto-core-maintenance`;
   -- `api_version` stays at `0.1`.
+  -- v0.1.19: ADR 0025 Phase 1 — `auto-core.git.watch` module +
+  -- `core.git.state:changed` topic. Closes the refresh-trigger gap
+  -- that left UI consumers (auto-finder files panel) showing stale
+  -- git decorations after external `git add`/`commit`/`checkout`/
+  -- `reset`: `auto-core.fs.watch`'s `DEFAULT_IGNORE` excludes
+  -- `/.git/` by design, so no `core.file:*` ever fires for `.git/`
+  -- mutations. Three additive changes:
+  --   - `lua/auto-core/git/watch.lua` — narrow opt-in watcher that
+  --     opens two non-recursive libuv `fs_event` handles per repo
+  --     (git_dir/ filtered to {HEAD,index,ORIG_HEAD,MERGE_HEAD};
+  --     git_dir/logs/ filtered to "HEAD"). Resolves git_dir via
+  --     `git.repo.git_dir(repo_root)` so linked worktrees attach
+  --     per-worktree, not to common_dir. `.lock` filenames are
+  --     filtered at the publisher. Debounce 200ms. Public surface
+  --     mirrors `fs.watch.start/stop/list/stop_all` + defaults.
+  --   - `events/topics.lua` registers `core.git.state:changed`
+  --     payload `{ repo_root, git_dir, kind = 'head'|'index'|
+  --     'merge'|'reflog'|'other', path }`. Single coarse topic;
+  --     `kind` discriminator lets subscribers filter.
+  --   - `git/status.lua` adds a second `events.subscribe` for the
+  --     new topic to invalidate its cache (the existing
+  --     `core.file:*` invalidation misses `.git/`-only mutations
+  --     for the same reason — fs.watch ignores them).
+  -- Refs/remotes/, FETCH_HEAD, and logs/refs/remotes/ deliberately
+  -- NOT watched — `git fetch` updates those and ADR 0007 Phase 3.5's
+  -- `core.git.fetch:completed` already covers that case. Per ADR
+  -- 0025 §2.5, `auto-core.fs.watch`'s `/%.git/` ignore stays
+  -- untouched (un-ignoring would flood every subscriber with
+  -- object/refs/reflog churn). Additive — no removals, no
+  -- break-shape; consumers that don't call `git.watch.start` pay
+  -- nothing. Section 51 smoke covers start/stop, kind classification
+  -- across index/reflog/head, refs/remotes/ exclusion, .lock filter,
+  -- debounce coalescing, max_handles cap, and status cache
+  -- invalidation via the new topic. Suite green at 744 passed,
+  -- 0 failed. Patch within v0.1.x per `auto-core-maintenance`;
+  -- `api_version` stays at `0.1`.
   -- v0.1.18: ui.panel resize/lifecycle observability. New ring
   -- emissions in `lua/auto-core/ui/panel.lua`:
   --   - INFO `VimResized — terminal geometry changed` (host
@@ -194,6 +230,6 @@ return {
   --     `Panel:close()` and would otherwise leave singleton
   --     tracking out of sync.
   -- Additive diagnostic-only patch; `api_version` stays at `0.1`.
-  version     = "0.1.18",
+  version     = "0.1.19",
   api_version = "0.1",
 }

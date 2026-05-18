@@ -180,6 +180,14 @@ local M = {
     payload = "{ path = string, name = string, base = string, ok = boolean, stderr = string? }",
     publishers = { "auto-core" },
   },
+  -- External git-state mutations (commit / checkout / reset / staging /
+  -- merge / rebase performed outside this process). Coarse-grained;
+  -- subscribers refresh git-derived UI state. Per ADR 0025.
+  ["core.git.state:changed"] = {
+    doc = "Repo's .git/ plumbing mutated externally. Published by auto-core.git.watch on libuv fs_event firings under git_dir/ (HEAD/index/ORIG_HEAD/MERGE_HEAD) or git_dir/logs/HEAD (reflog tip).",
+    payload = "{ repo_root = string, git_dir = string, kind = 'head'|'index'|'merge'|'reflog'|'other', path = string }",
+    publishers = { "auto-core" },
+  },
 
   -- ── mailbox lifecycle (ADR 0013 Phase 1 — auto-core.mailbox) ────
   -- File-backed cross-process transport; topics signal arrival,

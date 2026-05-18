@@ -16,5 +16,6 @@ M.worktree = require("auto-core.git.worktree")
 M.graph    = require("auto-core.git.graph")
 M.fetch    = require("auto-core.git.fetch")
 M.pull     = require("auto-core.git.pull")
+M.watch    = require("auto-core.git.watch")
 
 return M

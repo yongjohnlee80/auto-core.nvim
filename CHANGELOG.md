@@ -10,6 +10,73 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.19] — 2026-05-17 — auto-core.git.watch + core.git.state:changed (ADR 0025 Phase 1)
+
+Closes the refresh-trigger gap that left UI consumers (auto-finder
+files panel) rendering stale git decorations after external
+`git add` / `commit` / `checkout` / `reset`. Root cause: the family-
+wide `auto-core.fs.watch` deliberately excludes `/.git/` (its
+`DEFAULT_IGNORE` would otherwise drown subscribers in
+object/refs/reflog churn), so no `core.file:*` ever fires for
+`.git/` mutations.
+
+### Added
+
+- **`lua/auto-core/git/watch.lua`** — narrow opt-in libuv `fs_event`
+  watcher scoped to a repo's `.git/` plumbing. Two non-recursive
+  handles per repo: `git_dir/` filtered to filename in
+  `{ HEAD, index, ORIG_HEAD, MERGE_HEAD }`, and `git_dir/logs/`
+  filtered to filename `HEAD` (the reflog tip). Resolves git_dir via
+  `auto-core.git.repo.git_dir(repo_root)` so **linked worktrees
+  attach to their per-worktree git_dir, not the shared common_dir**
+  — sibling worktrees' mutations don't cross-fire. Filters `.lock`
+  filenames at the publisher; debounce 200 ms. Public surface
+  mirrors `fs.watch.start / stop / list / stop_all` and exposes
+  `DEFAULT_DEBOUNCE_MS = 200` / `DEFAULT_MAX_HANDLES = 64` /
+  `FILENAME_KINDS`.
+- **Topic `core.git.state:changed`** registered in
+  `events/topics.lua` with payload `{ repo_root, git_dir, kind =
+  'head' | 'index' | 'merge' | 'reflog' | 'other', path }`. Single
+  coarse topic; the `kind` discriminator lets subscribers filter.
+- **`git/status.lua`** subscribes to the new topic and invalidates
+  `_cache[normalize(payload.repo_root)]`. The existing `core.file:*`
+  invalidation misses `.git/`-only mutations for the same fs.watch
+  reason, so the two subscriptions cover disjoint event sources.
+
+### Deliberately NOT watched
+
+`refs/remotes/`, `FETCH_HEAD`, and `logs/refs/remotes/` — all
+written by `git fetch` and noisy without changing local panel
+state. ADR 0007 Phase 3.5's `core.git.fetch:completed` already
+covers callers that care about remote refs. `refs/heads/` is also
+not watched recursively (Linux `fs_event` can't observe namespaced
+subdirs non-recursively); `logs/HEAD` catches every HEAD movement
+those branches produce, including commits on `feature/*` etc.
+
+### Unchanged
+
+`auto-core.fs.watch`'s `DEFAULT_IGNORE` keeps the `/%.git/` anchor.
+Per ADR 0025 §2.5, un-ignoring it would flood every subscriber in
+the family with high-rate irrelevant events. The new module is the
+narrow companion, not a replacement.
+
+### Tests
+
+Section [51] adds 21 assertions covering: nil/non-repo error paths,
+two-handle layout, kind classification across `index` / `reflog` /
+`head` from real `git add` / `commit` / `checkout -b`,
+`refs/remotes/` exclusion, `.lock` filename filter, debounce
+coalescing on burst writes, max_handles cap, `stop` / `stop_all` /
+restart, default constants, and status cache invalidation via the
+new topic (including the "different repo_root doesn't invalidate
+this cache" cross-check). Suite green at 744 passed, 0 failed.
+
+### Wiring
+
+Opt-in — consumers call `git.watch.start(repo_root)` explicitly.
+The `auto-finder` companion patch lands in a separate worktree per
+ADR 0025 §6.
+
 ## [v0.1.15] — 2026-05-17 — mailbox bootstrap seen-revision uses tool-root state
 
 Corrects the agent-facing bootstrap audit instructions so the

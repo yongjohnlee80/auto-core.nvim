@@ -5296,6 +5296,255 @@ vim.notify = orig_notify
 vim.api.nvim_echo = orig_echo
 end)()
 
+-- ─────────────────────── 51. git.watch — .git/ plumbing watcher (ADR 0025) ─────────────────────────
+print("\n[51] git.watch — start/stop, kind classification, debounce, .lock filter, status invalidation")
+;(function()
+local gwatch = require("auto-core.git.watch")
+local status_mod = require("auto-core.git.status")
+local events = require("auto-core.events")
+events._reset_for_tests()
+gwatch._reset_for_tests()
+status_mod._reset_for_tests()
+
+-- Negative: nil / non-repo path.
+local h_nil, err_nil = gwatch.start(nil)
+ok("git.watch.start nil repo_root → err",
+  h_nil == nil and type(err_nil) == "string", tostring(err_nil))
+local non_git_root = vim.fn.tempname() .. "-not-a-repo"
+vim.fn.mkdir(non_git_root, "p")
+local h_ng, err_ng = gwatch.start(non_git_root)
+ok("git.watch.start non-git path → err",
+  h_ng == nil and type(err_ng) == "string"
+    and err_ng:find("not a git repo"),
+  tostring(err_ng))
+pcall(vim.fn.delete, non_git_root, "rf")
+
+-- Build a fresh, fully-initialized git repo. Use `commit --allow-empty`
+-- so logs/HEAD exists (reflog is created on first ref update, not on
+-- bare `init` — so a repo with zero commits has no logs/ dir yet).
+local repo = vim.fn.tempname() .. "-gw-repo"
+vim.fn.mkdir(repo, "p")
+local function gsh(args)
+  return vim.system(args, { cwd = repo, text = true }):wait()
+end
+gsh({ "git", "init", "-q", "-b", "main", repo })
+gsh({ "git", "config", "user.email", "smoke@auto-core.test" })
+gsh({ "git", "config", "user.name",  "Smoke Test"             })
+gsh({ "git", "commit", "--allow-empty", "-q", "-m", "first" })
+
+-- Sanity: confirm both watched dirs exist now.
+ok("repo .git/ exists",       vim.fn.isdirectory(repo .. "/.git") == 1)
+ok("repo .git/logs/ exists",  vim.fn.isdirectory(repo .. "/.git/logs") == 1)
+
+-- Subscribe BEFORE starting the watch so initial publishes are caught.
+local seen = {}
+events.subscribe("core.git.state:changed", function(p, t)
+  seen[#seen + 1] = { topic = t, kind = p.kind, repo_root = p.repo_root, path = p.path }
+end)
+
+local handle, start_err = gwatch.start(repo)
+ok("git.watch.start succeeds on real repo",
+  handle ~= nil and type(handle.id) == "number", tostring(start_err))
+ok("git.watch.list reports one handle", #gwatch.list() == 1)
+ok("handle has two fs_event handles (git_dir/ + logs/)",
+  handle and #handle.fs_events == 2,
+  vim.inspect(handle and #handle.fs_events))
+ok("handle.repo_root + git_dir are normalized strings",
+  type(handle.repo_root) == "string"
+    and type(handle.git_dir) == "string"
+    and handle.git_dir:find("/%.git$") ~= nil,
+  vim.inspect({ repo_root = handle.repo_root, git_dir = handle.git_dir }))
+
+-- ── Kind = "index" via `git add` ────────────────────────────
+local before = #seen
+vim.fn.writefile({ "abc" }, repo .. "/a.txt")
+gsh({ "git", "add", "a.txt" })
+vim.wait(800, function()
+  for i = before + 1, #seen do
+    if seen[i].kind == "index" then return true end
+  end
+  return false
+end)
+local saw_index = false
+for i = before + 1, #seen do
+  if seen[i].kind == "index" then saw_index = true end
+end
+ok("git add fires kind='index'", saw_index,
+  vim.inspect({ before = before, total = #seen, slice = { unpack(seen, before + 1) } }))
+
+-- ── Kind = "reflog" + index via `git commit` ────────────────
+before = #seen
+-- Let the 200ms debounce window clear so commit's index/HEAD/logs
+-- mutations each get their own publish.
+vim.wait(300)
+gsh({ "git", "commit", "-q", "-m", "second" })
+vim.wait(800, function()
+  local saw_reflog = false
+  for i = before + 1, #seen do
+    if seen[i].kind == "reflog" then saw_reflog = true end
+  end
+  return saw_reflog
+end)
+local kinds_seen = {}
+for i = before + 1, #seen do kinds_seen[seen[i].kind] = true end
+ok("git commit fires kind='reflog' (logs/HEAD appended)",
+  kinds_seen.reflog == true,
+  vim.inspect({ before = before, kinds = kinds_seen, slice = { unpack(seen, before + 1) } }))
+-- HEAD file is rewritten on commit (the SHA the ref points to changes
+-- — though the HEAD file itself just says "ref: refs/heads/main" and
+-- doesn't change content, the inode mtime updates on some platforms).
+-- Don't strictly require "head" here — the load-bearing signal is
+-- "reflog" which we just asserted.
+
+-- ── kind = "head" via `git checkout -b` (HEAD content changes) ─
+before = #seen
+vim.wait(300)
+gsh({ "git", "checkout", "-q", "-b", "branch2" })
+vim.wait(800, function()
+  for i = before + 1, #seen do
+    if seen[i].kind == "head" then return true end
+  end
+  return false
+end)
+local saw_head = false
+for i = before + 1, #seen do
+  if seen[i].kind == "head" then saw_head = true end
+end
+ok("git checkout -b fires kind='head' (HEAD file rewritten)",
+  saw_head,
+  vim.inspect({ before = before, total = #seen, slice = { unpack(seen, before + 1) } }))
+
+-- ── refs/remotes is NOT watched ────────────────────────────
+-- Simulate a fetch-side write by creating the dir and dropping a ref
+-- file. The watcher must NOT publish for this.
+before = #seen
+vim.wait(300)
+vim.fn.mkdir(repo .. "/.git/refs/remotes/origin", "p")
+vim.fn.writefile({ "0000000000000000000000000000000000000000" },
+  repo .. "/.git/refs/remotes/origin/main")
+vim.wait(400)
+local saw_remote_publish = false
+for i = before + 1, #seen do
+  if seen[i].path and seen[i].path:find("/refs/remotes/") then
+    saw_remote_publish = true
+  end
+end
+ok("refs/remotes/ writes do NOT publish",
+  not saw_remote_publish,
+  vim.inspect({ added = #seen - before, slice = { unpack(seen, before + 1) } }))
+
+-- ── .lock files are filtered ───────────────────────────────
+before = #seen
+vim.wait(300)
+vim.fn.writefile({ "x" }, repo .. "/.git/index.lock")
+vim.wait(400)
+local saw_lock_publish = false
+for i = before + 1, #seen do
+  if seen[i].path and seen[i].path:match("%.lock$") then
+    saw_lock_publish = true
+  end
+end
+ok(".lock filename writes do NOT publish",
+  not saw_lock_publish,
+  vim.inspect({ added = #seen - before, slice = { unpack(seen, before + 1) } }))
+pcall(vim.fn.delete, repo .. "/.git/index.lock")
+
+-- ── status cache invalidation via the new topic ────────────
+-- Done BEFORE the debounce burst test below because that test writes
+-- garbage directly to `.git/index` (bypassing git tools) to verify
+-- the publisher coalesces — which corrupts the index and makes
+-- `git status` shell-out fail, so `status.get()` would no longer
+-- populate the cache. Order matters: assert cache plumbing while
+-- the repo is still healthy.
+status_mod.get(repo)
+ok("status cache is populated before invalidation test",
+  status_mod.is_cached(repo) == true)
+events.publish("core.git.state:changed", {
+  repo_root = repo,
+  git_dir   = repo .. "/.git",
+  kind      = "index",
+  path      = repo .. "/.git/index",
+})
+ok("status cache cleared by core.git.state:changed publish",
+  status_mod.is_cached(repo) == false)
+
+-- A publish naming a DIFFERENT repo_root must not affect this cache.
+status_mod.get(repo)
+events.publish("core.git.state:changed", {
+  repo_root = "/some/other/repo",
+  git_dir   = "/some/other/repo/.git",
+  kind      = "index",
+  path      = "/some/other/repo/.git/index",
+})
+ok("status cache survives publish for unrelated repo",
+  status_mod.is_cached(repo) == true)
+
+-- ── debounce coalescing on the SAME file ───────────────────
+-- Three rapid writes to .git/index within the 200ms debounce window
+-- should produce at most one publish. CORRUPTS the index — keep this
+-- test last among the repo-dependent assertions.
+before = #seen
+vim.wait(300)
+for i = 1, 3 do
+  vim.fn.writefile({ string.rep("X", i) }, repo .. "/.git/index")
+end
+vim.wait(400)
+local burst_count = 0
+for i = before + 1, #seen do
+  if seen[i].path and seen[i].path:sub(-#"/index") == "/index" then
+    burst_count = burst_count + 1
+  end
+end
+-- Bound matches fs.watch's own burst test (§26): libuv's inotify can
+-- fire multiple events per writefile on Linux, so 1–2 publishes for
+-- a burst of 3 is the realistic coalescing outcome. 3 (no coalescing)
+-- would fail.
+ok("debounce coalesces burst of 3 index writes to ≤2 publishes",
+  burst_count >= 1 and burst_count <= 2,
+  "got " .. tostring(burst_count))
+
+-- ── stop / list / stop_all ─────────────────────────────────
+gwatch.stop(handle)
+ok("after stop, list is empty", #gwatch.list() == 0)
+ok("stopped handle.fs_events is cleared",
+  handle and #handle.fs_events == 0)
+
+-- max_handles cap.
+local capped, cap_err = gwatch.start(repo, { max_handles = 1 })
+ok("max_handles cap refuses start when budget would overflow",
+  capped == nil and type(cap_err) == "string"
+    and cap_err:find("max_handles"),
+  tostring(cap_err))
+
+-- Restart for stop_all coverage.
+local h2 = gwatch.start(repo)
+ok("restart succeeds after stop", h2 ~= nil)
+gwatch.stop_all()
+ok("stop_all clears every handle", #gwatch.list() == 0)
+
+-- ── default constants are exposed ──────────────────────────
+ok("DEFAULT_DEBOUNCE_MS = 200", gwatch.DEFAULT_DEBOUNCE_MS == 200)
+ok("DEFAULT_MAX_HANDLES = 64",  gwatch.DEFAULT_MAX_HANDLES == 64)
+ok("FILENAME_KINDS includes HEAD/index/ORIG_HEAD/MERGE_HEAD",
+  gwatch.FILENAME_KINDS.HEAD == "head"
+    and gwatch.FILENAME_KINDS.index == "index"
+    and gwatch.FILENAME_KINDS.ORIG_HEAD == "merge"
+    and gwatch.FILENAME_KINDS.MERGE_HEAD == "merge")
+
+-- ── topic registry entry ──────────────────────────────────
+local topics = require("auto-core.events.topics")
+ok("core.git.state:changed is registered in topics.lua",
+  topics["core.git.state:changed"] ~= nil
+    and type(topics["core.git.state:changed"].doc) == "string"
+    and type(topics["core.git.state:changed"].payload) == "string")
+
+-- cleanup
+gwatch._reset_for_tests()
+status_mod._reset_for_tests()
+events._reset_for_tests()
+pcall(vim.fn.delete, repo, "rf")
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
