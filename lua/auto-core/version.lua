@@ -300,6 +300,43 @@ return {
   -- removals; existing handlers reading only `sender_bare` continue
   -- to work unchanged. Consumer side ships in auto-agents v0.2.19.
   -- `api_version` stays at `0.1`.
-  version     = "0.1.23",
+  -- v0.1.24: mailbox router + commands log observability. Closes
+  -- the silent-router gap that left wake dispatch + command
+  -- execution invisible to `:AutoCoreLog` (motivating incident:
+  -- 2026-05-18 claude-backed agents Ultron + Vision missed wake
+  -- nudges with zero ring entries to triage from). Two modules
+  -- gain log emissions; one new event-type set is registered:
+  --   - `mailbox/router.lua` — INFO on every inbox arrival
+  --     (`mailbox.router.inbox_arrival`), response arrival
+  --     (`mailbox.router.response_arrival`), and wake dispatch
+  --     (`mailbox.router.wake_dispatched`). DEBUG when wake
+  --     short-circuits on a mailbox with no wake config; WARN
+  --     when wake's `wake.command` references a command not in
+  --     the registry (almost always a setup-order bug).
+  --   - `mailbox/commands.lua` — `M.handle_message` refactored
+  --     into a logging-free `_handle_message_inner` + a thin
+  --     outer that emits one structured entry per call:
+  --     `mailbox.commands.command_executed` (INFO on ok=true /
+  --     ERROR on `handler_error` / WARN otherwise) or
+  --     `mailbox.commands.command_rejected` (WARN, covers
+  --     `bad_message`, `not_a_command`, `missing_command`,
+  --     `bad_args`, `unknown_command`).
+  --   - `plugin/auto-core.lua` — registers all six event types
+  --     under the `auto-core` plugin slug so
+  --     `:AutoCoreLogEvent list` surfaces them. Subscribe via
+  --     `:AutoCoreLogEvent notify <event>` to also see them as
+  --     toasts (off by default — emissions are ring-only INFO).
+  -- Structured fields on every entry: `mailbox`, `mailbox_full`,
+  -- `arrival_kind`, `arrival_id`, `command`, `ok`, `code`,
+  -- `error`, `correlation_id`, `dispatch_path` ("mailbox_wake"
+  -- vs "mailbox_executioner"), `executor_mbox`. Filterable from
+  -- `:AutoCoreLog` by component (`auto-core.mailbox.router` or
+  -- `auto-core.mailbox.commands`) or by event id.
+  -- Additive — no removals; no break-shape; existing event
+  -- topics (`core.mailbox:*`, `core.command:*`) continue to fire
+  -- unchanged alongside the new log entries. `api_version`
+  -- stays at `0.1`. ADR 0021 §10 (router observability) called
+  -- this out as deferred; this is that deferral resolved.
+  version     = "0.1.24",
   api_version = "0.1",
 }

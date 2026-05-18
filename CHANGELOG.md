@@ -10,6 +10,113 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.24] — 2026-05-18 — mailbox router + commands log observability
+
+Closes the silent-router gap that left wake dispatch and command
+execution invisible to `:AutoCoreLog`. Motivating incident: on
+2026-05-18 the claude-backed agents Ultron and Vision both missed
+their wake nudges (`hi-ultron`, `hi-vision` probe messages landed in
+their inboxes but no terminal output fired). The router had zero log
+emissions across its entire codepath — every wake dispatch, every
+command execution, every rejection ran silently — so there was
+nothing to triage from.
+
+This patch wires structured log entries through the router and the
+command registry. The asymmetry between claude-vs-gemini wake delivery
+that the probe surfaced can now be diagnosed by re-running the probe
+and inspecting `:AutoCoreLog`.
+
+### Added
+
+- **`auto-core.mailbox.router` log entries** (component
+  `auto-core.mailbox.router`):
+  - `auto-core.mailbox.router.inbox_arrival` — INFO. Every unseen
+    file landing in any registered mailbox's `inbox/` (fires once per
+    arrival, after the seen-set check). Fields:
+    `mailbox`/`mailbox_full`/`arrival_kind`/`arrival_id`/`msg_kind`/
+    `msg_from`/`msg_command`/`decode_error`/`executioner`.
+  - `auto-core.mailbox.router.response_arrival` — INFO. Same shape
+    for `responses/` arrivals.
+  - `auto-core.mailbox.router.wake_dispatched` — INFO. Emitted
+    immediately before `commands.handle_message` runs the wake hook.
+    Fields:
+    `mailbox`/`mailbox_full`/`arrival_kind`/`arrival_id`/`command`/
+    `synthesized_id`.
+  - `auto-core.mailbox.router.wake_skipped` — DEBUG when the
+    mailbox has no wake config (informational only), WARN when the
+    configured `wake.command` references a command not in the
+    registry (almost always a setup-order bug). Fields include a
+    `reason` discriminator (`no_wake_config` /
+    `command_not_registered`).
+
+- **`auto-core.mailbox.commands` log entries** (component
+  `auto-core.mailbox.commands`):
+  - `auto-core.mailbox.commands.command_executed` — fires on every
+    `M.handle_message` call where the handler ran. INFO on ok=true;
+    ERROR on `handler_error` (handler raised inside the pcall
+    barrier); WARN on app-level rejections (handler returned
+    ok=false with a non-rejection code). Fields:
+    `command`/`ok`/`code`/`error`/`msg_id`/`msg_from`/`msg_to`/
+    `correlation_id`/`dispatch_path`/`executor_mbox`.
+  - `auto-core.mailbox.commands.command_rejected` — WARN. Fires
+    when the call short-circuits before handler dispatch:
+    `bad_message`, `not_a_command`, `missing_command`, `bad_args`,
+    `unknown_command`. Same fields as `command_executed`.
+
+  Both event ids share component, level routing, and field shape so
+  `:AutoCoreLog` filtered to the component shows the full command
+  stream regardless of dispatch path (wake-dispatched commands and
+  executor-path commands flow through the same `handle_message`).
+
+- **Event registration in `plugin/auto-core.lua`.** All six event
+  ids registered under the `auto-core` plugin slug at load time;
+  `:AutoCoreLogEvent list` discovers them; users can subscribe to
+  any subset for toast notification via
+  `:AutoCoreLogEvent notify <event>`. Default is ring-only.
+
+### Changed
+
+- `lua/auto-core/mailbox/commands.lua` — `M.handle_message` is now a
+  thin wrapper around a private `_handle_message_inner` that returns
+  the response without logging. The outer `M.handle_message` calls
+  the inner, derives the log level + event id from the response, and
+  emits exactly one entry per call. **Public API unchanged**: same
+  signature, same return shape; only the structural refactor and the
+  added log emission are new.
+
+- `lua/auto-core/mailbox/router.lua` — `handle_inbox` and
+  `handle_response` now log after publishing their respective
+  `core.mailbox:*` events (unchanged event topics). `dispatch_wake`
+  logs at every exit point with a `reason` field on the
+  short-circuits.
+
+### Rationale
+
+ADR 0021 §10 flagged router observability as deferred work. This
+ships it as a focused patch: the existing log surface (auto-core's
+own ring + `:AutoCoreLog` viewer + persisted dump files under
+`stdpath('cache')/auto-core/dumps/`) is the natural channel — no new
+plumbing, just emissions at the right points. Components and event
+ids follow the conventions already established in ADR 0021 §5 / §6.
+
+### Verified
+
+- Smoke suite: 757 passed, 0 failed (unchanged from v0.1.23; the new
+  log emissions don't break any existing assertions since the ring
+  is internal and the tests don't pin its contents).
+- Loads cleanly via `require("auto-core")` — registration in
+  `plugin/auto-core.lua` happens lazily-safe (pcall'd) and skips if
+  the log module isn't available.
+
+### Consumer impact
+
+None — additive. No removals, no break-shape. Consumers continue to
+pin `version = "^0.1.0"` and pick up v0.1.24 on `:Lazy update`. The
+new event ids are opt-in for notification; the ring entries surface
+in `:AutoCoreLog` regardless without any consumer action.
+
+`api_version` stays at `0.1`.
+
 ## [v0.1.23] — 2026-05-18 — mailbox.router executor `ctx`: surface `correlation_id` + `message_id`
 
 Closes the round-trip-identity gap left by v0.1.12. v0.1.12 added

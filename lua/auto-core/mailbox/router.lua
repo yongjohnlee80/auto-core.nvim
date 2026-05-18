@@ -51,6 +51,13 @@ local registry  = require("auto-core.mailbox.registry")
 local message   = require("auto-core.mailbox.message")
 local commands  = require("auto-core.mailbox.commands")
 local transport = require("auto-core.mailbox.transport")
+local log       = require("auto-core.log")
+
+-- Component name used on every log entry from this module. Pairs
+-- with the `mailbox.router.*` event names registered in
+-- plugin/auto-core.lua so `:AutoCoreLog` triage can filter by either
+-- the component (`auto-core.mailbox.router`) or the event id.
+local LOG_COMPONENT = "auto-core.mailbox.router"
 
 local M = {}
 
@@ -229,11 +236,41 @@ end
 ---@param mid   string
 local function dispatch_wake(rec, kind, mid)
   local wake = rec.wake
-  if type(wake) ~= "table" or type(wake.command) ~= "string" then return end
+  if type(wake) ~= "table" or type(wake.command) ~= "string" then
+    -- No wake configured on this mailbox. Emit at DEBUG so triage
+    -- can confirm the recipient simply opted out, not that the
+    -- dispatcher crashed silently.
+    log.debug(LOG_COMPONENT, "wake skipped — no wake config on mailbox", {
+      event  = "auto-core.mailbox.router.wake_skipped",
+      fields = {
+        mailbox        = rec.bare_id,
+        mailbox_full   = rec.id,
+        arrival_kind   = kind,
+        arrival_id     = mid,
+        reason         = "no_wake_config",
+      },
+    })
+    return
+  end
   local spec = commands.get(wake.command)
   if not spec then
     -- No handler yet; we don't error or notify. Wake hooks are a
-    -- nice-to-have — the upstream event is the source of truth.
+    -- nice-to-have — the upstream event is the source of truth. Log
+    -- at WARN so the missing handler is visible during triage; a
+    -- wake configured against an unregistered command is almost
+    -- always a setup bug (handler module not loaded yet).
+    log.warn(LOG_COMPONENT,
+      "wake skipped — command not registered: " .. tostring(wake.command), {
+      event  = "auto-core.mailbox.router.wake_skipped",
+      fields = {
+        mailbox        = rec.bare_id,
+        mailbox_full   = rec.id,
+        arrival_kind   = kind,
+        arrival_id     = mid,
+        command        = wake.command,
+        reason         = "command_not_registered",
+      },
+    })
     return
   end
   -- Synthesize a command message just for the registry's shape
@@ -268,6 +305,22 @@ local function dispatch_wake(rec, kind, mid)
   }
   -- handle_message never raises; failures come back in the response
   -- table. We don't surface those further — wake is fire-and-forget.
+  -- Log the dispatch so `:AutoCoreLog` triage can see every wake
+  -- attempt + the structured outcome. handle_message itself emits its
+  -- own command_executed entry (component `auto-core.mailbox.commands`)
+  -- carrying the ok/code/error fields; this entry captures the
+  -- router-side decision to dispatch.
+  log.info(LOG_COMPONENT, "wake dispatched: " .. wake.command, {
+    event  = "auto-core.mailbox.router.wake_dispatched",
+    fields = {
+      mailbox        = rec.bare_id,
+      mailbox_full   = rec.id,
+      arrival_kind   = kind,
+      arrival_id     = mid,
+      command        = wake.command,
+      synthesized_id = msg.id,
+    },
+  })
   commands.handle_message(msg, ctx)
 end
 
@@ -415,6 +468,20 @@ local function handle_inbox(rec, mid)
     message        = msg,
     decode_error   = err,
   })
+  log.info(LOG_COMPONENT, "inbox arrival: " .. mid, {
+    event  = "auto-core.mailbox.router.inbox_arrival",
+    fields = {
+      mailbox      = rec.bare_id,
+      mailbox_full = rec.id,
+      arrival_kind = "inbox",
+      arrival_id   = mid,
+      msg_kind     = msg and msg.kind or nil,
+      msg_from     = msg and msg.from or nil,
+      msg_command  = msg and (msg.kind == "command" and msg.command or nil) or nil,
+      decode_error = err,
+      executioner  = rec.executioner == true,
+    },
+  })
   -- Executioner path: auto-dispatch command kind through the
   -- registry. Non-command messages still fall through to wake.
   if rec.executioner and msg and msg.kind == "command" then
@@ -435,6 +502,16 @@ local function handle_response(rec, cor)
     mailbox_full   = rec.id,
     correlation_id = cor,
     path           = rec.subs.responses .. "/" .. cor .. ".json",
+  })
+  log.info(LOG_COMPONENT, "response arrival: " .. cor, {
+    event  = "auto-core.mailbox.router.response_arrival",
+    fields = {
+      mailbox        = rec.bare_id,
+      mailbox_full   = rec.id,
+      arrival_kind   = "responses",
+      arrival_id     = cor,
+      correlation_id = cor,
+    },
   })
   dispatch_wake(rec, "responses", cor)
 end

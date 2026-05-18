@@ -19,6 +19,14 @@
 ---@module 'auto-core.mailbox.commands'
 
 local events = require("auto-core.events")
+local log    = require("auto-core.log")
+
+-- Component used on every log entry from this module. Routing the
+-- wrapper-rule wakes (auto-core.mailbox.router.dispatch_wake) and the
+-- executor-path commands (auto-core.mailbox.router.execute_command)
+-- both flow through M.handle_message, so a single log emission here
+-- captures every command attempt regardless of dispatch path.
+local LOG_COMPONENT = "auto-core.mailbox.commands"
 
 local M = {}
 
@@ -152,17 +160,15 @@ function M.reject_unknown(msg, reason)
   return payload
 end
 
----Convenience: dispatch a command message through the registry.
----Returns a response table — `{ok, value?, error?, code?}`. The
----caller (typically the host-side executioner that watches the
----`nvim` mailbox) is responsible for translating this into a
----`transport.complete` or `transport.fail`. This helper never
----raises — handler errors are pcall'd and turned into
----`{ok=false, code="handler_error", error=...}`.
+---Inner body of `handle_message` — returns the response table without
+---logging. The outer `handle_message` wraps this and emits one log
+---entry per call so the ring captures every command attempt
+---(wake-dispatch path AND executor path) with the final response
+---shape attached as structured fields.
 ---@param msg table
 ---@param ctx table?
 ---@return AutoCoreCommandResponse
-function M.handle_message(msg, ctx)
+local function _handle_message_inner(msg, ctx)
   if type(msg) ~= "table" then
     return { ok = false, code = "bad_message", error = "message is not a table" }
   end
@@ -239,6 +245,93 @@ function M.handle_message(msg, ctx)
   end
   events.publish("core.command:executed", { name = name, ok = true })
   return { ok = true, value = ret }
+end
+
+---Convenience: dispatch a command message through the registry.
+---Returns a response table — `{ok, value?, error?, code?}`. The
+---caller (typically the host-side executioner that watches the
+---`nvim` mailbox) is responsible for translating this into a
+---`transport.complete` or `transport.fail`. This helper never
+---raises — handler errors are pcall'd and turned into
+---`{ok=false, code="handler_error", error=...}`.
+---
+---Every call emits one log entry to component
+---`auto-core.mailbox.commands` so `:AutoCoreLog` triage can see the
+---full command stream — wake-dispatched + executor-path + rejections.
+---@param msg table
+---@param ctx table?
+---@return AutoCoreCommandResponse
+function M.handle_message(msg, ctx)
+  local response = _handle_message_inner(msg, ctx)
+
+  -- One log emission per call captures every command attempt with
+  -- the final response shape. `:AutoCoreLog` filtered to the
+  -- `auto-core.mailbox.commands` component shows the full command
+  -- execution stream — wake-dispatched commands (router synthesizes
+  -- the message), executor-path commands (router pulls from the
+  -- `nvim` inbox), and even bad inputs (bad_message / not_a_command
+  -- / unknown_command) so misuse is observable.
+  --
+  -- Level routing:
+  --   * ok=true               → INFO (normal dispatch).
+  --   * ok=false bad_*        → WARN (caller bug; schema or shape).
+  --   * ok=false unknown_*    → WARN (registry miss; usually setup bug).
+  --   * ok=false handler_error → ERROR (handler raised; surface loudly).
+  --   * any other ok=false    → WARN (handler rejected for app reason).
+  local response_ok = response and response.ok == true
+  local code = response and response.code or nil
+  local level
+  if response_ok then
+    level = "info"
+  elseif code == "handler_error" then
+    level = "error"
+  else
+    level = "warn"
+  end
+
+  local action = "command_executed"
+  if not response_ok then
+    if code == "bad_message" or code == "not_a_command"
+        or code == "missing_command" or code == "bad_args"
+        or code == "unknown_command" then
+      action = "command_rejected"
+    end
+  end
+
+  -- Message ID handy for cross-referencing with router arrival logs.
+  local msg_id   = (type(msg) == "table") and msg.id      or nil
+  local msg_from = (type(msg) == "table") and msg.from    or nil
+  local msg_to   = (type(msg) == "table") and msg.to      or nil
+  local cor      = (type(msg) == "table") and msg.correlation_id or nil
+  if type(cor) ~= "string" or cor == "" then cor = nil end
+
+  local log_fn = log[level]
+  local summary
+  if response_ok then
+    summary = "command ok: " .. tostring((type(msg) == "table") and msg.command or "?")
+  else
+    summary = string.format("command rejected (%s): %s",
+      tostring(code or "?"),
+      tostring((type(msg) == "table") and msg.command or "?"))
+  end
+
+  log_fn(LOG_COMPONENT, summary, {
+    event  = "auto-core.mailbox.commands." .. action,
+    fields = {
+      command        = (type(msg) == "table") and msg.command or nil,
+      ok             = response_ok,
+      code           = code,
+      error          = response and response.error or nil,
+      msg_id         = msg_id,
+      msg_from       = msg_from,
+      msg_to         = msg_to,
+      correlation_id = cor,
+      dispatch_path  = (ctx and ctx.reason) or nil,  -- "mailbox_wake" | "mailbox_executioner"
+      executor_mbox  = (ctx and ctx.mailbox) or nil,
+    },
+  })
+
+  return response
 end
 
 -- ── schema validator ───────────────────────────────────────

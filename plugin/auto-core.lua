@@ -453,3 +453,29 @@ end, {
 -- consumer plugin. We do NOT call setup() here — consumers install
 -- via lazy.nvim's `dependencies = { "yongjohnlee80/auto-core.nvim" }`
 -- and call setup themselves at the appropriate event.
+
+-- Register auto-core's OWN log events so `:AutoCoreLogEvent list`
+-- discovers them (ADR 0021 §5). These cover the mailbox router +
+-- command-execution observability surface added in v0.1.24 — every
+-- inbox arrival, response arrival, wake dispatch, wake skip, command
+-- execution, and command rejection emits an entry to the
+-- `auto-core.log` ring tagged with one of the event ids below.
+--
+-- Events fire at INFO (normal dispatch), WARN (rejections / setup
+-- bugs like an unregistered wake command), DEBUG (wake-skipped on a
+-- mailbox with no wake config — informational only), or ERROR (a
+-- handler raised inside the pcall barrier). Subscribe via
+-- `:AutoCoreLogEvent notify <event>` to also see them as toasts.
+do
+  local ok, log_mod = pcall(require, "auto-core.log")
+  if ok and log_mod and log_mod.events and log_mod.events.register then
+    log_mod.events.register("auto-core", {
+      "mailbox.router.inbox_arrival",
+      "mailbox.router.response_arrival",
+      "mailbox.router.wake_dispatched",
+      "mailbox.router.wake_skipped",
+      "mailbox.commands.command_executed",
+      "mailbox.commands.command_rejected",
+    })
+  end
+end
