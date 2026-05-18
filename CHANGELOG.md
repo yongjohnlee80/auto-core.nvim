@@ -10,6 +10,38 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.23] — 2026-05-18 — mailbox.router executor `ctx`: surface `correlation_id` + `message_id`
+
+Closes the round-trip-identity gap left by v0.1.12. v0.1.12 added
+`sender` / `sender_bare` to the executor ctx so command handlers
+could attribute calls to the actual sender. This patch adds the
+matching round-trip identity — `correlation_id` (from
+`claimed.correlation_id`) and `message_id` (executor-path file
+basename) — for handlers that need to defer a verdict past the
+synchronous response and route a follow-up message back to the
+sender keyed by correlation.
+
+The consumer side ships in auto-agents v0.2.19: the `diff_queue`
+mailbox handler now stashes the originator's full mailbox id +
+the command's correlation_id on its queue entry, so the eventual
+panel reject/accept emits a `kind="message"` verdict back to the
+originator's inbox via the standard router (wake fires
+automatically via `dispatch_wake`).
+
+### Changed
+
+- `mailbox/router.lua` `execute_command` ctx now carries two
+  additional fields on top of the v0.1.12 set:
+  - `correlation_id` — `claimed.correlation_id` when present (non-
+    empty string), nil otherwise.
+  - `message_id` — the executor-path file basename (`mid`).
+  Both are additive; existing handlers continue to work unchanged.
+
+### Compatibility
+
+Additive — no removals, no break-shape. `api_version` stays at
+`0.1`. Patch within v0.1.x per `auto-core-maintenance`.
+
 ## [v0.1.22] — 2026-05-18 — Lector follow-ups on the v0.1.21 visibility-gap fix
 
 Two non-blocking observations from `agent:lector`'s 2026-05-18 10:30 UTC review of v0.1.21, addressed in a fast-follow patch.

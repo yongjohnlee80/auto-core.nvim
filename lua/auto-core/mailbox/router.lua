@@ -360,7 +360,7 @@ local function execute_command(rec, mid, msg)
     -- owns the response now.
     return
   end
-  -- ctx surfaces TWO distinct identities to the command handler:
+  -- ctx surfaces THREE distinct concerns to the command handler:
   --   * mailbox / mailbox_full — the EXECUTOR's mailbox (where this code is
   --     dispatching from; usually `nvim`).
   --   * sender / sender_bare   — the SENDER's mailbox (the agent that
@@ -369,14 +369,26 @@ local function execute_command(rec, mid, msg)
   --     the diff_queue handler in auto-agents) read sender_bare. Without
   --     these fields, handlers historically had to guess from
   --     `ctx.mailbox` — which is the executor, not the sender.
+  --   * correlation_id / message_id — the round-trip identity of the
+  --     originating command. Handlers that defer a user-driven verdict
+  --     past the synchronous response (auto-agents' diff_queue stashes
+  --     correlation_id on its queue entry so the eventual reject/accept
+  --     can route a follow-up message back to the sender) need both.
+  --     message_id is the executor-path file basename; correlation_id is
+  --     `msg.correlation_id` (auto-core treats absent correlation as
+  --     "use the message id" — but handlers that want explicit semantics
+  --     read the field directly).
+  local cor = claimed.correlation_id
   local response = commands.handle_message(claimed, {
-    reason       = "mailbox_executioner",
-    mailbox      = rec.bare_id,
-    mailbox_full = rec.id,
-    sender       = claimed.from,
-    sender_bare  = type(claimed.from) == "string"
-                     and mb_path.bare_id(claimed.from)
-                     or nil,
+    reason         = "mailbox_executioner",
+    mailbox        = rec.bare_id,
+    mailbox_full   = rec.id,
+    sender         = claimed.from,
+    sender_bare    = type(claimed.from) == "string"
+                       and mb_path.bare_id(claimed.from)
+                       or nil,
+    correlation_id = (type(cor) == "string" and cor ~= "") and cor or nil,
+    message_id     = mid,
   })
   -- complete() handles the response envelope routing back to the
   -- sender. Errors during complete are logged but don't propagate;

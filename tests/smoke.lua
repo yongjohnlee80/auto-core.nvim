@@ -4303,6 +4303,18 @@ ok("ctx.sender_bare carries the bare form (agent:jarvis without instance suffix)
   #handler_invocations >= 1
     and handler_invocations[1].ctx.sender_bare == "agent:jarvis",
   vim.inspect(handler_invocations[1] and handler_invocations[1].ctx))
+-- v0.1.23: ctx also surfaces the round-trip identity so handlers that
+-- defer a verdict past the synchronous response (e.g. auto-agents'
+-- diff_queue) can stash the correlation_id and route a follow-up
+-- back to the sender keyed by it.
+ok("ctx.correlation_id carries the original message's correlation_id (when set)",
+  #handler_invocations >= 1
+    and handler_invocations[1].ctx.correlation_id == cor,
+  vim.inspect(handler_invocations[1] and handler_invocations[1].ctx))
+ok("ctx.message_id carries the executor-path file basename (mid)",
+  #handler_invocations >= 1
+    and handler_invocations[1].ctx.message_id == cmd_msg.id,
+  vim.inspect(handler_invocations[1] and handler_invocations[1].ctx))
 ok("core.command:executed fired with name='harpoon'",
   #executed_events >= 1 and executed_events[1].name == "harpoon")
 ok("core.mailbox:message_completed fired for the executioner-handled message",

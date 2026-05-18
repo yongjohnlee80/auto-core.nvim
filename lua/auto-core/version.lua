@@ -289,6 +289,17 @@ return {
   --     the section only covered the cleanup path. Section grows
   --     11 → 13 assertions. Suite 755 passed, 0 failed.
   -- Additive; api_version stays at 0.1.
-  version     = "0.1.22",
+  -- v0.1.23: mailbox.router executor `ctx` now also surfaces
+  -- `correlation_id` (from `claimed.correlation_id`) and `message_id`
+  -- (executor-path file basename) alongside the v0.1.12 `sender` /
+  -- `sender_bare` fields. Closes the round-trip-identity gap for
+  -- handlers that defer a user-driven verdict past the synchronous
+  -- response: auto-agents' `diff_queue` stashes both on its queue
+  -- entry so the eventual reject/accept emits a follow-up message
+  -- back to the originator via the standard router. Additive — no
+  -- removals; existing handlers reading only `sender_bare` continue
+  -- to work unchanged. Consumer side ships in auto-agents v0.2.19.
+  -- `api_version` stays at `0.1`.
+  version     = "0.1.23",
   api_version = "0.1",
 }
