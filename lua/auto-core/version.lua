@@ -178,6 +178,22 @@ return {
   -- removals, no break-shape, existing consumers ride through
   -- unchanged. Patch within v0.1.x per `auto-core-maintenance`;
   -- `api_version` stays at `0.1`.
-  version     = "0.1.17",
+  -- v0.1.18: ui.panel resize/lifecycle observability. New ring
+  -- emissions in `lua/auto-core/ui/panel.lua`:
+  --   - INFO `VimResized — terminal geometry changed` (host
+  --     terminal resize: tmux pane / wezterm split / kitty grow).
+  --     Anchors "what was the screen state when X happened".
+  --   - DEBUG-throttled `WinResized fired` (per-panel, 250ms
+  --     debounce key). Records `v:event.windows` so we see exactly
+  --     which winids moved during a drag.
+  --   - INFO `pin enforced — width re-clamped` when `enforce_pin`
+  --     actually bounces a width back to the user pin (was silent
+  --     before — sibling-plugin `:wincmd =` events left no trace).
+  --   - INFO `panel window closed externally` on `WinClosed` for
+  --     the panel's own winid. Catches close paths that bypass
+  --     `Panel:close()` and would otherwise leave singleton
+  --     tracking out of sync.
+  -- Additive diagnostic-only patch; `api_version` stays at `0.1`.
+  version     = "0.1.18",
   api_version = "0.1",
 }

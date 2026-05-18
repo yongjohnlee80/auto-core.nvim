@@ -503,6 +503,14 @@ function Panel:enforce_pin()
   local live = vim.api.nvim_win_get_width(self.winid)
   if live ~= self.user_width then
     pcall(vim.api.nvim_win_set_width, self.winid, self.user_width)
+    log_panel.info("pin enforced — width re-clamped",
+      { fields = {
+          panel       = self.opts.name,
+          winid       = self.winid,
+          before      = live,
+          after       = self.user_width,
+          marker_var  = self._marker_var,
+        } })
   end
 end
 
@@ -560,13 +568,79 @@ function M.new(opts)
   -- callback is a no-op when no pin is set or panel is closed).
   local group = vim.api.nvim_create_augroup(
     "AutoCorePanel_" .. p._marker_var, { clear = true })
+
+  -- WinResized fires once per window-geometry mutation — and can come
+  -- in bursts during a drag-resize or chained `:wincmd =`. The pin
+  -- enforcer is cheap to run on every fire, but the LOG emission is
+  -- throttled per panel so we don't blow the ring during a drag.
+  -- `v:event.windows` carries the affected winids; we record that
+  -- payload because it's load-bearing for "did anything touch the
+  -- panel" investigations after the fact.
   vim.api.nvim_create_autocmd("WinResized", {
     group = group,
-    callback = function() p:enforce_pin() end,
+    callback = function()
+      p:enforce_pin()
+      local windows = (vim.v.event and vim.v.event.windows) or {}
+      local panel_in_event = false
+      for _, w in ipairs(windows) do
+        if w == p.winid then panel_in_event = true; break end
+      end
+      log_panel.debug_throttled("win-resized:" .. p._marker_var, 250,
+        "WinResized fired",
+        { fields = {
+            panel             = opts.name,
+            panel_winid       = p.winid,
+            panel_in_event    = panel_in_event,
+            affected_winids   = windows,
+            live_panel_width  = (p:_is_open()
+              and vim.api.nvim_win_get_width(p.winid)) or nil,
+            user_pin          = p.user_width,
+            columns           = vim.o.columns,
+            lines             = vim.o.lines,
+          } })
+    end,
   })
+
+  -- VimResized = nvim's outer terminal got resized (host terminal,
+  -- tmux pane, alacritty grow/shrink, etc.). Single-fire per resize,
+  -- so plain INFO is appropriate; this is the high-signal anchor for
+  -- "what was the screen state when X happened" forensics.
   vim.api.nvim_create_autocmd("VimResized", {
     group = group,
-    callback = function() p:refresh_width() end,
+    callback = function()
+      p:refresh_width()
+      log_panel.info("VimResized — terminal geometry changed",
+        { fields = {
+            panel             = opts.name,
+            panel_winid       = p.winid,
+            columns           = vim.o.columns,
+            lines             = vim.o.lines,
+            live_panel_width  = (p:_is_open()
+              and vim.api.nvim_win_get_width(p.winid)) or nil,
+            user_pin          = p.user_width,
+          } })
+    end,
+  })
+
+  -- WinClosed: log when a window dies. If it's the panel's own
+  -- window, log INFO (correlates with the "panel went away without a
+  -- close() call" path that bypasses singleton tracking). For other
+  -- windows we don't emit — would be too chatty.
+  vim.api.nvim_create_autocmd("WinClosed", {
+    group = group,
+    callback = function(args)
+      local closed = tonumber(args.match)
+      if not closed then return end
+      if closed == p.winid then
+        log_panel.info("panel window closed externally",
+          { fields = {
+              panel       = opts.name,
+              winid       = closed,
+              marker_var  = p._marker_var,
+              via         = "WinClosed autocmd",
+            } })
+      end
+    end,
   })
 
   _registry[opts.name] = p
