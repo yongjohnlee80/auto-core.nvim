@@ -434,6 +434,11 @@ function M.namespace(component)
     info  = function(...) level_call(M.levels.INFO,  component, ...) end,
     debug = function(...) level_call(M.levels.DEBUG, component, ...) end,
     trace = function(...) level_call(M.levels.TRACE, component, ...) end,
+    error_throttled = function(key, every_ms, ...) _throttled_call(M.levels.ERROR, key, every_ms, component, ...) end,
+    warn_throttled  = function(key, every_ms, ...) _throttled_call(M.levels.WARN,  key, every_ms, component, ...) end,
+    info_throttled  = function(key, every_ms, ...) _throttled_call(M.levels.INFO,  key, every_ms, component, ...) end,
+    debug_throttled = function(key, every_ms, ...) _throttled_call(M.levels.DEBUG, key, every_ms, component, ...) end,
+    trace_throttled = function(key, every_ms, ...) _throttled_call(M.levels.TRACE, key, every_ms, component, ...) end,
   }
 end
 
