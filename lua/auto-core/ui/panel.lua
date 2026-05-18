@@ -514,6 +514,66 @@ function Panel:enforce_pin()
   end
 end
 
+---Close any window that holds this panel's tracked buffer but
+---lacks the panel marker. These are "unmarked siblings" —
+---typically created by nvim's internal layout reflow on
+---`VimResized` when a hard-pinned `winfixwidth` panel doesn't fit
+---in the post-resize column budget. The reflow can synthesize a
+---horizontal split inside the panel column whose new window
+---inherits the panel buffer but isn't routed through
+---`Panel:open()` (so no marker, no log).
+---
+---Called from the `VimResized` handler via `vim.schedule()` so
+---`nvim_win_close` runs OUTSIDE the autocmd context where E1312
+---(`Not allowed to change the window layout in this autocmd`)
+---would otherwise block it.
+---
+---Logs `unmarked sibling closed` at INFO with the offending winid
+---+ buffer, the closer's stack, and the surviving panel winid.
+---Silent fast-path when no siblings exist (the common case).
+---
+---Per ADR? + incident
+---`agents/white-vision/incidents/2026-05-18-auto-agents-panel-duplicated-recurrence.md`.
+function Panel:_cleanup_unmarked_siblings()
+  if not self:_is_open() then return end
+  local panel_winid = self.winid
+  local panel_bufnr = nil
+  do
+    local ok, b = pcall(vim.api.nvim_win_get_buf, panel_winid)
+    if ok then panel_bufnr = b end
+  end
+  if not panel_bufnr then return end
+
+  for _, w in ipairs(vim.api.nvim_list_wins()) do
+    if w ~= panel_winid then
+      local ok_buf, buf = pcall(vim.api.nvim_win_get_buf, w)
+      if ok_buf and buf == panel_bufnr then
+        -- Found a non-panel window holding the same buffer.
+        -- Verify it actually lacks the marker (defensive — the
+        -- panel singleton could in principle stamp two windows
+        -- with the same marker on adoption, though it shouldn't).
+        local ok_var, marker = pcall(vim.api.nvim_win_get_var,
+          w, self._marker_var)
+        local has_marker = ok_var and marker == 1
+        if not has_marker then
+          local ok_close, close_err = pcall(
+            vim.api.nvim_win_close, w, true)
+          log_panel.info("unmarked sibling closed",
+            { fields = {
+                panel        = self.opts.name,
+                panel_winid  = panel_winid,
+                panel_bufnr  = panel_bufnr,
+                closed_winid = w,
+                marker_var   = self._marker_var,
+                ok           = ok_close,
+                err          = ok_close and nil or tostring(close_err),
+              } })
+        end
+      end
+    end
+  end
+end
+
 ---Render the winbar to the panel window. `sections` is a list of
 ---`{ number, name }` entries; `focused` is the active number.
 ---Idempotent — safe to call after every section switch / config
@@ -602,23 +662,136 @@ function M.new(opts)
   })
 
   -- VimResized = nvim's outer terminal got resized (host terminal,
-  -- tmux pane, alacritty grow/shrink, etc.). Single-fire per resize,
-  -- so plain INFO is appropriate; this is the high-signal anchor for
-  -- "what was the screen state when X happened" forensics.
+  -- tmux pane, alacritty grow/shrink, e.g. omarchy/hyprland tile-
+  -- shrink on workspace co-tile). Single-fire per resize, so plain
+  -- INFO is appropriate; this is the high-signal anchor for "what
+  -- was the screen state when X happened" forensics.
+  --
+  -- v0.1.21 rewrite (panel-visibility branch). Three changes from
+  -- the original v0.1.18 shape:
+  --
+  --   1. **Log FIRST, refresh_width SECOND.** The v0.1.18 form put
+  --      refresh_width before the log call AND computed the
+  --      `live_panel_width` field via
+  --      `(p:_is_open() and nvim_win_get_width(p.winid)) or nil`
+  --      inside the field-table literal. If `p.winid` was racily
+  --      invalid (panel closed mid-handler), the field-table
+  --      evaluation threw BEFORE log_panel.info ever ran — and the
+  --      autocmd's implicit pcall swallowed the error. Net result:
+  --      no ring entry on VimResized in real sessions despite the
+  --      handler being correctly registered. Logging first
+  --      guarantees the anchor even if width-refresh fails.
+  --   2. **Defensive field computation via pcall**. `live_panel_width`
+  --      now goes through pcall so a stale winid produces `nil`
+  --      instead of an unlogged abort. The default falls back to
+  --      the singleton's cached `panel_width` known via
+  --      `_resolved_width()` so the field is always populated.
+  --   3. **Schedule the column-cleanup pass async.** After the
+  --      resize, nvim's layout reflow can split the panel column
+  --      horizontally (the load-bearing root cause from incident
+  --      `agents/white-vision/incidents/2026-05-18-auto-agents-panel-duplicated-recurrence.md`).
+  --      The new window inherits the panel buffer but lacks the
+  --      panel marker. We schedule a cleanup that closes any such
+  --      unmarked siblings OUTSIDE the autocmd context (where
+  --      `nvim_win_close` is forbidden with E1312). The cleanup
+  --      itself logs at INFO when it acts.
   vim.api.nvim_create_autocmd("VimResized", {
     group = group,
     callback = function()
-      p:refresh_width()
+      -- (1) Log first. Compute throwable fields defensively.
+      local live_width = nil
+      do
+        local ok, w = pcall(function()
+          if p:_is_open() then
+            return vim.api.nvim_win_get_width(p.winid)
+          end
+        end)
+        if ok then live_width = w end
+      end
       log_panel.info("VimResized — terminal geometry changed",
         { fields = {
             panel             = opts.name,
             panel_winid       = p.winid,
             columns           = vim.o.columns,
             lines             = vim.o.lines,
-            live_panel_width  = (p:_is_open()
-              and vim.api.nvim_win_get_width(p.winid)) or nil,
+            live_panel_width  = live_width,
             user_pin          = p.user_width,
           } })
+      -- (2) Now refresh the pin.
+      pcall(function() p:refresh_width() end)
+      -- (3) Schedule a layout-recovery cleanup pass for any
+      -- unmarked siblings that nvim's reflow created in the panel
+      -- column. Deferred so `nvim_win_close` is permitted.
+      vim.schedule(function() p:_cleanup_unmarked_siblings() end)
+    end,
+  })
+
+  -- WinNew: log when a new window comes into existence whose
+  -- buffer matches this panel's tracked buffer but whose window
+  -- lacks the marker. Closes the visibility gap from incident
+  -- `agents/white-vision/incidents/2026-05-18-auto-agents-panel-duplicated-recurrence.md`
+  -- — before this autocmd, unmarked siblings created by layout
+  -- reflow / `:split` / plugin-driven `nvim_open_win` were invisible
+  -- to the singleton's logging (no `panel opened` event fired
+  -- because the window wasn't created via `Panel:open()`).
+  --
+  -- Detection is deferred via `vim.schedule()` because at WinNew
+  -- firing time the new window's buffer may not yet be set
+  -- (`:split` initially places the parent's buffer, then nvim's
+  -- next BufWinEnter retargets if a different buffer was
+  -- requested). One main-loop tick later, the buffer is stable.
+  --
+  -- This is a DETECTION-only event — it does NOT close the
+  -- sibling itself; the post-VimResized scheduled
+  -- `_cleanup_unmarked_siblings` pass owns the close. A separate
+  -- detection event lets us tell apart "a layout reflow created
+  -- this sibling" (paired with a VimResized cleanup log ~ms later)
+  -- vs "some other path created it" (no VimResized cleanup follows,
+  -- so the sibling persists until next reflow or until the panel
+  -- guard's WinEnter swap fires).
+  vim.api.nvim_create_autocmd("WinNew", {
+    group = group,
+    callback = function()
+      vim.schedule(function()
+        if not p:_is_open() then return end
+        local panel_bufnr = nil
+        do
+          local ok, b = pcall(vim.api.nvim_win_get_buf, p.winid)
+          if ok then panel_bufnr = b end
+        end
+        if not panel_bufnr then return end
+
+        -- Look for windows that are NOT the panel itself but hold
+        -- the panel's tracked buffer + lack the panel marker.
+        local siblings = {}
+        for _, w in ipairs(vim.api.nvim_list_wins()) do
+          if w ~= p.winid then
+            local ok_buf, buf = pcall(vim.api.nvim_win_get_buf, w)
+            if ok_buf and buf == panel_bufnr then
+              local ok_var, marker = pcall(
+                vim.api.nvim_win_get_var, w, p._marker_var)
+              local has_marker = ok_var and marker == 1
+              if not has_marker then
+                siblings[#siblings + 1] = w
+              end
+            end
+          end
+        end
+        if #siblings == 0 then return end
+
+        log_panel.info("unmarked sibling detected (WinNew)",
+          { fields = {
+              panel             = opts.name,
+              panel_winid       = p.winid,
+              panel_bufnr       = panel_bufnr,
+              sibling_winids    = siblings,
+              n_siblings        = #siblings,
+              marker_var        = p._marker_var,
+              traceback         = debug.traceback("", 2),
+              columns           = vim.o.columns,
+              lines             = vim.o.lines,
+            } })
+      end)
     end,
   })
 

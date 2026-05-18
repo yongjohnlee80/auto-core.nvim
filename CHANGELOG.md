@@ -10,6 +10,80 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.21] — 2026-05-18 — ui.panel visibility-gap fix + VimResized log-anchor regression closed
+
+Closes [yongjohnlee80/auto-agents issue #3](https://github.com/yongjohnlee80/auto-agents/issues/3) — the recurring "two stacked auto-agents panels" bug surfaces after host-terminal resize (Hyprland tile-share, manual `<C-w>` window ops, tmux pane resize). Source-of-truth incident note: `agents/white-vision/incidents/2026-05-18-auto-agents-panel-duplicated-recurrence.md`.
+
+### Fixed
+
+- **VimResized log anchor regression (silent since v0.1.18).** The
+  `VimResized` autocmd registered in `panel.new()` would never
+  produce a ring entry in real sessions despite being correctly
+  installed (`AutoCorePanel_<name>:VimResized` confirmed via
+  `nvim_get_autocmds`). Root cause: the field-table literal
+  evaluated `(p:_is_open() and nvim_win_get_width(p.winid)) or nil`
+  for `live_panel_width` INSIDE the `{ fields = { ... } }` table.
+  When `p.winid` was racy-invalid (panel closed mid-handler), that
+  expression threw BEFORE `log_panel.info` saw the message. The
+  autocmd's implicit pcall swallowed the error. Net: the
+  observability ship's marquee anchor was effectively absent from
+  every real session ring dump. **The new form logs first,
+  computes throwable fields via explicit pcall, then refreshes
+  width.** The anchor lands reliably.
+
+### Added
+
+- **`WinNew` autocmd on the panel-singleton group.** Deferred via
+  `vim.schedule` so the new window's buffer is stable at check
+  time. When a new non-floating window appears holding the panel's
+  tracked buffer but lacking the panel marker, logs INFO with
+  `sibling_winids`, `panel_winid`, `panel_bufnr`, `marker_var`,
+  `columns` / `lines`, and `debug.traceback("", 2)`. Closes the
+  visibility gap from issue #3's recommendation #1 — previously
+  layout-reflow-created siblings were invisible to the singleton's
+  logging path because they bypassed `Panel:open()`. **Detection-
+  only**; doesn't close. Pairs with the cleanup pass below to
+  distinguish "reflow created this sibling" (paired with cleanup
+  log ~ms later) vs "some other path" (no cleanup log follows).
+- **`Panel:_cleanup_unmarked_siblings()` method**, scheduled via
+  `vim.schedule()` from the VimResized handler. Scans the tab for
+  windows holding the panel's tracked buffer but lacking the marker;
+  closes them. Runs OUTSIDE the autocmd context so `nvim_win_close`
+  is permitted (avoids the `E1312: Not allowed to change the window
+  layout in this autocmd` fallback-scratch-swap dance that left the
+  duplicate window visible in v0.1.18–v0.1.20). Logs INFO on each
+  close with `closed_winid`, `panel_winid`, `panel_bufnr`, `ok`,
+  `err`. Silent fast-path when no siblings exist.
+
+### Tests
+
+Section [52] of `tests/smoke.lua` adds 11 assertions covering: panel
+open sanity, VimResized log lands in ring (the regression guard),
+VimResized still logs when `p.winid` is racy-invalid, synthetic
+unmarked sibling spawnable via `nvim_open_win({split="below"})`,
+sibling has the panel buffer + lacks the marker, cleanup pass closes
+the sibling + logs `unmarked sibling closed` at INFO, idempotent
+fast-path silent when no siblings exist. Suite green at **753 passed,
+0 failed**.
+
+### What this patch does NOT do (deferred)
+
+- **Issue #3 recommendation #2 — panel-singleton invariant probe**
+  (periodic / `WinResized`-debounced check that "at most one window
+  per tab holds a given `BUF_OWNER_VAR` value"). Defer to a follow-up
+  patch once this patch proves itself in production.
+- **Issue #3 ancillary diff-cleanup audit items** at
+  `auto-agents/mcp/ws-server/diff.lua:671,677` +
+  `auto-agents/diff/ui.lua:199-214`. Out of scope; recommend a
+  dedicated `auto-agents` worktree.
+
+### Versioning
+
+Patch within v0.1.x per `auto-core-maintenance` additive-only
+discipline. Linear descendant of v0.1.20 (`cac427a`,
+"fix(log): add *_throttled methods to namespace handles"). Autovim
+consumer caret `^0.1.0` already covers.
+
 ## [v0.1.19] — 2026-05-17 — auto-core.git.watch + core.git.state:changed (ADR 0025 Phase 1)
 
 Closes the refresh-trigger gap that left UI consumers (auto-finder

@@ -230,6 +230,48 @@ return {
   --     `Panel:close()` and would otherwise leave singleton
   --     tracking out of sync.
   -- Additive diagnostic-only patch; `api_version` stays at `0.1`.
-  version     = "0.1.19",
+  -- v0.1.21: ui.panel visibility-gap fix per yongjohnlee80/auto-agents
+  -- issue #3 + incident
+  -- agents/white-vision/incidents/2026-05-18-auto-agents-panel-duplicated-recurrence.md.
+  -- Three changes to `lua/auto-core/ui/panel.lua`:
+  --   - Defensive VimResized handler closes a regression that
+  --     shipped silently with v0.1.18. The original form's
+  --     field-table literal evaluated
+  --     `(p:_is_open() and nvim_win_get_width(p.winid)) or nil`
+  --     INSIDE the `{ fields = { ... } }` literal. When `p.winid`
+  --     was racy-invalid (panel closed mid-handler), the field
+  --     evaluation threw BEFORE `log_panel.info` ever ran — and
+  --     the autocmd's implicit pcall swallowed the error. Net
+  --     result: zero VimResized log entries in real session ring
+  --     dumps despite the autocmd being correctly registered.
+  --     The new form logs FIRST, computes throwable fields via
+  --     explicit pcall, then refreshes width. The anchor now
+  --     lands reliably.
+  --   - New WinNew autocmd on the panel singleton's autocmd
+  --     group. Deferred via `vim.schedule` so the new window's
+  --     buffer is stable at check time. Logs INFO with
+  --     `sibling_winids`, `panel_winid`, `panel_bufnr`,
+  --     `marker_var`, `columns`/`lines`, and
+  --     `debug.traceback("", 2)` whenever a new non-floating
+  --     window appears holding the panel's tracked buffer but
+  --     lacking the panel marker. Closes the visibility gap from
+  --     the issue #3 investigation — previously these reflow-
+  --     created siblings were invisible to the singleton's
+  --     logging path because they bypassed `Panel:open()`.
+  --     Detection-only — doesn't close; pairs with the next item.
+  --   - New `Panel:_cleanup_unmarked_siblings()` method
+  --     scheduled via `vim.schedule()` from the VimResized
+  --     handler. Scans the tab for windows holding the panel's
+  --     tracked buffer but lacking the marker; closes them.
+  --     Runs OUTSIDE the autocmd context so `nvim_win_close` is
+  --     permitted (avoids the E1312 fallback-scratch-swap dance
+  --     that left the duplicate window visible in v0.1.18-v0.1.20).
+  --     Logs INFO on each close; silent fast-path when no
+  --     siblings exist.
+  -- Section [52] smoke adds 11 assertions covering all three
+  -- paths. Suite 753 passed, 0 failed. Additive — no removals,
+  -- no break-shape. `api_version` stays at `0.1`. Reviewed by
+  -- `agent:lector` (pending).
+  version     = "0.1.21",
   api_version = "0.1",
 }

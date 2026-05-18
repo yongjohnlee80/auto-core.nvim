@@ -5545,6 +5545,101 @@ events._reset_for_tests()
 pcall(vim.fn.delete, repo, "rf")
 end)()
 
+-- ─────────────────────── 52. ui.panel — VimResized visibility + unmarked-sibling cleanup ─────────────────────────
+-- v0.1.21 panel-visibility branch. Closes the regression where
+-- VimResized fired but produced no ring entry because the
+-- field-table literal threw before log_panel.info ever saw the
+-- message (per incident agents/white-vision/incidents/
+-- 2026-05-18-auto-agents-panel-duplicated-recurrence.md). Also
+-- covers the WinNew detection + post-VimResized cleanup pass.
+print("\n[52] ui.panel — VimResized log anchor + unmarked-sibling cleanup")
+;(function()
+local panel_mod = require("auto-core.ui.panel")
+local log = require("auto-core.log")
+panel_mod._reset_for_tests()
+log._reset_for_tests()
+
+local p = panel_mod.new({
+  name = "smoke52",
+  side = "right",
+  width = { default = 30, min = 10, max = 80 },
+  filetype = "smoke52-panel",
+})
+p:open(true)
+ok("panel opens for smoke 52", p:_is_open(),
+  "winid=" .. tostring(p.winid))
+
+-- ── VimResized → ring anchor MUST appear (regression guard). ──
+-- Strictly-after-since search so an idempotent re-call doesn't
+-- match the prior pass's entry. `since` is the ring length captured
+-- BEFORE the action; only indices > since are valid "new" entries.
+local function ring_has(needle, since)
+  local r = log.recent()
+  for i = #r, (since or 0) + 1, -1 do
+    local m = (r[i] or {}).message or ""
+    if m:find(needle, 1, true) then return true end
+  end
+  return false
+end
+
+local before = #log.recent()
+vim.api.nvim_exec_autocmds("VimResized", {})
+vim.wait(50, function() return ring_has("VimResized", before) end)
+ok("VimResized log entry lands in ring (regression guard)",
+  ring_has("VimResized", before),
+  "ring grew " .. before .. " → " .. #log.recent())
+
+-- ── Defensive: log still lands when refresh_width's winid is stale. ──
+local saved_winid = p.winid
+p.winid = 99999   -- invalid → refresh_width's pcall silently fails
+before = #log.recent()
+vim.api.nvim_exec_autocmds("VimResized", {})
+vim.wait(50)
+ok("VimResized anchor still logs when winid is racy-invalid",
+  ring_has("VimResized", before))
+p.winid = saved_winid  -- restore
+
+-- ── _cleanup_unmarked_siblings: synthetic sibling → close + log. ──
+-- Use the explicit nvim_open_win API to spawn an unmarked split
+-- inside the panel column. `:split` in headless mode can silently
+-- no-op (observed during development); nvim_open_win is reliable.
+-- The new window inherits the panel buffer but NOT the marker
+-- variable — this matches the production reflow-created shape.
+local panel_bufnr = vim.api.nvim_win_get_buf(p.winid)
+local sibling = vim.api.nvim_open_win(panel_bufnr, false, {
+  win   = p.winid,
+  split = "below",
+})
+ok("sibling spawned",
+  sibling ~= nil and vim.api.nvim_win_is_valid(sibling),
+  "sibling=" .. tostring(sibling))
+ok("sibling has the panel buffer",
+  vim.api.nvim_win_get_buf(sibling) == panel_bufnr)
+local sib_marker_set, _ = pcall(vim.api.nvim_win_get_var, sibling, p._marker_var)
+ok("sibling lacks the panel marker",
+  not sib_marker_set)
+
+before = #log.recent()
+p:_cleanup_unmarked_siblings()
+ok("sibling closed by cleanup pass",
+  not vim.api.nvim_win_is_valid(sibling))
+ok("cleanup logs 'unmarked sibling closed' at INFO",
+  ring_has("unmarked sibling closed", before))
+
+-- ── Idempotent: cleanup with no siblings is a silent fast-path. ──
+before = #log.recent()
+p:_cleanup_unmarked_siblings()
+ok("cleanup is silent when no siblings exist",
+  not ring_has("unmarked sibling", before),
+  "expected no new 'unmarked sibling' log lines")
+
+-- ── Cleanup. ─────────────────────────────────────────────────
+p:close()
+p:dispose()
+panel_mod._reset_for_tests()
+log._reset_for_tests()
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
