@@ -150,8 +150,9 @@ end
 ---  - `true`           → always toast
 ---  - `false`          → never toast
 ---  - `"auto"`         → toast iff `opts.event` is subscribed via
----                       `M.events.is_notify_enabled` (Step 3
----                       registry; Phase 1 stub returns false)
+---                       `M.events.is_notify_enabled` — reads the
+---                       persisted subscription set written by
+---                       `enable_notify` / `disable_notify`.
 ---  - `nil` (omitted)  → defer to the level's default sink
 ---                       (ERROR/WARN → toast, else silent)
 ---@param opts AutoCoreLogCallOpts?
