@@ -10,6 +10,34 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.22] — 2026-05-18 — Lector follow-ups on the v0.1.21 visibility-gap fix
+
+Two non-blocking observations from `agent:lector`'s 2026-05-18 10:30 UTC review of v0.1.21, addressed in a fast-follow patch.
+
+### Changed
+
+- **`Panel:_cleanup_unmarked_siblings` scopes to the current tab**
+  via `nvim_tabpage_list_wins(0)` instead of `nvim_list_wins()`.
+  Aligns with the incident language ("two stacked panels" is
+  always intra-tab) and prevents a theoretical cross-tab race
+  where a sibling editor split in tab B holding the panel buffer
+  would be force-closed by a VimResized cleanup pass in tab A.
+  Panels are tab-singletons in the auto-family model. Docstring
+  updated to call this out explicitly.
+
+### Tests
+
+Section [52] smoke now exercises the WinNew detection log path
+explicitly (was previously cleanup-only). Two new assertions:
+"WinNew detection logged 'unmarked sibling detected (WinNew)'" +
+"WinNew detection did NOT close the sibling (detection-only)".
+Section grows 11 → 13 assertions. Suite green at **755 passed, 0
+failed**.
+
+### Versioning
+
+Patch within v0.1.x — additive only; api_version stays at 0.1.
+
 ## [v0.1.21] — 2026-05-18 — ui.panel visibility-gap fix + VimResized log-anchor regression closed
 
 Closes [yongjohnlee80/auto-agents issue #3](https://github.com/yongjohnlee80/auto-agents/issues/3) — the recurring "two stacked auto-agents panels" bug surfaces after host-terminal resize (Hyprland tile-share, manual `<C-w>` window ops, tmux pane resize). Source-of-truth incident note: `agents/white-vision/incidents/2026-05-18-auto-agents-panel-duplicated-recurrence.md`.

@@ -271,7 +271,24 @@ return {
   -- Section [52] smoke adds 11 assertions covering all three
   -- paths. Suite 753 passed, 0 failed. Additive — no removals,
   -- no break-shape. `api_version` stays at `0.1`. Reviewed by
-  -- `agent:lector` (pending).
-  version     = "0.1.21",
+  -- `agent:lector` 2026-05-18 10:30 UTC — approved.
+  -- v0.1.22: Lector follow-ups from the v0.1.21 review. Two
+  -- non-blocking observations addressed:
+  --   - `_cleanup_unmarked_siblings` now scans
+  --     `nvim_tabpage_list_wins(0)` (current tab only) instead of
+  --     `nvim_list_wins()` (all tabs). Aligns with the incident
+  --     language and prevents a theoretical cross-tab race where a
+  --     sibling editor split in tab B holding the panel buffer
+  --     would be force-closed by a VimResized cleanup pass in tab A.
+  --     Panels are tab-singletons in the auto-family model; the
+  --     load-bearing reflow case is intra-tab only.
+  --   - Smoke section [52] now exercises the WinNew detection log
+  --     path explicitly (assertion `WinNew detection logged
+  --     'unmarked sibling detected (WinNew)'` + `WinNew detection
+  --     did NOT close the sibling (detection-only)`). Previously
+  --     the section only covered the cleanup path. Section grows
+  --     11 → 13 assertions. Suite 755 passed, 0 failed.
+  -- Additive; api_version stays at 0.1.
+  version     = "0.1.22",
   api_version = "0.1",
 }

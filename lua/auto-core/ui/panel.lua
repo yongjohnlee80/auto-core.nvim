@@ -514,14 +514,22 @@ function Panel:enforce_pin()
   end
 end
 
----Close any window that holds this panel's tracked buffer but
----lacks the panel marker. These are "unmarked siblings" —
----typically created by nvim's internal layout reflow on
----`VimResized` when a hard-pinned `winfixwidth` panel doesn't fit
----in the post-resize column budget. The reflow can synthesize a
----horizontal split inside the panel column whose new window
+---Close any window IN THE CURRENT TAB that holds this panel's
+---tracked buffer but lacks the panel marker. These are "unmarked
+---siblings" — typically created by nvim's internal layout reflow
+---on `VimResized` when a hard-pinned `winfixwidth` panel doesn't
+---fit in the post-resize column budget. The reflow can synthesize
+---a horizontal split inside the panel column whose new window
 ---inherits the panel buffer but isn't routed through
 ---`Panel:open()` (so no marker, no log).
+---
+---Scope is **current tab only** (`nvim_tabpage_list_wins(0)`).
+---Panels are tab-singletons in the auto-family model — a panel
+---window in tab A and a sibling editor split holding the panel
+---buffer in tab B should NOT interact (closing tab B's window
+---would surprise the user). The incident this method addresses
+---is intra-tab: nvim's reflow splits the panel column inside ONE
+---tab, never cross-tab.
 ---
 ---Called from the `VimResized` handler via `vim.schedule()` so
 ---`nvim_win_close` runs OUTSIDE the autocmd context where E1312
@@ -532,7 +540,7 @@ end
 ---+ buffer, the closer's stack, and the surviving panel winid.
 ---Silent fast-path when no siblings exist (the common case).
 ---
----Per ADR? + incident
+---Per incident
 ---`agents/white-vision/incidents/2026-05-18-auto-agents-panel-duplicated-recurrence.md`.
 function Panel:_cleanup_unmarked_siblings()
   if not self:_is_open() then return end
@@ -544,7 +552,15 @@ function Panel:_cleanup_unmarked_siblings()
   end
   if not panel_bufnr then return end
 
-  for _, w in ipairs(vim.api.nvim_list_wins()) do
+  -- Scope to the current tab. Looking up the panel's owning tab
+  -- via `nvim_win_get_tabpage(panel_winid)` would be more precise
+  -- (handles the case where the user has switched tabs while the
+  -- VimResized fired), but adds an extra API call to the hot path.
+  -- The current-tab assumption is correct for the load-bearing case
+  -- (post-resize cleanup runs synchronously after VimResized, before
+  -- the user can have switched tabs). Revisit if a future bug shows
+  -- cross-tab racing.
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
     if w ~= panel_winid then
       local ok_buf, buf = pcall(vim.api.nvim_win_get_buf, w)
       if ok_buf and buf == panel_bufnr then

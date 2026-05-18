@@ -5599,13 +5599,15 @@ ok("VimResized anchor still logs when winid is racy-invalid",
   ring_has("VimResized", before))
 p.winid = saved_winid  -- restore
 
--- ── _cleanup_unmarked_siblings: synthetic sibling → close + log. ──
--- Use the explicit nvim_open_win API to spawn an unmarked split
--- inside the panel column. `:split` in headless mode can silently
--- no-op (observed during development); nvim_open_win is reliable.
--- The new window inherits the panel buffer but NOT the marker
--- variable — this matches the production reflow-created shape.
+-- ── WinNew detection path: synthetic unmarked sibling → log. ──
+-- Spawn the sibling using the explicit nvim_open_win API (which
+-- doesn't copy `w:` vars unlike `vim.cmd("split")`, and works
+-- deterministically in headless mode). The panel-singleton's
+-- WinNew autocmd should detect this via its `vim.schedule`-deferred
+-- check, log INFO "unmarked sibling detected (WinNew)", and NOT
+-- close the sibling (detection-only path).
 local panel_bufnr = vim.api.nvim_win_get_buf(p.winid)
+local winnew_before = #log.recent()
 local sibling = vim.api.nvim_open_win(panel_bufnr, false, {
   win   = p.winid,
   split = "below",
@@ -5618,6 +5620,18 @@ ok("sibling has the panel buffer",
 local sib_marker_set, _ = pcall(vim.api.nvim_win_get_var, sibling, p._marker_var)
 ok("sibling lacks the panel marker",
   not sib_marker_set)
+
+-- Drain the schedule queue so the WinNew autocmd's deferred check
+-- runs. nvim.wait() with a poll predicate gives time for vim.schedule
+-- to flush.
+vim.wait(100, function()
+  return ring_has("unmarked sibling detected", winnew_before)
+end)
+ok("WinNew detection logged 'unmarked sibling detected (WinNew)'",
+  ring_has("unmarked sibling detected", winnew_before),
+  "expected WinNew log entry after nvim_open_win sibling spawn")
+ok("WinNew detection did NOT close the sibling (detection-only)",
+  vim.api.nvim_win_is_valid(sibling))
 
 before = #log.recent()
 p:_cleanup_unmarked_siblings()
