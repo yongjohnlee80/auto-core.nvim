@@ -10,6 +10,78 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.25] — 2026-05-20 — `ui.section.Registry:section_did_remount` hook
+
+Public hook for async-mount sections that swap their panel buffer
+after `Registry:focus` has already cached the buffer returned by
+`get_buffer()`. Motivating bug: auto-finder's dbase view returns a
+`shared.loading` placeholder from `get_buffer()` and lets a
+`vim.schedule`-deferred mount inside `on_focus` swap the real dbee
+drawer in. The registry's cache, the buffer-local `0..9`/`q`
+keymaps, and the panel winbar all stayed bound to the discarded
+placeholder. User-facing symptom: navigating to dbase for the first
+time hid the winbar and broke numeric section-hop until a later
+redraw (`<leader>e` toggle, auto-agents `<F5>`, anything that pokes
+`_refresh_winbar`) healed it.
+
+KB: `shared/synthesis/2026-05-20-auto-finder-dbase-winbar-remount-bug-analysis.md`,
+`shared/synthesis/auto-core-registry-keymap-rebind-hook.md`.
+
+### Added
+
+- **`Registry:section_did_remount(section_number, real_bufnr)`**
+  (`lua/auto-core/ui/section.lua`). Public method. After a section's
+  deferred mount swaps the panel to a new "real" buffer, the section
+  calls this hook to repair the registry's bindings:
+  - Updates `_bufs[section_number]` so a subsequent `focus()` reuses
+    the real buffer instead of issuing the placeholder dance again.
+  - Re-applies the private `apply_keymap` on the real buffer
+    (`0..9` → focus(i); `q` → panel close) — only when
+    `section_number` is the currently active section, since the
+    keymap surface is buffer-local.
+  - Refreshes the panel winbar (only when active).
+
+  Idempotent; short-circuits on invalid `real_bufnr` or inactive
+  section. Recommended call site: inside the section's deferred
+  `vim.schedule` callback, immediately after the real buffer is
+  placed in the panel window. Guard with whatever still-current
+  predicate the section already uses for cancellation.
+
+### Rationale
+
+ADR 0026 §A3 (auto-finder state/UI separation) leaned on a
+placeholder-buffer pattern for every async view. Phase 7 of that
+work narrowed the rollout to `dbase` only because the synchronous
+`Registry:focus` contract bound the keymap surface + winbar to the
+buffer `get_buffer()` returned — there was no public way to tell the
+registry "the active section now lives on a different bufnr." The
+companion KB todo `auto-core-registry-keymap-rebind-hook.md` proposed
+this exact surface so any future async-mount view (auto-finder
+neo-tree views, hypothetical remote/SSH views, etc.) can adopt the
+placeholder pattern without re-deriving the registry's private
+keymap helper.
+
+### Verified
+
+- Loads cleanly; method is dispatched off the existing Registry
+  metatable so no caller is affected unless they opt in.
+- Live test path: pointing `~/.config/nvim/lua/plugins/auto-core.lua`
+  at this worktree via `dir=` + `:Lazy reload auto-core.nvim`, then
+  cold-focusing dbase via `:AutoFinderFocus dbase`. Pre-fix: winbar
+  empty, `0..9` no-op on the dbee drawer. Post-fix (with the dbase
+  consumer-side flip in `auto-finder@dbase-rebind-on-remount`):
+  winbar populated, `0..9` switches views.
+
+### Consumer impact
+
+Additive. Existing `Registry:focus` path is unchanged; no break-
+shape. Consumers pinning `version = "^0.1.0"` pick up v0.1.25 on
+`:Lazy update` and gain the new method on every Registry returned by
+`require("auto-core").ui.section.attach(...)`.
+
+`api_version` stays at `0.1`. The new method rides along with the
+v0.1.x line's additive contract.
+
 ## [v0.1.24] — 2026-05-18 — mailbox router + commands log observability
 
 Closes the silent-router gap that left wake dispatch and command

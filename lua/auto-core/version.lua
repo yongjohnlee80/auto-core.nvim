@@ -337,6 +337,28 @@ return {
   -- unchanged alongside the new log entries. `api_version`
   -- stays at `0.1`. ADR 0021 §10 (router observability) called
   -- this out as deferred; this is that deferral resolved.
-  version     = "0.1.24",
+  -- v0.1.25: `ui.section.Registry:section_did_remount(N, bufnr)`
+  -- — public hook for async-mount sections to repair their
+  -- registry binding after a placeholder→real buffer swap.
+  -- Motivating bug: auto-finder's dbase view returns a
+  -- `shared.loading` placeholder from `get_buffer()` and swaps
+  -- the real dbee drawer in via a `vim.schedule`-deferred mount
+  -- from `on_focus`. Without this hook the registry's cached
+  -- bufnr, buffer-local `0..9`/`q` keymaps, and panel winbar
+  -- all remain bound to the discarded placeholder — the
+  -- user-facing symptom is "winbar disappears on first dbase
+  -- focus + numeric section-hop stops working" until a later
+  -- redraw (`<leader>e` toggle, auto-agents panel open, etc.)
+  -- re-triggers `_refresh_winbar`. The new method updates
+  -- `_bufs[N]`, re-applies the private `apply_keymap` (only
+  -- when N is the active section — keymap surface is
+  -- buffer-local), and refreshes the winbar. Idempotent;
+  -- short-circuits on invalid bufnr or inactive section.
+  -- Additive — no removals, no break-shape; existing
+  -- `Registry:focus` path is unchanged. `api_version` stays at
+  -- `0.1` — the new method is small enough to ride along with
+  -- the v0.1.x line's existing additive contract rather than
+  -- flag an api-version minor bump on its own.
+  version     = "0.1.25",
   api_version = "0.1",
 }

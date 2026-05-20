@@ -139,6 +139,42 @@ function Registry:focus(key)
   return true, nil
 end
 
+---Notify the registry that a section has swapped from the buffer
+---returned by `get_buffer()` to a different "real" buffer — the
+---placeholder-to-real transition used by async-mount views.
+---
+---Without this hook, the registry's cache + buffer-local keymaps +
+---winbar are bound to the bufnr `get_buffer()` originally returned.
+---When a section later does its own `nvim_win_set_buf` (e.g.
+---auto-finder's dbase view swapping a `shared.loading` placeholder
+---for the real dbee drawer in its `vim.schedule`-deferred mount),
+---the new buffer carries none of those bindings: `0..9` and `q`
+---don't switch sections / close the panel, and the registry would
+---next focus() against a stale cached bufnr.
+---
+---Calling `section_did_remount(N, real_bufnr)` repairs all three:
+---  - updates `_bufs[N]` so the next focus() reuses the real buffer
+---  - re-applies `apply_keymap` on the real buffer (only when N is
+---    the active section — keymap surface is buffer-local)
+---  - refreshes the winbar (only when N is the active section)
+---
+---Idempotent — safe to call twice, safe to call from inside a
+---deferred callback that lost its still-current race (the buffer
+---check + active-section guard short-circuit).
+---@param section_number integer
+---@param real_bufnr integer
+function Registry:section_did_remount(section_number, real_bufnr)
+  if type(section_number) ~= "number" then return end
+  if not real_bufnr or not vim.api.nvim_buf_is_valid(real_bufnr) then
+    return
+  end
+  self._bufs[section_number] = real_bufnr
+  if self.active == section_number then
+    apply_keymap(self, real_bufnr)
+    self:_refresh_winbar()
+  end
+end
+
 ---Add a section at runtime. Re-renders the winbar.
 ---@param def AutoCoreSectionDef
 function Registry:add(def)
