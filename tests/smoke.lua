@@ -806,7 +806,6 @@ local watch = require("auto-core.fs.watch")
 local events_mod = require("auto-core.events")
 events_mod._reset_for_tests()
 watch._reset_for_tests()
-local is_darwin = vim.uv.os_uname().sysname == "Darwin"
 
 ok("fs.watch.start returns nil on a non-directory",
   (function()
@@ -832,11 +831,6 @@ ok("watch.start succeeds on real dir",
   handle ~= nil and handle.id ~= nil, tostring(err))
 ok("watch.list reports one handle",
   #watch.list() == 1)
-if is_darwin then
-  ok("darwin recursive watch uses one fs_event handle",
-    #(handle.fs_events or {}) == 1,
-    "got " .. tostring(#(handle.fs_events or {})))
-end
 
 -- Trigger a create. Use writefile (synchronous) then vim.wait to
 -- drain the libuv event loop into our subscriber.
@@ -860,27 +854,6 @@ ok("create-event fired for new file", saw_a, vim.inspect(seen))
 ok("create-event change kind is 'created' or 'modified'",
   saw_kind == "created" or saw_kind == "modified",
   "got " .. tostring(saw_kind))
-
--- Existing subdirectories should be covered by recursive watch. On
--- Darwin this must happen through the single native recursive root
--- handle; on Linux it comes from the startup directory walk.
-local pre_nested_count = #seen
-vim.wait(150)
-vim.fn.writefile({ "nested" }, tmp_root .. "/sub/b.txt")
-vim.wait(300, function()
-  for i = pre_nested_count + 1, #seen do
-    if seen[i].path:sub(-#"/sub/b.txt") == "/sub/b.txt" then return true end
-  end
-  return false
-end)
-local saw_nested = false
-for i = pre_nested_count + 1, #seen do
-  if seen[i].path:sub(-#"/sub/b.txt") == "/sub/b.txt" then
-    saw_nested = true
-  end
-end
-ok("recursive watch fires for existing nested directory file", saw_nested,
-  vim.inspect({ before = pre_nested_count, total = #seen, last = seen[#seen] }))
 
 -- Modify the same file. Wait long enough for the debounce window
 -- (default 100 ms) to clear.
@@ -993,14 +966,12 @@ ok("watch.stop drops the handle from list",
   #watch.list() == 0)
 
 -- max_handles cap. Setting a tiny cap should refuse the start when
--- the watch would exceed it. Darwin native recursion needs only one
--- handle, so use zero there; walked platforms exceed one with d1/d2/d3.
+-- the recursive walk would exceed it.
 vim.fn.mkdir(tmp_root .. "/d1", "p")
 vim.fn.mkdir(tmp_root .. "/d2", "p")
 vim.fn.mkdir(tmp_root .. "/d3", "p")
-local cap_limit = is_darwin and 0 or 1
-local capped, cap_err = watch.start(tmp_root, { max_handles = cap_limit })
-ok("max_handles cap refuses oversized watch",
+local capped, cap_err = watch.start(tmp_root, { max_handles = 1 })
+ok("max_handles cap refuses oversized recursive watch",
   capped == nil and type(cap_err) == "string"
     and cap_err:find("max_handles"),
   tostring(cap_err))

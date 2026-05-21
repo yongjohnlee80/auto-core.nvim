@@ -13,23 +13,19 @@
 ---  watch.list()              → handle[]
 ---
 ---Default opts:
----  recursive    = true                    -- native recursive on Darwin;
----                                      -- otherwise walk + watch subdirs
+---  recursive    = true                    -- walk + watch each subdir
 ---  debounce_ms  = 100                     -- per-path coalescing window
 ---  ignore       = DEFAULT_IGNORE          -- Lua patterns
 ---  max_handles  = 131072                  -- session-wide safety cap
 ---
 ---Implementation notes:
----  - libuv's recursive fs_event support is platform-specific. On
----    Darwin we use one root watcher with `{ recursive = true }`
----    because FSEvents can cover the subtree without spending one fd
----    per directory. On platforms without native recursive support
----    (notably Linux), we walk the tree once at start time and open
----    one handle per subdir (skipping ignored ones). Subdirs created
----    AFTER a walked watch starts are NOT auto-watched in this
----    baseline — a Phase 5+ refinement can add "self-extending"
----    recursion by listening for our own `core.file:created` and
----    starting a new handle when the path is a directory.
+---  - libuv's `fs_event` is NOT recursive on Linux. We walk the tree
+---    once at start time and open one handle per subdir (skipping
+---    ignored ones). Subdirs created AFTER the watch starts are NOT
+---    auto-watched in this baseline — a Phase 5+ refinement can add
+---    "self-extending" recursion by listening for our own
+---    `core.file:created` and starting a new handle when the path is
+---    a directory.
 ---  - Events fire on the libuv thread; we always publish via
 ---    `vim.schedule` so subscribers run on the main loop.
 ---  - `should_ignore` runs on every event and is the hot path — keep
@@ -103,11 +99,6 @@ local function _count_active_handles()
     n = n + #state.fs_events
   end
   return n
-end
-
-local function is_darwin()
-  local ok, uname = pcall(vim.uv.os_uname)
-  return ok and uname and uname.sysname == "Darwin"
 end
 
 -- ── helpers ──────────────────────────────────────────────────
@@ -189,24 +180,18 @@ local function publish_event(full_path, change_kind)
   })
 end
 
-local function join_event_path(dir, filename)
-  if filename:sub(1, 1) == "/" then return filename end
-  return dir .. "/" .. filename
-end
-
 -- Start a single fs_event handle on one directory. Wires it to the
 -- shared state's debounce + ignore + classification logic.
 ---@param dir string
 ---@param state AutoCoreWatchHandle
----@param recursive boolean?
 ---@return userdata? handle, string? err
-local function start_one_dir(dir, state, recursive)
+local function start_one_dir(dir, state)
   local fs_event = vim.uv.new_fs_event()
   if not fs_event then return nil end
   local ok, err = pcall(function()
-    fs_event:start(dir, { recursive = recursive == true }, function(uv_err, filename, uv_events)
+    fs_event:start(dir, {}, function(uv_err, filename, uv_events)
       if uv_err or not filename then return end
-      local full = join_event_path(dir, filename)
+      local full = dir .. "/" .. filename
       if should_ignore(full, state.opts.ignore) then return end
       local kind = classify(full, uv_events)
       if not debounce_check(state, full) then return end
@@ -255,9 +240,7 @@ function M.start(path, opts)
     return nil, "auto-core.fs.watch: not a directory: " .. tostring(root)
   end
 
-  local native_recursive = opts.recursive and is_darwin()
-  local dirs = native_recursive and { root }
-    or (opts.recursive and collect_dirs(root, opts.ignore) or { root })
+  local dirs = opts.recursive and collect_dirs(root, opts.ignore) or { root }
   if _count_active_handles() + #dirs > opts.max_handles then
     return nil, string.format(
       "auto-core.fs.watch: would exceed max_handles cap (%d active + %d new > %d)",
@@ -274,7 +257,7 @@ function M.start(path, opts)
   }
 
   for _, d in ipairs(dirs) do
-    local h = start_one_dir(d, state, native_recursive and d == root)
+    local h = start_one_dir(d, state)
     if h then state.fs_events[#state.fs_events + 1] = h end
   end
 
