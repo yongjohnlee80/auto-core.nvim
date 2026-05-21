@@ -10,6 +10,53 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.28] — 2026-05-20 — `ui.float.multi` opener-winid restore on close
+
+Fixes "I closed the `:AutoCoreLog` dumps viewer with `q` and ended up
+in the auto-finder panel instead of back in my editor." Pre-v0.1.28
+`Float:close()` left focus to whatever window nvim's default
+window-traversal algorithm picked next — frequently the tallest
+remaining window, which is the auto-finder panel on the left.
+
+### Fixed
+
+- **`lua/auto-core/ui/float/multi.lua`** `Float:open()` snapshots
+  `vim.api.nvim_get_current_win()` into `self._opener_winid`
+  BEFORE opening any pane (so we capture the user's real
+  pre-float window, not the bg). `Float:close()` snapshots pane
+  winids BEFORE the close loop (so they can be excluded from
+  the restore check), and after closing, restores focus to the
+  opener via `nvim_set_current_win`. Skipped when:
+  - opener is nil (open didn't capture — e.g. invoked from a
+    context where `nvim_get_current_win` returned an invalid
+    winid);
+  - opener is no longer valid (window closed during the float's
+    lifetime — e.g. a `:q` from a sibling pane via tab-cycle);
+  - opener was itself a pane of this float (the self-spawn case
+    — a sub-float opened from one of this float's own panes).
+
+  Idempotent re-open of an already-open float short-circuits
+  before the capture, so a second `open()` doesn't overwrite the
+  original opener.
+
+### Verified
+
+- `tests/smoke.lua` section `[43]` adds 7 assertions covering
+  capture-on-open, focus-moved-off-opener, restored-on-close,
+  cleared-after-close, captured-is-not-bg-pane, survives-
+  invalidated-opener (kill the opener mid-float-lifetime via
+  `nvim_win_close`), and the no-restore-attempted invariant
+  when the opener went stale. Suite green at **764 passed / 0
+  failed** (was 757/0).
+
+### Consumer impact
+
+Strictly additive. No API surface change. Consumers pinning
+`version = "^0.1.0"` pick up via `:Lazy update`. The new
+`self._opener_winid` field is module-internal — not part of the
+public Registry API and not documented for consumers to read.
+`api_version` stays at `0.1`.
+
 ## [v0.1.27] — 2026-05-21 — macOS native-recursive `fs.watch` handler (segregated)
 
 Adds an FSEvents-backed recursive watcher for macOS. The Linux walker

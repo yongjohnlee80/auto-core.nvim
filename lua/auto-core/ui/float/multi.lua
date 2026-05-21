@@ -342,6 +342,20 @@ function Float:open()
     self:focus(self.opts.initial_focus or "middle")
     return
   end
+  -- v0.1.28: capture the originating window so `Float:close()`
+  -- can restore focus to it. Without this, nvim's default
+  -- "which window is current after we just closed three at once"
+  -- algorithm tends to land on whatever tall left-side window is
+  -- still visible — most often the auto-finder panel — even
+  -- though the user opened the float from somewhere else entirely.
+  -- Captured BEFORE any pane opens so we get the real pre-float
+  -- window, not the bg.
+  local cur = vim.api.nvim_get_current_win()
+  if cur and vim.api.nvim_win_is_valid(cur) then
+    self._opener_winid = cur
+  else
+    self._opener_winid = nil
+  end
   local layout = self:_compute_layout()
   self.panes = {}
   self:_open_bg(layout.bg)
@@ -380,6 +394,15 @@ function Float:close()
     pcall(vim.api.nvim_del_augroup_by_id, self._augroup)
     self._augroup = nil
   end
+  -- Snapshot pane winids BEFORE close so the restore-focus
+  -- check below can exclude them (self-spawn case: a sub-float
+  -- opened from one of this float's own panes).
+  local pane_wins = {}
+  if self.panes then
+    for _, p in pairs(self.panes) do
+      if p.winid then pane_wins[p.winid] = true end
+    end
+  end
   if self.panes then
     for _, p in pairs(self.panes) do
       if p.winid and vim.api.nvim_win_is_valid(p.winid) then
@@ -391,6 +414,17 @@ function Float:close()
     end
   end
   self.panes = {}
+  -- v0.1.28: restore focus to the originating window. Skip when
+  -- the opener was nil (open didn't capture), no longer valid
+  -- (window closed during the float's lifetime), or was itself
+  -- a pane of this float (self-spawn — opener doesn't exist
+  -- anymore after the close loop above).
+  local opener = self._opener_winid
+  self._opener_winid = nil
+  if opener and not pane_wins[opener]
+      and vim.api.nvim_win_is_valid(opener) then
+    pcall(vim.api.nvim_set_current_win, opener)
+  end
   events.publish("float:closed", {
     kind = "multi",
     name = self.opts.name,

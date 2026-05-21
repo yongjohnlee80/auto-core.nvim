@@ -436,6 +436,33 @@ return {
   -- debounce prune fix and the health-check copy edit. Consumers
   -- on macOS pick up actual coverage on large workspaces for the
   -- first time. `api_version` stays at `0.1`.
-  version     = "0.1.27",
+  -- v0.1.28: `ui.float.multi` opener-winid capture + restore.
+  -- Bug: closing a multi-pane float (e.g. `:AutoCoreLog` viewer
+  -- via the buffer-local `q` keymap) left focus on whatever
+  -- window nvim's default traversal picked next — frequently
+  -- the auto-finder panel on the left, which is tall and
+  -- therefore "wins" the next-window pick. User-visible symptom:
+  -- "I closed the dumps viewer and ended up in the auto-finder
+  -- tree, not back in the editor I was working in."
+  -- Fix: `Float:open()` snapshots `vim.api.nvim_get_current_win()`
+  -- into `self._opener_winid` BEFORE opening any pane (so we get
+  -- the user's real pre-float window, not the bg). `Float:close()`
+  -- snapshots the pane winids BEFORE the close loop (so it can
+  -- exclude them from the restore check) and, after closing,
+  -- restores focus to the opener via `nvim_set_current_win` —
+  -- skipping when the opener is nil (open didn't capture), no
+  -- longer valid (window closed during the float's lifetime),
+  -- or was itself a pane of this float (self-spawn case).
+  -- Idempotent re-open does NOT overwrite the captured opener
+  -- (early-return on `is_open()` short-circuits before the
+  -- capture line). Smoke section [43] adds 7 assertions:
+  -- captured-on-open, focus-moved-off-opener, restored-on-close,
+  -- cleared-after-close, captured-not-bg, survives-invalidated-
+  -- opener (kill the opener mid-float-lifetime), and the no-
+  -- restore-attempted invariant when opener went stale. Suite
+  -- green at 764 / 0 (was 757 / 0). Strictly additive — no API
+  -- surface change, `api_version` stays at `0.1`. Consumers
+  -- pinning `^0.1.0` pick up via `:Lazy update`.
+  version     = "0.1.28",
   api_version = "0.1",
 }

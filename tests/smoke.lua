@@ -2899,6 +2899,73 @@ ok("percentage: middle window width claims rest",
   vim.api.nvim_win_get_width(m_win) == 14, "got " .. vim.api.nvim_win_get_width(m_win))
 m_perc:dispose()
 
+-- v0.1.28: opener-winid capture + restore. The float must
+-- remember which window the user was in when it opened so that
+-- close() doesn't leave focus on whatever window nvim's default
+-- traversal happens to pick (frequently the tall left-side
+-- auto-finder panel).
+local opener_buf = vim.api.nvim_create_buf(false, true)
+vim.cmd("vsplit")
+local opener_win = vim.api.nvim_get_current_win()
+vim.api.nvim_win_set_buf(opener_win, opener_buf)
+local m_op = mfloat.new({
+  name  = "smoke_opener_restore",
+  panes = { middle = {} },
+})
+m_op:open()
+ok("opener_winid captured on open",
+  m_op._opener_winid == opener_win,
+  "got " .. tostring(m_op._opener_winid)
+    .. " expected " .. tostring(opener_win))
+ok("focus moved off opener after open",
+  vim.api.nvim_get_current_win() ~= opener_win)
+m_op:close()
+ok("close restored focus to opener",
+  vim.api.nvim_get_current_win() == opener_win,
+  "got " .. tostring(vim.api.nvim_get_current_win())
+    .. " expected " .. tostring(opener_win))
+ok("opener_winid cleared after close",
+  m_op._opener_winid == nil)
+m_op:dispose()
+
+-- Opener captured BEFORE the bg pane opens — bg is not focusable
+-- but we still want to confirm the captured winid isn't the bg
+-- (regression guard).
+vim.api.nvim_set_current_win(opener_win)
+local m_op2 = mfloat.new({
+  name  = "smoke_opener_not_bg",
+  panes = { middle = {} },
+})
+m_op2:open()
+ok("captured opener != bg pane",
+  m_op2._opener_winid ~= m_op2:winid("bg"))
+m_op2:dispose()
+
+-- Invalid opener (opener window closed during the float's
+-- lifetime): close should not crash, and shouldn't try to
+-- restore a dead winid.
+local victim_buf = vim.api.nvim_create_buf(false, true)
+vim.cmd("vsplit")
+local victim_win = vim.api.nvim_get_current_win()
+vim.api.nvim_win_set_buf(victim_win, victim_buf)
+local m_op3 = mfloat.new({
+  name  = "smoke_opener_invalidated",
+  panes = { middle = {} },
+})
+m_op3:open()
+-- Kill the opener while the float is up.
+pcall(vim.api.nvim_win_close, victim_win, true)
+local ok_close = pcall(function() m_op3:close() end)
+ok("close survives invalidated opener", ok_close)
+ok("invalidated opener doesn't crash, no restore attempted",
+  not vim.api.nvim_win_is_valid(victim_win))
+m_op3:dispose()
+
+-- Cleanup the opener split we made above.
+if vim.api.nvim_win_is_valid(opener_win) then
+  pcall(vim.api.nvim_win_close, opener_win, true)
+end
+
 mfloat._reset_for_tests()
 end)()
 
