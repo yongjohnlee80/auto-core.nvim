@@ -16,7 +16,7 @@
 ---  recursive    = true                    -- walk + watch each subdir
 ---  debounce_ms  = 100                     -- per-path coalescing window
 ---  ignore       = DEFAULT_IGNORE          -- Lua patterns
----  max_handles  = 1024                    -- session-wide safety cap
+---  max_handles  = 131072                  -- session-wide safety cap
 ---
 ---Implementation notes:
 ---  - libuv's `fs_event` is NOT recursive on Linux. We walk the tree
@@ -44,18 +44,48 @@ local M = {}
 -- Patterns matched against the FULL path. Anchored to `/` to prevent
 -- e.g. "config" from also matching "/config/" (which would over-block).
 local DEFAULT_IGNORE = {
-  "/%.git/",          -- git plumbing subtree
-  "/%.bare/",         -- bare-repo plumbing subtree
-  "/node_modules/",   -- canonical js dependency dir
-  "/%.svn/",          -- legacy
-  "%.swp$",           -- vim swap file
-  "%.swo$",           -- vim secondary swap
-  "~$",               -- vim backup file
-  "/4913$",           -- vim's "is the dir writable" probe
+  "/%.git/",            -- git plumbing subtree
+  "/%.bare/",           -- bare-repo plumbing subtree
+  "/node_modules/",     -- canonical js dependency dir
+  "/%.svn/",            -- legacy
+  -- Build / bundler output. Ecosystem-standard names; consumers
+  -- who genuinely want these watched can pass an explicit
+  -- `ignore` to override.
+  "/dist/",             -- rollup/webpack/vite/tsc output
+  "/build/",            -- generic build output (tsc, cmake, gradle, …)
+  "/coverage/",         -- jest/istanbul/etc. coverage reports
+  "/target/",           -- rust/java/maven build dir
+  "/%.next/",           -- next.js build artifacts
+  "/%.cache/",          -- gatsby/parcel/generic cache
+  "/%.turbo/",          -- turborepo cache
+  "/%.parcel%-cache/",  -- parcel
+  -- Python ecosystem.
+  "/__pycache__/",      -- bytecode cache
+  "/%.venv/",           -- pep 405 venv
+  "/venv/",             -- common venv (no dot)
+  "/%.pytest_cache/",
+  "/%.mypy_cache/",
+  "/%.ruff_cache/",
+  "/%.tox/",
+  -- IDE metadata directories.
+  "/%.idea/",           -- jetbrains
+  "/%.vscode/",         -- vscode workspace settings
+  "%.swp$",             -- vim swap file
+  "%.swo$",             -- vim secondary swap
+  "~$",                 -- vim backup file
+  "/4913$",             -- vim's "is the dir writable" probe
 }
 
 local DEFAULT_DEBOUNCE_MS = 100
-local DEFAULT_MAX_HANDLES = 1024
+-- Session-wide safety cap. Sized as a "catch a runaway bug"
+-- belt (e.g. `watch.start("/")`), not a real budget — legitimate
+-- large bare-repo parents with many worktrees can sit well above
+-- the original 1024. 131072 = ¼ of Linux's
+-- `fs.inotify.max_user_watches` default (524288), leaving the
+-- other ¾ for everything else under the user's uid (JetBrains,
+-- other nvims, file managers). Callers can still pin a smaller
+-- cap per `watch.start`.
+local DEFAULT_MAX_HANDLES = 131072
 
 -- ── module state ─────────────────────────────────────────────
 
@@ -184,7 +214,7 @@ end
 ---@field recursive   boolean?    -- default true
 ---@field debounce_ms integer?    -- default 100
 ---@field ignore      string[]?   -- default DEFAULT_IGNORE
----@field max_handles integer?    -- default 1024
+---@field max_handles integer?    -- default 131072
 
 ---@class AutoCoreWatchHandle
 ---@field id          integer

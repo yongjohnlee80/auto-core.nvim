@@ -10,6 +10,55 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.26] — 2026-05-20 — `fs.watch` defaults for large bare-repo parents
+
+Closes the `would exceed max_handles cap (0 active + 12318 new > 1024)`
+warning that `auto-finder.core.watchers` emitted when started under a
+bare-repo parent housing a TypeScript monorepo with ~17 worktrees. The
+recursive walk collected 12k+ dirs even after `node_modules` / `.git/` /
+`.bare/` exclusion — the leftovers were ecosystem-standard build and
+cache subtrees that no consumer wants watched, and the 1024 cap was
+sized when the foundation library only ever saw single-worktree usage.
+
+### Changed
+
+- **`DEFAULT_IGNORE`** (`lua/auto-core/fs/watch.lua`). Added anchored
+  patterns for the dirs no consumer wants in the recursive walk:
+  - JS/web bundler output: `/dist/`, `/build/`, `/coverage/`,
+    `/%.next/`, `/%.cache/`, `/%.turbo/`, `/%.parcel%-cache/`.
+  - Other ecosystems: `/target/` (rust/maven), `/__pycache__/`,
+    `/%.venv/`, `/venv/`, `/%.pytest_cache/`, `/%.mypy_cache/`,
+    `/%.ruff_cache/`, `/%.tox/`.
+  - IDE metadata: `/%.idea/`, `/%.vscode/`.
+
+  Existing patterns (`/%.git/`, `/%.bare/`, `/node_modules/`, `/%.svn/`,
+  swap/backup/probe file suffixes) are unchanged.
+
+- **`DEFAULT_MAX_HANDLES`** raised `1024` → `131072`. The cap was
+  always a "catch a runaway bug" belt (e.g. `watch.start("/")`),
+  not a real budget — legitimate large bare-repo parents legitimately
+  have tens of thousands of source dirs. `131072` is ¼ of Linux's
+  `fs.inotify.max_user_watches` default (524288), leaving the other
+  ¾ for everything else under the user's uid (JetBrains, file
+  managers, other nvim instances). Callers that want a smaller cap
+  still pass `max_handles` to `watch.start` per call.
+
+### Verified
+
+- `tests/smoke.lua` section `[26] fs.watch` is green (start/stop,
+  events, debounce, ignore filter on `.git/`, max_handles refusal
+  with explicit `max_handles = 1` opt).
+- `health.lua:109` already reads `watch.DEFAULT_MAX_HANDLES`, so the
+  80 %-threshold "consider raising max_handles" advisory auto-tracks
+  the new value — no health-check tweak needed.
+
+### Consumer impact
+
+Strictly additive. Pinning `version = "^0.1.0"` picks this up on
+`:Lazy update`. Consumers that explicitly passed `ignore = …` or
+`max_handles = …` to `watch.start` are unaffected — defaults only
+apply when the opt is nil. `api_version` stays at `0.1`.
+
 ## [v0.1.25] — 2026-05-20 — `ui.section.Registry:section_did_remount` hook
 
 Public hook for async-mount sections that swap their panel buffer

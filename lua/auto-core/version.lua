@@ -359,6 +359,39 @@ return {
   -- `0.1` — the new method is small enough to ride along with
   -- the v0.1.x line's existing additive contract rather than
   -- flag an api-version minor bump on its own.
-  version     = "0.1.25",
+  -- v0.1.26: `fs.watch` defaults updated for large bare-repo
+  -- parents. Motivating incident: `auto-finder.core.watchers`
+  -- logged WARN `fs.watch start failed at <LM root>: would
+  -- exceed max_handles cap (0 active + 12318 new > 1024)`; the
+  -- recursive walk under a bare-repo parent with ~17 worktrees
+  -- of a TS monorepo collected 12k+ dirs even though `node_modules`
+  -- + `.git/` + `.bare/` were already ignored. The leftovers were
+  -- ecosystem-standard build/cache dirs that everyone wants
+  -- ignored. Two additive changes:
+  --   - `DEFAULT_IGNORE` gains anchored patterns for `/dist/`,
+  --     `/build/`, `/coverage/`, `/target/`, `/%.next/`,
+  --     `/%.cache/`, `/%.turbo/`, `/%.parcel%-cache/`,
+  --     `/__pycache__/`, `/%.venv/`, `/venv/`,
+  --     `/%.pytest_cache/`, `/%.mypy_cache/`, `/%.ruff_cache/`,
+  --     `/%.tox/`, `/%.idea/`, `/%.vscode/`. Trims the LM-root
+  --     walk by ~15 % and, more importantly, prevents the
+  --     known-throwaway subtrees from chewing handles in any
+  --     ecosystem-standard project layout.
+  --   - `DEFAULT_MAX_HANDLES` raised 1024 → 131072. The cap is a
+  --     "catch a runaway bug" belt (`watch.start("/")`), not a
+  --     real budget — legitimate large monorepos legitimately
+  --     have tens of thousands of source dirs. 131072 = ¼ of
+  --     Linux's `fs.inotify.max_user_watches` default (524288),
+  --     leaving the other ¾ for everything else under the user's
+  --     uid (JetBrains, file managers, other nvim instances).
+  --     Callers that want a smaller cap pass `max_handles` to
+  --     `watch.start` per call as before.
+  -- Strictly additive. Consumers pinning `version = "^0.1.0"`
+  -- pick up the change on `:Lazy update` and immediately stop
+  -- hitting the cap on large bare-repo parents. Health check at
+  -- `health.lua:109` already reads `watch.DEFAULT_MAX_HANDLES`
+  -- so the 80 %-threshold warning auto-tracks the new value.
+  -- `api_version` stays at `0.1`.
+  version     = "0.1.26",
   api_version = "0.1",
 }
