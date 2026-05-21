@@ -107,9 +107,14 @@ local function check_fs_watch()
     active = active + (#h.fs_events or 0)
   end
   local cap = watch.DEFAULT_MAX_HANDLES or 1024
+  -- macOS uses one root handle per recursive watch (FSEvents
+  -- covers the subtree). A low active count there is expected,
+  -- not a sign that the watcher is broken.
+  local native_recursive = (vim.uv.os_uname() or {}).sysname == "Darwin"
   info(string.format(
-    "fs.watch: %d active fs_event handles (default cap %d)",
-    active, cap))
+    "fs.watch: %d active fs_event handles (default cap %d%s)",
+    active, cap,
+    native_recursive and "; darwin native-recursive: on" or ""))
   if active > cap * 0.8 then
     warn(string.format(
       "fs.watch is using > 80%% of its handle cap (%d/%d) — "

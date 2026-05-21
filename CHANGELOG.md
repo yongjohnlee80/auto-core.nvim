@@ -10,6 +10,93 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.27] — 2026-05-21 — macOS native-recursive `fs.watch` handler (segregated)
+
+Adds an FSEvents-backed recursive watcher for macOS. The Linux walker
+exhausts the macOS process fd ceiling around ~7000 dirs — past that
+`vim.uv.new_fs_event` returns nil and the watcher silently has no
+coverage. The original `fix(fs.watch): use native recursive watcher on
+Darwin` (dc79b66) added the branch inline inside the existing walker;
+it has been reverted on main and the same logic re-introduced as a
+**separate handler** so future Darwin-only changes cannot perturb the
+Linux walker. Also includes a long-overdue debounce-table prune that
+the recursive handler would otherwise amplify into a memory leak on
+macOS.
+
+### Reverted
+
+- `dc79b66 fix(fs.watch): use native recursive watcher on Darwin`
+  — the substance of the fix is good but the structure mixed Darwin
+  and Linux branches inside one function. Reverted on main via a
+  proper revert commit; re-introduced below in segregated form.
+
+### Added
+
+- **`fs/watch.lua` — `IS_DARWIN` module-load constant.** Computed
+  once via `vim.uv.os_uname()` at require time, so the dispatcher in
+  `M.start` is a pure conditional check (no per-call syscall).
+
+- **`fs/watch.lua` — separate Darwin handler section.** Introduces
+  `_darwin_join_event_path`, `_darwin_start_one`, and `_darwin_start`
+  in a clearly-marked block above the public API. `M.start`
+  short-circuits into `_darwin_start(root, opts)` on
+  `IS_DARWIN and opts.recursive` BEFORE any walked code runs. The
+  Linux walker (`start_one_dir`) is byte-identical to v0.1.26 — no
+  signature change, no shared code with the Darwin path, no chance
+  of cross-platform regression from future macOS-only edits.
+
+  `_darwin_join_event_path` handles the FSEvents-vs-inotify path-
+  delivery asymmetry: FSEvents callbacks deliver ABSOLUTE filenames,
+  inotify delivers relative. Subscribers see one path shape on both
+  platforms.
+
+- **`fs/watch.lua` — `debounce_check` opportunistic prune.** New
+  `state._debounce_size` counter triggers an O(N) sweep of entries
+  older than `DEBOUNCE_PRUNE_TTL_MULT × debounce_ms` (default
+  `100 × 100ms = 10s`) only when the live count crosses
+  `DEBOUNCE_PRUNE_THRESHOLD` (default 4096). Amortized O(1) on the
+  hot path. `state._debounce` would otherwise grow without bound —
+  pre-Darwin this leaked slowly (Linux walker pre-filters ignored
+  subtrees at walk time, so their paths never reach `debounce_check`)
+  but the Darwin recursive handler routes every event under the
+  subtree through it, so the leak rate on macOS is much higher.
+
+- **`health.lua` — `check_fs_watch` darwin hint.** Appends
+  `; darwin native-recursive: on` to the active-handle count info
+  line on macOS. A `:checkhealth auto-core` on macOS otherwise reads
+  "fs.watch: 1 active fs_event handles" and looks broken.
+
+### Changed (docs only)
+
+- **Docstring header** acknowledges the platform asymmetry: Darwin
+  auto-watches subdirs created AFTER `watch.start` (FSEvents covers
+  the subtree); the Linux walker does NOT (existing baseline,
+  unchanged). Ignore patterns apply at walk time on Linux but at
+  callback time on Darwin — the hot path runs on every event under
+  the Darwin subtree including events Linux would have skipped
+  entirely. Acceptable because the Darwin alternative is no coverage
+  at all on large workspaces.
+
+### Verified
+
+- `tests/smoke.lua` section `[26] fs.watch` is green (13/13) on
+  Linux. No Darwin-specific assertions added in this release — the
+  prior attempt to add them in dc79b66 pushed the smoke driver past
+  Lua's `>200 main-chunk locals` parse limit. Darwin coverage will
+  return in a follow-up that also scopes section [26]'s locals via
+  `do ... end`.
+- Pre-revert smoke at HEAD = `dc79b66` failed to parse (`E5112: main
+  function has more than 200 local variables at line 2224`); post-
+  revert + post-Darwin-handler at HEAD = v0.1.27 parses and passes.
+
+### Consumer impact
+
+Strictly additive. Linux consumers see only the debounce prune fix
+(memory bound on long sessions) and the health-check copy edit; no
+behavior change otherwise. macOS consumers gain actual `fs.watch`
+coverage on large workspaces for the first time. `api_version` stays
+at `0.1`.
+
 ## [v0.1.26] — 2026-05-20 — `fs.watch` defaults for large bare-repo parents
 
 Closes the `would exceed max_handles cap (0 active + 12318 new > 1024)`

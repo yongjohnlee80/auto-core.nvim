@@ -392,6 +392,50 @@ return {
   -- `health.lua:109` already reads `watch.DEFAULT_MAX_HANDLES`
   -- so the 80 %-threshold warning auto-tracks the new value.
   -- `api_version` stays at `0.1`.
-  version     = "0.1.26",
+  -- v0.1.27: macOS native-recursive `fs.watch` handler — the
+  -- walked-per-directory path used on Linux exhausts the macOS
+  -- process fd ceiling around ~7000 dirs, at which point
+  -- `vim.uv.new_fs_event` returns nil and the watcher silently
+  -- loses coverage. FSEvents supports recursive watching from a
+  -- single root handle on Darwin, so we use it there. The
+  -- original `fix(fs.watch): use native recursive watcher on
+  -- Darwin` commit (dc79b66) added the branch inline inside the
+  -- existing walker; it has been reverted on main and the same
+  -- logic re-introduced as a separate handler so future Darwin-
+  -- only changes cannot perturb the Linux walker. Five additive
+  -- changes:
+  --   - `fs/watch.lua` IS_DARWIN module-load constant (one
+  --     `vim.uv.os_uname()` per process, not per call).
+  --   - `fs/watch.lua` `_darwin_start` / `_darwin_start_one` /
+  --     `_darwin_join_event_path` — fully segregated handler
+  --     section. `M.start` short-circuits into it on
+  --     `IS_DARWIN and opts.recursive` BEFORE any walked code
+  --     runs. The Linux walker (`start_one_dir`) is byte-
+  --     identical to its pre-Darwin shape.
+  --   - `fs/watch.lua` `debounce_check` gains an opportunistic
+  --     prune. `state._debounce` would otherwise grow without
+  --     bound (every unique full_path adds an entry forever).
+  --     Pre-Darwin this leaked slowly because the Linux walker
+  --     pre-filtered ignored subtrees at walk time; the Darwin
+  --     handler routes every event under the subtree through
+  --     `debounce_check`, so the leak is much faster on macOS.
+  --     New `state._debounce_size` counter triggers an O(N)
+  --     sweep (drop entries older than 100×debounce_ms) only
+  --     when the live count crosses 4096 — amortized O(1).
+  --     Constants `DEBOUNCE_PRUNE_THRESHOLD` /
+  --     `DEBOUNCE_PRUNE_TTL_MULT` documented inline.
+  --   - `health.lua` `check_fs_watch` reports
+  --     `; darwin native-recursive: on` on macOS so a low
+  --     active-handle count on the platform doesn't look
+  --     suspicious in `:checkhealth auto-core`.
+  --   - Docstring header reflects the platform asymmetry: Darwin
+  --     auto-watches subdirs created AFTER `watch.start`; the
+  --     Linux walker does not.
+  -- Strictly additive. The Linux walker code is unchanged
+  -- relative to v0.1.26; consumers on Linux pick up only the
+  -- debounce prune fix and the health-check copy edit. Consumers
+  -- on macOS pick up actual coverage on large workspaces for the
+  -- first time. `api_version` stays at `0.1`.
+  version     = "0.1.27",
   api_version = "0.1",
 }
