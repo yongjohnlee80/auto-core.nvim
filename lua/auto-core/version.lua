@@ -463,24 +463,31 @@ return {
   -- green at 764 / 0 (was 757 / 0). Strictly additive — no API
   -- surface change, `api_version` stays at `0.1`. Consumers
   -- pinning `^0.1.0` pick up via `:Lazy update`.
-  -- v0.1.29: panel WinNew option-inheritance guard (ADR 0027 Fix B).
-  -- Adds a module-level `WinNew` autocmd in `AutoCorePanelGuard` that
-  -- clears `winfixbuf` + `winfixwidth` on every new non-floating,
-  -- non-panel-marker window where either was set. Defensive against
-  -- Vim's `:split`/`:vsplit` option-inheritance (the auto-finder dbase
-  -- view at `views/dbase/layout.lua:116-167` carries the canonical
-  -- per-consumer workaround; this lifts it to per-panel). nvim 0.12.2
-  -- in `-u NONE` headless does NOT propagate `winfix*` for plain
-  -- `:vsplit` (probe documented in
-  -- `shared/synthesis/2026-05-22-winfixbuf-propagation-fix-cause-analysis.md`)
-  -- but other vectors can — guard is correct-by-default since the
-  -- only in-tree producer of `winfixbuf=true` on a non-floating window
-  -- is `Panel:open` (verified 2026-05-22). New smoke section [53] runs
-  -- 15 assertions covering the cleared inheritance, panel-marker
-  -- skip, and silent-when-nothing-to-clear short-circuit. Suite
-  -- green at 776 / 4 (the 4 pre-existing flakes unchanged). Strictly
-  -- additive — no API surface change; `api_version` stays at `0.1`.
-  -- Consumers pinning `^0.1.0` pick up via `:Lazy update`.
-  version     = "0.1.29",
+  -- v0.1.29: panel `WinNew` option-inheritance guard (ADR 0027
+  -- Fix B). REVERTED in v0.1.30 — see below. The v0.1.29 commit +
+  -- tag remain in git history as the record of what was tried.
+  -- v0.1.30: revert v0.1.29's panel `WinNew` option-inheritance
+  -- guard. Lector audit (2026-05-23) found that (a) nvim 0.12.2
+  -- does not propagate `winfixbuf` / `winfixwidth` for plain
+  -- `:split` / `:vsplit` / `nvim_win_call(... :vsplit ...)` /
+  -- `nvim_open_win({ split = ... })` — these options are special
+  -- local-window options that are not copied to new windows —
+  -- and (b) legitimate non-panel producers of `winfixbuf=true`
+  -- exist on the user's install (gitsigns blame split,
+  -- nvim-dap-view options/console splits) which the scheduled
+  -- guard could race-clear after their synchronous option-set.
+  -- The originating snacks `E1513` vector is fully covered by
+  -- the consumer-side `auto-vim.nvim` Fix A wrap
+  -- (snacks-picker-winfixbuf.lua) which is cause-agnostic.
+  -- Smoke section [53] removed in the same commit; suite returns
+  -- to the v0.1.28 baseline of 761 passing. Strictly additive on
+  -- the API surface (only a defensive autocmd was removed); no
+  -- public function / state-key / topic shape change.
+  -- `api_version` stays at `0.1`. Consumers pinning `^0.1.0` pick
+  -- up via `:Lazy update`; v0.1.29's behavior is gone but no
+  -- consumer was relying on the side effect (the guard was a
+  -- no-op on nvim 0.12.2 anyway). ADR 0027 supersession deferred
+  -- to a follow-up ADR per KB hard-rule #4.
+  version     = "0.1.30",
   api_version = "0.1",
 }

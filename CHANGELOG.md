@@ -10,7 +10,82 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
-## [v0.1.29] — 2026-05-22 — panel `WinNew` option-inheritance guard (ADR 0027 Fix B)
+## [v0.1.30] — 2026-05-23 — revert v0.1.29 `WinNew` guard (no real-world vector demonstrated)
+
+Reverts the panel `WinNew` option-inheritance guard introduced in
+v0.1.29. The guard was defensive infrastructure shipped on the
+hypothesis that Vim's `:split` / `:vsplit` propagates `winfixbuf=true`
++ `winfixwidth=true` from the panel to a new window. A Lector audit
+(2026-05-23) found:
+
+- nvim 0.12.2 does **not** propagate `winfixbuf` / `winfixwidth`
+  for plain `:split`, `:vsplit`, `:noautocmd vsplit`,
+  `nvim_win_call(... :vsplit ...)`, or `nvim_open_win({ split = ... })`.
+  These options are special local-window options that are not copied
+  when new windows are created.
+- The installed plugin audit found legitimate non-panel producers of
+  `winfixbuf=true` that the guard would have stomped on:
+  - `gitsigns.nvim`'s blame split sets `winfixbuf=true` +
+    `winfixwidth=true`,
+  - `nvim-dap-view`'s options/console views set `winfixbuf=true` +
+    fixed sizing on their splits.
+  A scheduled `WinNew` guard can race after those plugins'
+  synchronous option-set and clear them, breaking legitimate
+  fixed-size sibling windows.
+- The smoke section `[53]` proved the guard's BODY clears
+  manually-injected state — it did not prove the guard fires
+  unprovoked from any real-world call path.
+
+Per the user's hard rule "we can't ship codes that doesn't fix
+anything," v0.1.29 ships back out. The originating snacks
+`E1513` vector is fully covered by the consumer-side
+`auto-vim.nvim` Fix A wrap (snacks-picker-winfixbuf.lua) which is
+cause-agnostic and unaffected by this revert.
+
+ADR 0027 status will move to `superseded-for-fix-b` in a follow-up
+ADR — per the KB's hard-rule #4 we do not edit accepted ADRs'
+substance; the successor ADR carries the new decision.
+
+### Removed
+
+- **`lua/auto-core/ui/panel.lua`** module-level `WinNew` autocmd
+  inside `AutoCorePanelGuard` that cleared `winfixbuf` +
+  `winfixwidth` on non-panel-marker non-floating new windows. The
+  older v0.1.21 detection-only `WinNew` autocmd (the one that LOGS
+  "unmarked sibling detected" but does not mutate options) stays —
+  that one targets a different class of bug and was never in
+  question.
+- **`tests/smoke.lua`** section `[53]` (16 assertions exercising
+  the cleared-inheritance path). Suite at **760 passed / 4 failed**
+  — the 4 failures are the same pre-existing flakes documented in
+  the v0.1.29 entry below (`max_handles cap refuses oversized
+  recursive watch`, `fan_out repos sorted by label`, two `prune`
+  cases). Unchanged by this revert.
+
+### Not changed
+
+- `api_version` stays at `0.1`. No public surface change.
+- The dbase-view per-consumer workaround at
+  `auto-finder/views/dbase/layout.lua:116-167` stays in place. Its
+  `winfixbuf=false` reset still protects against the intermediate
+  state where a split briefly holds a panel-owned buffer before
+  replacement. A separate audit will decide which parts of that
+  workaround are now redundant — out of scope for this revert.
+
+### Cross-references
+
+- `shared/synthesis/auto-core-winfixbuf-guard-justification-review.md`
+  (auto-agents KB) — Lector audit reply (2026-05-23) that drove
+  this revert.
+- `shared/synthesis/2026-05-22-winfixbuf-propagation-fix-cause-analysis.md`
+  — original probe documenting the absent propagation on nvim 0.12.2.
+- v0.1.29 entry below is preserved as the historical record of what
+  was tried.
+
+## [v0.1.29] — 2026-05-22 — panel `WinNew` option-inheritance guard (ADR 0027 Fix B) — REVERTED in v0.1.30
+
+> **Reverted in v0.1.30 (2026-05-23).** Entry retained as a record of
+> what was tried. See the v0.1.30 entry above for the rationale.
 
 Defensive guard against the panel `winfixbuf=true` + `winfixwidth=true`
 options leaking into non-panel windows via Vim's `:split` / `:vsplit`
