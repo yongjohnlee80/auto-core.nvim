@@ -5733,6 +5733,137 @@ panel_mod._reset_for_tests()
 log._reset_for_tests()
 end)()
 
+-- ─────────────────────── 53. winfixbuf/winfixwidth-inheritance guard ──
+-- ADR 0027 Fix B. Vim's `:split` / `:vsplit` is documented to propagate
+-- window-local options from the source window to the new window
+-- (`auto-finder/views/dbase/layout.lua:116-167` carries the canonical
+-- workaround comment that introduced the per-consumer fix shape).
+-- nvim 0.12.2 in `-u NONE` headless does NOT propagate
+-- `winfixbuf`/`winfixwidth` for plain `:vsplit` (verified during ADR
+-- 0027 authoring — see [[synthesis/2026-05-22-winfixbuf-propagation-fix-cause-analysis]]).
+-- Other vectors can still surface the same inherited state: plugin-
+-- driven splits inside `nvim_win_call` wrappers, autocmd-suppressed
+-- `eventignore="all"` contexts, older nvim versions, future option-
+-- inheritance changes.
+--
+-- The guard is defensive infrastructure: on every non-panel-marker
+-- non-floating new window that arrives with either winfix* set, clear
+-- them. This test isolates the GUARD'S BEHAVIOR rather than the
+-- propagation mechanism (which is version-dependent): inject winfix*
+-- manually on a non-panel window to simulate the inheritance, fire
+-- WinNew, assert the guard cleared them. Fails on the pre-ADR-0027
+-- code (no WinNew handler in _guard_group → winfix* stays set) and
+-- passes after the fix. Per lua-nvim-plugin-development rule #4.
+print("\n[53] ui.panel — winfixbuf/winfixwidth inheritance guard (ADR 0027 Fix B)")
+;(function()
+local panel_mod = require("auto-core.ui.panel")
+local log = require("auto-core.log")
+panel_mod._reset_for_tests()
+log._reset_for_tests()
+
+local p = panel_mod.new({
+  name = "smoke53",
+  side = "left",
+  width = { default = 30, min = 10, max = 80 },
+  filetype = "smoke53-panel",
+})
+p:open(true)
+ok("panel opens for smoke 53", p:_is_open(),
+  "winid=" .. tostring(p.winid))
+ok("panel window has winfixbuf=true (precondition)",
+  vim.wo[p.winid].winfixbuf == true)
+ok("panel window has winfixwidth=true (precondition)",
+  vim.wo[p.winid].winfixwidth == true)
+
+-- Strictly-after-since ring search helper.
+local function ring_has(needle, since)
+  local r = log.recent()
+  for i = #r, (since or 0) + 1, -1 do
+    local m = (r[i] or {}).message or ""
+    if m:find(needle, 1, true) then return true end
+  end
+  return false
+end
+
+-- ── Create a non-panel sibling + inject winfix* on it (simulate the
+-- inherited state) + fire WinNew to invoke the guard. ───────────
+vim.api.nvim_set_current_win(p.winid)
+vim.cmd("vsplit")
+local sibling = vim.api.nvim_get_current_win()
+ok("sibling is a new window distinct from the panel",
+  sibling ~= p.winid and vim.api.nvim_win_is_valid(sibling))
+local marker_ok, marker = pcall(vim.api.nvim_win_get_var, sibling, "auto_core_panel_name")
+ok("sibling lacks the panel marker (precondition)",
+  (not marker_ok) or marker == nil or marker == "" or marker == vim.NIL)
+
+-- Inject the inherited state the guard is meant to undo.
+vim.wo[sibling].winfixbuf   = true
+vim.wo[sibling].winfixwidth = true
+ok("sibling has winfixbuf=true injected (inheritance simulation)",
+  vim.wo[sibling].winfixbuf == true)
+ok("sibling has winfixwidth=true injected (inheritance simulation)",
+  vim.wo[sibling].winfixwidth == true)
+
+-- Drive WinNew so the guard inspects this window. The guard's body
+-- reads `vim.api.nvim_get_current_win()` first, so make the sibling
+-- current before firing.
+vim.api.nvim_set_current_win(sibling)
+local before = #log.recent()
+vim.api.nvim_exec_autocmds("WinNew", {})
+vim.wait(200, function()
+  local wfb_ok, wfb = pcall(function() return vim.wo[sibling].winfixbuf end)
+  local wfw_ok, wfw = pcall(function() return vim.wo[sibling].winfixwidth end)
+  return wfb_ok and wfw_ok and not wfb and not wfw
+end)
+
+ok("sibling winfixbuf cleared to false post-WinNew (Fix B)",
+  vim.wo[sibling].winfixbuf == false,
+  "got winfixbuf=" .. tostring(vim.wo[sibling].winfixbuf))
+ok("sibling winfixwidth cleared to false post-WinNew (Fix B)",
+  vim.wo[sibling].winfixwidth == false,
+  "got winfixwidth=" .. tostring(vim.wo[sibling].winfixwidth))
+ok("WinNew guard logged 'cleared inherited winfix*' entry",
+  ring_has("cleared inherited winfix*", before),
+  "expected log entry in ui.panel.guard ring")
+
+-- ── Panel itself stays protected — drive WinNew with the panel as
+-- current; the guard must skip it because it carries the marker. ──
+vim.api.nvim_set_current_win(p.winid)
+local panel_before = #log.recent()
+vim.api.nvim_exec_autocmds("WinNew", {})
+vim.wait(100)
+ok("panel window still has winfixbuf=true (guard skipped it)",
+  vim.wo[p.winid].winfixbuf == true)
+ok("panel window still has winfixwidth=true (guard skipped it)",
+  vim.wo[p.winid].winfixwidth == true)
+ok("guard does NOT log when WinNew fires with a panel as current",
+  not ring_has("cleared inherited winfix*", panel_before),
+  "panel-marker short-circuit should be silent")
+
+-- ── Idempotent: WinNew on a vanilla window with no winfix* set is silent. ──
+vim.api.nvim_set_current_win(sibling)
+vim.cmd("split")
+local benign = vim.api.nvim_get_current_win()
+ok("benign window starts with winfixbuf=false (precondition)",
+  vim.wo[benign].winfixbuf == false)
+local quiet_before = #log.recent()
+vim.api.nvim_exec_autocmds("WinNew", {})
+vim.wait(100)
+ok("guard is silent when there's nothing to clear",
+  not ring_has("cleared inherited winfix*", quiet_before),
+  "early-return should avoid ring pollution")
+ok("benign window still has winfixbuf=false",
+  vim.wo[benign].winfixbuf == false)
+
+-- ── Cleanup. ─────────────────────────────────────────────────
+pcall(vim.api.nvim_win_close, benign,  true)
+pcall(vim.api.nvim_win_close, sibling, true)
+p:close()
+p:dispose()
+panel_mod._reset_for_tests()
+log._reset_for_tests()
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

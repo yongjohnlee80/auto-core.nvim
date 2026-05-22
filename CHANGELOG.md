@@ -10,6 +10,103 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.29] — 2026-05-22 — panel `WinNew` option-inheritance guard (ADR 0027 Fix B)
+
+Defensive guard against the panel `winfixbuf=true` + `winfixwidth=true`
+options leaking into non-panel windows via Vim's `:split` / `:vsplit`
+option-inheritance. The user-visible failure mode this targets:
+
+- editor window can't grow (`winfixwidth=true`) → collapses against
+  siblings on layout flow,
+- editor window refuses `:edit` / `:buffer` (`winfixbuf=true`) →
+  `E1513` from snacks.picker, bufferline clicks, ad-hoc `:b#`.
+
+`auto-finder/views/dbase/layout.lua:116-167` already carries a
+per-consumer workaround for its own splits (`eventignore="all"` +
+explicit `winfixbuf=false` + scratch swap on the new winid). This
+release lifts that pattern from per-consumer to per-panel so every
+future consumer (and every external `:split` off the panel) is
+covered.
+
+### Added
+
+- **`lua/auto-core/ui/panel.lua`** module-level `WinNew` autocmd
+  registered inside the existing `AutoCorePanelGuard` group, beside
+  the `WinEnter`/`BufWinEnter` leak guard. Body is `vim.schedule_wrap`'d
+  so the new winid is settled before inspection. Behavior:
+  - skips floating windows (`config.relative ~= ""`);
+  - skips windows that carry the panel marker
+    (`w:auto_core_panel_name`);
+  - early-returns when neither `winfixbuf` nor `winfixwidth` is set
+    on the new window (avoids ring pollution on plain `:split`
+    from vanilla windows);
+  - otherwise unsets both options and emits an INFO log entry
+    under `ui.panel.guard`.
+
+Why only `winfixbuf` + `winfixwidth` and not also
+`number`/`signcolumn`/`foldcolumn` (which propagate too): those are
+user-visible preferences expected to come from globals / ftplugin,
+not from auto-core's panel — resetting them would step on
+legitimate user config. The two `winfix*` are the load-bearing
+ones for the user-visible failure modes.
+
+Why correct-by-default: the only in-tree producer of
+`winfixbuf=true` on a non-floating window is `Panel:open`
+(verified 2026-05-22 against the installed family). A future
+consumer that legitimately wants `winfixbuf=true` on a fresh split
+must set it AFTER the scheduled tick — same shape the panel uses
+post-split.
+
+### Verified
+
+- `tests/smoke.lua` section `[53]` adds 15 assertions covering:
+  - panel preconditions (`winfixbuf=true`, `winfixwidth=true`);
+  - sibling without panel marker is a precondition;
+  - injected `winfixbuf=true`/`winfixwidth=true` on the sibling
+    cleared after `nvim_exec_autocmds("WinNew", {})` + `vim.wait`;
+  - log entry `cleared inherited winfix*` lands in the
+    `ui.panel.guard` ring;
+  - panel-marker short-circuit: `WinNew` with the panel as current
+    leaves panel options intact AND emits no log entry;
+  - early-return idempotency: `WinNew` on a vanilla window with
+    no `winfix*` set is silent.
+
+  The smoke isolates the GUARD'S BEHAVIOR rather than the
+  propagation mechanism. nvim 0.12.2 in `-u NONE` headless does
+  NOT propagate `winfix*` for plain `:vsplit` (verified by direct
+  probe — captured in
+  `shared/synthesis/2026-05-22-winfixbuf-propagation-fix-cause-analysis.md`
+  in the auto-agents KB), but other vectors can: plugin-driven
+  splits inside `nvim_win_call`, autocmd-suppressed
+  `eventignore="all"` contexts, older nvim versions, future
+  option-inheritance changes.
+
+- Suite: **776 passed / 4 failed** (the 4 failures are pre-existing
+  flakes from main — see
+  `shared/synthesis/2026-05-21-auto-finder-smoke-flakes-v0-2-32.md`
+  in the auto-agents KB — unchanged by this patch).
+
+### Not changed
+
+- `api_version` stays at `0.1`. No public surface change; consumers
+  pinning `version = "^0.1.0"` pick up via `:Lazy update`.
+- The dbase-view per-consumer workaround at
+  `auto-finder/views/dbase/layout.lua:139-167` stays in place as
+  belt-and-braces. Its `winfixbuf` reset is technically redundant
+  on a v0.1.29+ auto-core; retiring it is a future cleanup, not a
+  release-blocker.
+
+### Cross-references
+
+- `shared/adrs/0027-winfixbuf-propagation-defensive-guard.md` (in
+  the auto-agents KB) — full design rationale, alternatives
+  considered, deferred Fix C (auto-finder `refresh_file_tree`
+  window-claim).
+- `shared/conventions/autocore-log-dumps.md` — triage convention
+  used to gather the evidence trail that motivated the fix.
+- `shared/playbooks/diagnosing-autovim-family.md` — anchored
+  against this ADR as the canonical class-1 reference.
+
 ## [v0.1.28] — 2026-05-20 — `ui.float.multi` opener-winid restore on close
 
 Fixes "I closed the `:AutoCoreLog` dumps viewer with `q` and ended up
