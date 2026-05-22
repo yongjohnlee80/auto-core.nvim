@@ -274,6 +274,86 @@ rules).
    1 of the [`auto-family-logging`](https://github.com/yongjohnlee80/auto-agents)
    convention).
 
+## Known integrations — snacks.picker + `winfixbuf` panels
+
+`auto-core.ui.panel` sets `winfixbuf = true` on every panel window it
+creates. That protection is intentional — it stops generic `:buffer`
+/ `:edit` / bufferline / picker actions from replacing the panel's
+contents from underneath the consumer.
+
+The trade-off is that any picker which dispatches a jump via
+`:buffer <bufnr>` in the **currently focused window** will raise
+`E1513: Cannot switch buffer. 'winfixbuf' is enabled` when focus
+happens to be on a panel — or when the picker's internal "main
+window" selection lands on a panel (e.g. snacks.picker's
+`core/main.lua` filters by `buftype` but **not** by `winfixbuf`, so an
+auto-core admin/scratch panel slot passes the filter and gets picked
+as `picker.main`; `picker:close()` then restores focus there before
+the buffer load).
+
+If you use [snacks.nvim](https://github.com/folke/snacks.nvim)'s
+picker alongside auto-core panels, drop the following plugin spec
+somewhere in your config to defensively retarget `:buffer` away from
+`winfixbuf` windows. It monkey-patches
+`snacks.picker.actions.jump` at the module level — the only override
+point that survives snacks' string-resolved `confirm = "jump"`
+dispatch path *and* the insert-mode reschedule at `actions.lua:42`:
+
+```lua
+-- lua/plugins/snacks-picker-winfixbuf.lua
+return {
+  {
+    "folke/snacks.nvim",
+    opts = function(_, opts)
+      local function find_non_winfixbuf_win()
+        local wins = vim.api.nvim_list_wins()
+        for i = #wins, 1, -1 do
+          local w = wins[i]
+          local cfg_ok, cfg = pcall(vim.api.nvim_win_get_config, w)
+          if cfg_ok and cfg.relative == "" then
+            local ok, wfb = pcall(function() return vim.wo[w].winfixbuf end)
+            if ok and not wfb then return w end
+          end
+        end
+        return nil
+      end
+
+      local function ensure_picker_main_safe(picker)
+        if not (picker and picker.main and vim.api.nvim_win_is_valid(picker.main)) then return end
+        local ok, wfb = pcall(function() return vim.wo[picker.main].winfixbuf end)
+        if not (ok and wfb) then return end
+        local target = find_non_winfixbuf_win()
+        if target then
+          picker.main = target
+        else
+          vim.cmd("aboveleft new")
+          picker.main = vim.api.nvim_get_current_win()
+        end
+      end
+
+      local snacks_actions = require("snacks.picker.actions")
+      local original_jump = snacks_actions.jump
+      if not snacks_actions.__wfb_wrapped then
+        snacks_actions.__wfb_wrapped = true
+        snacks_actions.jump = function(picker, item, action)
+          ensure_picker_main_safe(picker)
+          return original_jump(picker, item, action)
+        end
+      end
+    end,
+  },
+}
+```
+
+The same pattern applies to any other current-window opener
+(bufferline tab-click handlers, custom `:edit` keymaps, etc.) — wrap
+or retarget before letting the default action fire. A reference
+implementation lives in
+[autovim](https://github.com/yongjohnlee80/autovim)'s
+`lua/plugins/snacks-picker-winfixbuf.lua`.
+
+This is tracked as **ADR 0027** in the auto-agents knowledge base.
+
 ## License
 
 MIT. See [LICENSE](./LICENSE).
