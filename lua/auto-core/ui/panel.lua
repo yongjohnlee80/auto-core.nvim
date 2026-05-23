@@ -49,6 +49,15 @@ local _registry = {}
 -- editor split" (a leak — bounce it).
 local BUF_OWNER_VAR = "auto_core_panel_owner"
 
+-- ADR 0028: panel appearance options must be written with explicit
+-- local scope. Bare `{ win = winid }` mutates the global-local
+-- DEFAULT for `number` / `relativenumber` / `signcolumn` /
+-- `foldcolumn`, polluting every editor window materialized after
+-- panel open. Use this helper for every window-option write here.
+local function set_winlocal(winid, name, value)
+  vim.api.nvim_set_option_value(name, value, { win = winid, scope = "local" })
+end
+
 ---Look up a panel by name. Returns nil if not registered.
 ---@param name string
 ---@return AutoCorePanel?
@@ -406,12 +415,15 @@ function Panel:open(force)
 
   -- Window-local appearance: drop signs/numbers/foldcolumn — panel
   -- contents are usually trees / repls, none of those add value.
-  vim.api.nvim_set_option_value("number",        false, { win = winid })
-  vim.api.nvim_set_option_value("relativenumber",false, { win = winid })
-  vim.api.nvim_set_option_value("signcolumn",    "no",  { win = winid })
-  vim.api.nvim_set_option_value("foldcolumn",    "0",   { win = winid })
-  vim.api.nvim_set_option_value("winfixwidth",   true,  { win = winid })
-  vim.api.nvim_set_option_value("winfixbuf",     true,  { win = winid })
+  -- ADR 0028: `scope = "local"` (via set_winlocal) is required so
+  -- these writes do NOT mutate the global-local default and pollute
+  -- editor windows materialized after panel open.
+  set_winlocal(winid, "number",        false)
+  set_winlocal(winid, "relativenumber",false)
+  set_winlocal(winid, "signcolumn",    "no")
+  set_winlocal(winid, "foldcolumn",    "0")
+  set_winlocal(winid, "winfixwidth",   true)
+  set_winlocal(winid, "winfixbuf",     true)
 
   events.publish("panel:opened", { name = self.opts.name, winid = winid })
   if self.opts.on_open then pcall(self.opts.on_open, winid) end

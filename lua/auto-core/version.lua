@@ -488,6 +488,45 @@ return {
   -- consumer was relying on the side effect (the guard was a
   -- no-op on nvim 0.12.2 anyway). ADR 0027 supersession deferred
   -- to a follow-up ADR per KB hard-rule #4.
-  version     = "0.1.30",
+  -- v0.1.31: ADR 0028 — panel appearance writes use explicit local
+  -- scope. Closes the global-default-pollution channel that left
+  -- editor windows materialized after panel open inheriting
+  -- `nonumber`, `norelativenumber`, `signcolumn=no`, `foldcolumn=0`.
+  -- User-visible symptom prior to the fix: one editor buffer showed
+  -- no relative line numbers + no sign-column margin while a sibling
+  -- buffer in an older window still looked correct (the diagnosis
+  -- bait — windows opened BEFORE panels grabbed correct defaults;
+  -- windows materialized AFTER panel open inherited the polluted
+  -- globals). Two changes in `lua/auto-core/ui/panel.lua`:
+  --   - New module-local `set_winlocal(winid, name, value)` helper
+  --     that wraps `nvim_set_option_value(name, value, { win = winid,
+  --     scope = "local" })`. The previous pattern was `{ win = winid }`
+  --     without `scope = "local"`, which mutates the global-local
+  --     DEFAULT for `number` / `relativenumber` / `signcolumn` /
+  --     `foldcolumn` (verified via minimal headless repro per
+  --     ADR 0028 §2.3).
+  --   - The panel-open appearance block (`Panel:open`) now routes
+  --     every write — number, relativenumber, signcolumn, foldcolumn,
+  --     winfixwidth, winfixbuf — through `set_winlocal`. Behavior on
+  --     the panel window is unchanged; the only intended difference
+  --     is that future editor windows no longer inherit panel
+  --     presentation defaults.
+  -- Section [53] smoke adds 16 assertions: seeded global defaults
+  -- survive `panel:open()`, panel window still carries the masked
+  -- local values, and a fresh editor split spawned after panel open
+  -- inherits the seeded editor defaults. Pre-fix this section's
+  -- "global SURVIVES panel open" rows would all have failed. Suite
+  -- 779 passed, 2 failed (pre-existing `[25] git.repo` fresh-empty-
+  -- dir failures, unrelated to panel work). Strictly additive —
+  -- no API surface change, helper is module-local, `api_version`
+  -- stays at `0.1`. Consumers pinning `^0.1.0` pick up via
+  -- `:Lazy update`. Polluted live sessions still need the one-shot
+  -- repair documented in ADR 0028 §4.6 (`:setglobal number
+  -- relativenumber signcolumn=auto`); the fix protects future
+  -- sessions but cannot retroactively repair an already-running
+  -- nvim. auto-agents `dock.init` carries the same `{ win = winid }`
+  -- pattern at lines 225-226 and will receive the matching patch
+  -- in auto-agents' next release.
+  version     = "0.1.31",
   api_version = "0.1",
 }

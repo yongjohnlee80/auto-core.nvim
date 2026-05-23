@@ -5733,6 +5733,153 @@ panel_mod._reset_for_tests()
 log._reset_for_tests()
 end)()
 
+-- ─────────────────────── 53. ui.panel — ADR 0028 local-scope regression probe ─────────────────────────
+-- Asserts that panel-open does NOT mutate the global-local
+-- DEFAULTS for `number` / `relativenumber` / `signcolumn` /
+-- `foldcolumn`, and that a fresh editor split spawned AFTER the
+-- panel opens inherits the user-configured editor defaults — not
+-- the panel-masked values.
+--
+-- Pre-ADR-0028 panel writes (`{ win = winid }` without
+-- `scope = "local"`) had the side effect of mutating these
+-- global-local defaults. The symptom was an editor window opened
+-- after panels showing no line numbers / no sign column, because
+-- it inherited the polluted defaults. The fix (set_winlocal in
+-- ui/panel.lua) routes every appearance write through
+-- `{ win = winid, scope = "local" }`. This section would have
+-- caught the original bug.
+print("\n[53] ui.panel — ADR 0028 panel-open does NOT pollute global defaults")
+;(function()
+local panel_mod = require("auto-core.ui.panel")
+panel_mod._reset_for_tests()
+
+-- Seed editor-side defaults so the assertions are self-contained
+-- regardless of host config or prior smoke sections. Capture
+-- pre-section globals to restore afterwards.
+local saved = {
+  number         = vim.api.nvim_get_option_value("number",         {}),
+  relativenumber = vim.api.nvim_get_option_value("relativenumber", {}),
+  signcolumn     = vim.api.nvim_get_option_value("signcolumn",     {}),
+  foldcolumn     = vim.api.nvim_get_option_value("foldcolumn",     {}),
+}
+vim.api.nvim_set_option_value("number",         true,  {})
+vim.api.nvim_set_option_value("relativenumber", true,  {})
+vim.api.nvim_set_option_value("signcolumn",     "yes", {})
+vim.api.nvim_set_option_value("foldcolumn",     "1",   {})
+
+local seeded = {
+  number         = vim.api.nvim_get_option_value("number",         {}),
+  relativenumber = vim.api.nvim_get_option_value("relativenumber", {}),
+  signcolumn     = vim.api.nvim_get_option_value("signcolumn",     {}),
+  foldcolumn     = vim.api.nvim_get_option_value("foldcolumn",     {}),
+}
+ok("seed: global number=true",         seeded.number == true)
+ok("seed: global relativenumber=true", seeded.relativenumber == true)
+ok("seed: global signcolumn=yes",      seeded.signcolumn == "yes")
+ok("seed: global foldcolumn=1",        seeded.foldcolumn == "1")
+
+local p = panel_mod.new({
+  name = "smoke53",
+  side = "right",
+  width = { default = 30, min = 10, max = 80 },
+  filetype = "smoke53-panel",
+})
+p:open(true)
+ok("panel opens for smoke 53", p:_is_open(),
+  "winid=" .. tostring(p.winid))
+
+-- ── Panel window has the masked appearance values (local). ──
+local panel_win = p.winid
+ok("panel win: number=false (local)",
+  vim.api.nvim_get_option_value("number", { win = panel_win, scope = "local" }) == false)
+ok("panel win: relativenumber=false (local)",
+  vim.api.nvim_get_option_value("relativenumber", { win = panel_win, scope = "local" }) == false)
+ok("panel win: signcolumn=no (local)",
+  vim.api.nvim_get_option_value("signcolumn", { win = panel_win, scope = "local" }) == "no")
+ok("panel win: foldcolumn=0 (local)",
+  vim.api.nvim_get_option_value("foldcolumn", { win = panel_win, scope = "local" }) == "0")
+
+-- ── Global defaults survive panel open (this is the bug guard). ──
+-- Read via `{ scope = "global" }` explicitly. `{}` defaults to the
+-- CURRENT window's local value for window-local options, which would
+-- be the panel-masked false right now — that's the wrong assertion
+-- shape for this regression. The global default is what editor
+-- windows materialized fresh-from-defaults inherit from.
+local function global(name) return vim.api.nvim_get_option_value(name, { scope = "global" }) end
+ok("global number SURVIVES panel open",
+  global("number") == seeded.number,
+  "expected " .. tostring(seeded.number) .. " got " .. tostring(global("number")))
+ok("global relativenumber SURVIVES panel open",
+  global("relativenumber") == seeded.relativenumber,
+  "expected " .. tostring(seeded.relativenumber) .. " got " .. tostring(global("relativenumber")))
+ok("global signcolumn SURVIVES panel open",
+  global("signcolumn") == seeded.signcolumn,
+  "expected " .. tostring(seeded.signcolumn) .. " got " .. tostring(global("signcolumn")))
+ok("global foldcolumn SURVIVES panel open",
+  global("foldcolumn") == seeded.foldcolumn,
+  "expected " .. tostring(seeded.foldcolumn) .. " got " .. tostring(global("foldcolumn")))
+
+-- ── Fresh editor split spawned AFTER panel inherits editor defaults. ──
+-- Use nvim_open_win with split=below targeting a non-panel window so
+-- the new split is materialized cleanly without disturbing the panel.
+-- Need a non-panel anchor: create a baseline editor window first via
+-- vsplit from the panel (the resulting window is editor-side; the
+-- panel keeps winfixwidth so layout doesn't squash it).
+vim.api.nvim_set_current_win(panel_win)
+-- Move focus to any non-panel window. nvim_open_win with split off
+-- the panel would inherit panel-window-local options, so we leave
+-- the panel and use the autocreated initial window if present, else
+-- spawn an editor window from outside the panel context.
+local editor_anchor
+for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+  if w ~= panel_win then editor_anchor = w; break end
+end
+if not editor_anchor then
+  -- No editor window in headless tab — create one from the panel side
+  -- via :new (horizontal split off the panel). The new window IS
+  -- editor-side. We use a fresh scratch so we don't dirty any buffer.
+  vim.cmd("new")
+  editor_anchor = vim.api.nvim_get_current_win()
+end
+vim.api.nvim_set_current_win(editor_anchor)
+
+local fresh = vim.api.nvim_open_win(0, false, {
+  win   = editor_anchor,
+  split = "below",
+})
+ok("fresh editor split spawned after panel open",
+  fresh ~= nil and vim.api.nvim_win_is_valid(fresh),
+  "winid=" .. tostring(fresh))
+
+ok("fresh split inherits global number (not panel-masked)",
+  vim.api.nvim_get_option_value("number", { win = fresh }) == seeded.number,
+  "expected " .. tostring(seeded.number) ..
+  " got " .. tostring(vim.api.nvim_get_option_value("number", { win = fresh })))
+ok("fresh split inherits global relativenumber (not panel-masked)",
+  vim.api.nvim_get_option_value("relativenumber", { win = fresh }) == seeded.relativenumber,
+  "expected " .. tostring(seeded.relativenumber) ..
+  " got " .. tostring(vim.api.nvim_get_option_value("relativenumber", { win = fresh })))
+ok("fresh split inherits global signcolumn (not panel-masked)",
+  vim.api.nvim_get_option_value("signcolumn", { win = fresh }) == seeded.signcolumn,
+  "expected " .. tostring(seeded.signcolumn) ..
+  " got " .. tostring(vim.api.nvim_get_option_value("signcolumn", { win = fresh })))
+
+-- ── Cleanup. ─────────────────────────────────────────────────
+if fresh and vim.api.nvim_win_is_valid(fresh) then
+  pcall(vim.api.nvim_win_close, fresh, true)
+end
+p:close()
+p:dispose()
+panel_mod._reset_for_tests()
+
+-- Restore pre-section globals so later sections / the host process
+-- aren't perturbed by the seed.
+vim.api.nvim_set_option_value("number",         saved.number,         {})
+vim.api.nvim_set_option_value("relativenumber", saved.relativenumber, {})
+vim.api.nvim_set_option_value("signcolumn",     saved.signcolumn,     {})
+vim.api.nvim_set_option_value("foldcolumn",     saved.foldcolumn,     {})
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
