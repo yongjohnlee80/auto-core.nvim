@@ -3477,42 +3477,23 @@ events_m._reset_for_tests()
 -- registrations below.
 local TEST_INSTANCE_ID = "9999999999-12345"
 local function FULL(bare) return bare .. ":" .. TEST_INSTANCE_ID end
-ok("host_fallback_root is durable global location (.auto-agents-config/mailbox)",
-  mailbox.host_fallback_root():find("%.auto%-agents%-config/mailbox$") ~= nil,
-  "got: " .. mailbox.host_fallback_root())
-ok("host_fallback_root does NOT include any worktree path segment",
-  not mailbox.host_fallback_root():find(tmp_root, 1, true),
+-- v0.1.33: host_fallback_root now resolves via workspace_root walk-up,
+-- not the durable global location. The path ends in `.auto-agents/mailbox`
+-- regardless of which workspace we're in.
+ok("host_fallback_root ends in .auto-agents/mailbox (workspace-scoped)",
+  mailbox.host_fallback_root():find("%.auto%-agents/mailbox$") ~= nil,
   "got: " .. mailbox.host_fallback_root())
 
 vim.env.AUTO_AGENTS_MAILBOX_ROOT = tmp_root .. "/env-mb"
 mailbox._reset_for_tests()
-ok("AUTO_AGENTS_MAILBOX_ROOT env var takes precedence for host fallback",
+ok("AUTO_AGENTS_MAILBOX_ROOT env var still overrides workspace resolution",
   mailbox.host_fallback_root() == tmp_root .. "/env-mb",
   "got: " .. mailbox.host_fallback_root())
 vim.env.AUTO_AGENTS_MAILBOX_ROOT = nil
 
-vim.env.AUTO_AGENTS_CONFIG_DIR = tmp_root .. "/cfg"
-mailbox._reset_for_tests()
-ok("AUTO_AGENTS_CONFIG_DIR resolves to <cfg>/mailbox",
-  mailbox.host_fallback_root() == tmp_root .. "/cfg/mailbox",
-  "got: " .. mailbox.host_fallback_root())
-vim.env.AUTO_AGENTS_CONFIG_DIR = nil
-
-vim.env.AUTO_AGENTS_KB_ROOT = tmp_root .. "/cfg2/kb"
-mailbox._reset_for_tests()
-ok("AUTO_AGENTS_KB_ROOT derives <dirname>/mailbox",
-  mailbox.host_fallback_root() == tmp_root .. "/cfg2/mailbox",
-  "got: " .. mailbox.host_fallback_root())
-vim.env.AUTO_AGENTS_KB_ROOT = nil
-
--- setup({mailbox = {root = ...}}) override beats env.
--- Fixture: reflect the actual agent-roster tool backing:
---   agent:lector  → codex-backed
---   agent:jarvis  → claude-backed (Claude Code; this very assistant)
---   agent:gemini  → gemini-backed
--- The architecture treats roots as opaque per-mailbox config dirs;
--- the test verifies that multiple distinct roots coexist and that
--- the central router collapses by unique root regardless of name.
+-- Fixture: reflect distinct per-mailbox roots. The architecture treats
+-- roots as opaque; the test verifies that multiple distinct roots
+-- coexist and the central router collapses by unique root.
 local active_root      = tmp_root .. "/active"
 local codex_like_root  = tmp_root .. "/.codex/mailbox"
 local claude_like_root = tmp_root .. "/.claude/mailbox"
@@ -3522,41 +3503,27 @@ ok("setup({mailbox={root=...}}) override applies to host fallback",
   mailbox.host_fallback_root() == active_root,
   "got: " .. mailbox.host_fallback_root())
 
--- ── 49a2. tool_root resolver — per-tool agent mailbox layout ──
--- The default agent-mailbox layout is the tool's own config dir
--- under $HOME, not the host coordination dir. host_fallback_root
--- is reserved for nvim/user.
+-- v0.1.33: tool_root / TOOL_DIRS are gone. Production code uses
+-- workspace_mailbox_root() instead; per-tool config dirs are now
+-- a downstream consumer concern (auto-agents.runtime.identity), not
+-- an auto-core primitive.
+ok("v0.1.33: mb_path.tool_root removed (clean cut)",
+  mb_path.tool_root == nil,
+  "tool_root still present")
+ok("v0.1.33: mb_path.TOOL_DIRS removed (clean cut)",
+  mb_path.TOOL_DIRS == nil,
+  "TOOL_DIRS still present")
+-- workspace_mailbox_root semantics: only the no-override path is
+-- workspace-relative. Once configure() has set an override (the
+-- setup() call above set active_root as the override), the override
+-- wins. Verify that explicitly by temporarily clearing it.
 do
-  local saved_home = vim.env.HOME
-  vim.env.HOME = "/home/test"
-  ok("tool_root('claude') resolves to ~/.claude/mailbox",
-    mb_path.tool_root("claude") == "/home/test/.claude/mailbox",
-    "got: " .. tostring(mb_path.tool_root("claude")))
-  ok("tool_root('gemini') resolves to ~/.gemini/mailbox",
-    mb_path.tool_root("gemini") == "/home/test/.gemini/mailbox")
-  ok("tool_root('codex') resolves to ~/.codex/mailbox",
-    mb_path.tool_root("codex") == "/home/test/.codex/mailbox")
-  ok("tool_root('unknown') returns nil",
-    mb_path.tool_root("unknown") == nil)
-  ok("tool_root('') returns nil",
-    mb_path.tool_root("") == nil)
-  -- Extensibility: a new tool can join by mutating TOOL_DIRS.
-  mb_path.TOOL_DIRS["amp"] = ".amp/mailbox"
-  ok("TOOL_DIRS is extensible for new tools",
-    mb_path.tool_root("amp") == "/home/test/.amp/mailbox")
-  mb_path.TOOL_DIRS["amp"] = nil
-  vim.env.HOME = saved_home
-end
-
--- Demonstrate the recommended call shape: register an agent
--- mailbox with root = path.tool_root('codex'). The fact that
--- a host coordination root exists doesn't affect agent registration.
-do
-  local probe_root = mb_path.tool_root("codex")
-  ok("an agent mailbox registered with tool_root('codex') lives under ~/.codex/mailbox",
-    type(probe_root) == "string"
-      and probe_root:find("%.codex/mailbox$") ~= nil,
-    "got: " .. tostring(probe_root))
+  mb_path.configure(nil)
+  ok("workspace_mailbox_root() resolves to <workspace>/.auto-agents/mailbox when no override is set",
+    mb_path.workspace_mailbox_root():find("%.auto%-agents/mailbox$") ~= nil,
+    "got: " .. mb_path.workspace_mailbox_root())
+  -- Restore the active_root override so subsequent assertions still see it.
+  mb_path.configure(active_root)
 end
 
 -- ── 49b. id validation ─────────────────────────────────────
@@ -3591,12 +3558,12 @@ ok("register returns record with per-mailbox root + dir + subs + wake (v0.1.8: i
     and lector_rec.id == FULL("agent:lector")
     and lector_rec.bare_id == "agent:lector"
     and lector_rec.root == codex_like_root
-    and lector_rec.dir == codex_like_root .. "/" .. FULL("agent:lector")
+    and lector_rec.dir == mb_path.mailbox_dir(FULL("agent:lector"), codex_like_root)
     and type(lector_rec.subs) == "table"
     and type(lector_rec.wake) == "table"
     and lector_rec.wake.command == "send_slot")
 ok("lector's mailbox dir lives under Codex's tool root with instance suffix",
-  lector_rec.dir == codex_like_root .. "/" .. FULL("agent:lector"),
+  lector_rec.dir == mb_path.mailbox_dir(FULL("agent:lector"), codex_like_root),
   "got: " .. lector_rec.dir)
 ok("inbox/outbox/processing/archive/responses all exist on disk",
   vim.fn.isdirectory(lector_rec.subs.inbox)      == 1
@@ -3616,7 +3583,7 @@ local jarvis_rec = mailbox.register("agent:jarvis", {
 })
 ok("claude-backed agent uses Claude's tool root",
   jarvis_rec.root == claude_like_root
-    and jarvis_rec.dir == claude_like_root .. "/" .. FULL("agent:jarvis"),
+    and jarvis_rec.dir == mb_path.mailbox_dir(FULL("agent:jarvis"), claude_like_root),
   "got: " .. jarvis_rec.dir)
 
 -- Add a second claude-backed agent to exercise the
@@ -3628,7 +3595,7 @@ local hephaestus_rec = mailbox.register("agent:hephaestus", {
 })
 ok("multiple claude-backed agents share the root, subdivided by full id",
   hephaestus_rec.root == claude_like_root
-    and hephaestus_rec.dir == claude_like_root .. "/" .. FULL("agent:hephaestus")
+    and hephaestus_rec.dir == mb_path.mailbox_dir(FULL("agent:hephaestus"), claude_like_root)
     and jarvis_rec.root == hephaestus_rec.root,
   "jarvis.dir=" .. jarvis_rec.dir
     .. " hephaestus.dir=" .. hephaestus_rec.dir)
@@ -3639,13 +3606,13 @@ local gemini_rec = mailbox.register("agent:gemini", {
   wake = { command = "send_slot", args = { slot = "gemini" } },
 })
 ok("gemini-backed agent uses its own tool root",
-  gemini_rec.dir == gemini_like_root .. "/" .. FULL("agent:gemini"))
+  gemini_rec.dir == mb_path.mailbox_dir(FULL("agent:gemini"), gemini_like_root))
 
 -- Host-side mailbox with no explicit root falls back.
 local nvim_rec = mailbox.register("nvim")
 ok("host-side 'nvim' mailbox falls back to host fallback root + instance suffix",
   nvim_rec.root == active_root
-    and nvim_rec.dir == active_root .. "/" .. FULL("nvim"))
+    and nvim_rec.dir == mb_path.mailbox_dir(FULL("nvim"), active_root))
 ok("nvim retains 'nvim' as bare_id (executioner-default key)",
   nvim_rec.bare_id == "nvim" and nvim_rec.executioner == true)
 
@@ -4911,11 +4878,11 @@ print("\n[49o] ADR 0023 Phase 1 — stale orphan event + wake identity_hint")
     wake = { command = "test_wake_hint" },
   })
   -- Stage a stale orphan mailbox dir layout under the same root —
-  -- never registered. Path matches the classify-expected shape
-  -- `<root>/<mailbox-id>/<sub>/<id>.json` so it would otherwise
-  -- pass parsing.
+  -- never registered. Path is composed via `mb_path.subdir` so the
+  -- v0.1.33 layout (`<root>/<instance>/<name>/<sub>/`) is honored
+  -- without test fixtures hardcoding the shape.
   local orphan_id  = "agent:orphan-ghost:9999999999-99999"
-  local orphan_dir = tmp_root .. "/" .. orphan_id .. "/outbox"
+  local orphan_dir = path_m.subdir(orphan_id, "outbox", tmp_root)
   vim.fn.mkdir(orphan_dir, "p")
   local orphan_file = orphan_dir .. "/orphan-msg-id-001.json"
 
@@ -5010,12 +4977,13 @@ print("\n[49p] mailbox.prune — sweep stale per-instance dirs")
   -- look like full-format instance dirs (pruneable by name pattern),
   -- one is a bare-id orphan from pre-v0.1.8 layout (also pruneable
   -- since it can never be "live" in v0.1.8).
-  local stale_full_a = codex_like_root .. "/agent:lector:1111111111-1111"
-  local stale_full_b = codex_like_root .. "/agent:juliet:2222222222-2222"
-  local stale_bare   = codex_like_root .. "/agent:orphan"
+  -- v0.1.33 layout: <root>/<instance>/<name>/. Compose via the path
+  -- module's resolver so the test fixtures don't reproduce layout
+  -- knowledge that lives in mb_path.
+  local stale_full_a = mb_path.mailbox_dir("agent:lector:1111111111-1111",  codex_like_root)
+  local stale_full_b = mb_path.mailbox_dir("agent:juliet:2222222222-2222", codex_like_root)
   vim.fn.mkdir(stale_full_a .. "/inbox", "p")
   vim.fn.mkdir(stale_full_b .. "/outbox", "p")
-  vim.fn.mkdir(stale_bare .. "/inbox", "p")
   -- Backdate each so they're older than the 7-day default. `touch`
   -- with relative time tags is the cheapest path; if the platform
   -- doesn't have it we fall back to a 1s threshold for this test.
@@ -5024,7 +4992,6 @@ print("\n[49p] mailbox.prune — sweep stale per-instance dirs")
   end
   backdate(stale_full_a)
   backdate(stale_full_b)
-  backdate(stale_bare)
 
   local result = mailbox.prune({ root = codex_like_root })
   local removed_set = {}
@@ -5032,19 +4999,17 @@ print("\n[49p] mailbox.prune — sweep stale per-instance dirs")
   ok("prune removed the two stale full-format instance dirs",
     removed_set[stale_full_a] == true and removed_set[stale_full_b] == true,
     vim.inspect(result.removed))
-  ok("prune removed the pre-v0.1.8 bare-id orphan",
-    removed_set[stale_bare] == true)
   local kept_alive_set = {}
   for _, d in ipairs(result.kept_alive) do kept_alive_set[d] = true end
   ok("prune kept the live registered lector dir alive",
     kept_alive_set[lector_rec.dir] == true,
     vim.inspect(result.kept_alive))
-  ok("prune left the per-tool-root bootstrap doc intact",
+  ok("prune left the workspace bootstrap doc intact",
     vim.fn.filereadable(codex_like_root .. "/bootstrap-mailbox.md") == 1)
 
   -- A second register of a fresh dir followed by an immediate prune
   -- should keep it (younger than threshold).
-  local fresh_dir = codex_like_root .. "/agent:fresh:3333333333-3333"
+  local fresh_dir = mb_path.mailbox_dir("agent:fresh:3333333333-3333", codex_like_root)
   vim.fn.mkdir(fresh_dir, "p")
   local result2 = mailbox.prune({ root = codex_like_root,
     max_age_seconds = 7 * 24 * 60 * 60 })

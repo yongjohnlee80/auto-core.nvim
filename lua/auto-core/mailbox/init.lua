@@ -237,21 +237,20 @@ function M.is_running() return router_mod.is_running() end
 ---Force a one-shot pass over every registered mailbox.
 function M.scan_now() return router_mod.scan_now() end
 
----Prune old per-instance mailbox dirs. Walks each registered tool
----root (or `opts.root` if explicitly passed), removes any mailbox
----dir whose name matches the standard id pattern, is NOT currently
----registered in this nvim's live registry, and whose mtime is
----older than `opts.max_age_seconds` (default: 7 days).
+---Prune old per-instance mailbox dirs. Walks each registered
+---mailbox root (or `opts.root` if explicitly passed) and removes
+---any `<instance>/<name>/` dir that isn't currently registered in
+---this nvim's live registry and whose mtime is older than
+---`opts.max_age_seconds` (default: 7 days).
 ---
----Skips the per-tool-root bootstrap doc (it's a file, not a dir)
----and skips live registered ids regardless of mtime. Bare-id
----directories from pre-v0.1.8 layouts are also swept by age — they
----can never be "live" in v0.1.8 since registrations are always
----per-instance now.
+---v0.1.33 layout: `<root>/<instance>/<name>/` instead of the
+---previous `<root>/<full_id>/`. Empty `<instance>/` parent dirs are
+---rmdir'd after their children are pruned. The workspace
+---bootstrap-mailbox.md and `seen_revisions/` tree are left intact.
 ---
 ---Returns `{ removed = string[], kept_alive = string[],
---- kept_recent = string[] }`. Errors during individual rm are
----non-fatal — the path is reported in `failed` instead.
+--- kept_recent = string[], failed = string[] }`. Errors during
+---individual rm are non-fatal — the path is reported in `failed`.
 ---@param opts { root: string?, max_age_seconds: integer? }?
 ---@return { removed: string[], kept_alive: string[], kept_recent: string[], failed: string[] }
 function M.prune(opts)
@@ -265,36 +264,62 @@ function M.prune(opts)
   local max_age = tonumber(opts.max_age_seconds) or (7 * 24 * 60 * 60)
   local now = os.time()
 
+  -- Live record dirs keyed by absolute path. rec.dir already encodes
+  -- the new <root>/<instance>/<name>/ layout via the registry's call
+  -- to mb_path.mailbox_dir at register-time, so this match stays
+  -- layout-agnostic.
   local live = {}
-  for _, rec in ipairs(registry_mod.records()) do live[rec.id] = true end
+  for _, rec in ipairs(registry_mod.records()) do live[rec.dir] = true end
 
   local out = { removed = {}, kept_alive = {}, kept_recent = {}, failed = {} }
 
+  local function rmdir_if_empty(p)
+    local s = vim.uv.fs_scandir(p)
+    if s and not vim.uv.fs_scandir_next(s) then
+      pcall(vim.uv.fs_rmdir, p)
+    end
+  end
+
   for _, root in ipairs(roots) do
     if vim.fn.isdirectory(root) == 1 then
-      local sd = vim.uv.fs_scandir(root)
-      if sd then
+      local sd_inst = vim.uv.fs_scandir(root)
+      if sd_inst then
         while true do
-          local name, type_ = vim.uv.fs_scandir_next(sd)
-          if not name then break end
-          if type_ == "directory" and name:match(path_mod.ID_PATTERN) then
-            local dir = root .. "/" .. name
-            if live[name] then
-              out.kept_alive[#out.kept_alive + 1] = dir
-            else
-              local stat = vim.uv.fs_stat(dir)
-              local mtime = stat and stat.mtime and stat.mtime.sec or now
-              if (now - mtime) >= max_age then
-                local ok = pcall(vim.fn.delete, dir, "rf")
-                if ok and vim.fn.isdirectory(dir) == 0 then
-                  out.removed[#out.removed + 1] = dir
-                else
-                  out.failed[#out.failed + 1] = dir
+          local instance, t1 = vim.uv.fs_scandir_next(sd_inst)
+          if not instance then break end
+          -- Skip non-instance entries (seen_revisions/, bootstrap doc,
+          -- anything that doesn't match the <unix>-<pid> shape).
+          if t1 == "directory"
+             and instance:match("^[0-9]+%-[0-9]+$") then
+            local inst_dir = root .. "/" .. instance
+            local sd_name = vim.uv.fs_scandir(inst_dir)
+            if sd_name then
+              while true do
+                local name, t2 = vim.uv.fs_scandir_next(sd_name)
+                if not name then break end
+                if t2 == "directory" then
+                  local dir = inst_dir .. "/" .. name
+                  if live[dir] then
+                    out.kept_alive[#out.kept_alive + 1] = dir
+                  else
+                    local stat = vim.uv.fs_stat(dir)
+                    local mtime = stat and stat.mtime and stat.mtime.sec or now
+                    if (now - mtime) >= max_age then
+                      local ok = pcall(vim.fn.delete, dir, "rf")
+                      if ok and vim.fn.isdirectory(dir) == 0 then
+                        out.removed[#out.removed + 1] = dir
+                      else
+                        out.failed[#out.failed + 1] = dir
+                      end
+                    else
+                      out.kept_recent[#out.kept_recent + 1] = dir
+                    end
+                  end
                 end
-              else
-                out.kept_recent[#out.kept_recent + 1] = dir
               end
             end
+            -- Tidy: drop the now-empty instance dir.
+            rmdir_if_empty(inst_dir)
           end
         end
       end

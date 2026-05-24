@@ -172,36 +172,53 @@ end
 ---@return AutoCoreMailboxRecord?, string?, string?
 local function classify(root, path)
   if not is_json_id(path) then return nil end
-  -- Strip the root prefix; expect `<mailbox-id>/<sub>/<id>.json`.
   if path:sub(1, #root + 1) ~= root .. "/" then return nil end
-  local rel = path:sub(#root + 2)
-  local mid, sub, fname = rel:match("^([^/]+)/([^/]+)/([^/]+)$")
-  if not mid or not sub or not fname then return nil end
 
-  -- Layout matched. Two reject cases below — emit the orphan
-  -- event for the registry-rejection case ONLY (the
-  -- "unknown-subdir" case is benign file noise; we don't want
-  -- to flood observability for those).
-  local rec = registry.get(mid)
-  if not rec or rec.root ~= root then
-    events.publish("core.mailbox:stale_orphan_detected", {
-      path        = path,
-      mailbox_id  = mid,
-      sub         = sub,
-      message_id  = id_from_filename(path),
-      reason      = (not rec) and "unregistered_mailbox" or "wrong_root",
-      context     = "router.classify",
-    })
+  -- v0.1.33: the mailbox dir layout is owned by
+  -- `auto-core.mailbox.path` (`<root>/<instance>/<name>/`). Rather
+  -- than re-parsing the layout here (which forks the source of
+  -- truth), match `path` against each registered record's `dir` +
+  -- expected subdir. The registry record already carries the
+  -- correct `dir` per `mb_path.mailbox_dir(full_id, root)`, so this
+  -- classify stays layout-agnostic — any future layout change in
+  -- the path module is picked up here for free.
+  for _, rec in ipairs(registry.records()) do
+    if rec.root == root then
+      for _, sub in ipairs({ "inbox", "outbox", "processing", "archive", "responses" }) do
+        local sub_prefix = rec.subs[sub]
+        if sub_prefix and path:sub(1, #sub_prefix + 1) == sub_prefix .. "/" then
+          local tail = path:sub(#sub_prefix + 2)
+          if not tail:find("/", 1, true) then
+            return rec, sub, id_from_filename(path)
+          end
+        end
+      end
+    end
+  end
+
+  -- No registered mailbox owns this path. Strip the root and split
+  -- so we can emit a useful stale-orphan event. The layout has the
+  -- shape `<instance>/<name>/<sub>/<file.json>`; if the file shape
+  -- doesn't match, treat as benign noise (skip the event).
+  local rel = path:sub(#root + 2)
+  local instance, name, sub, fname =
+    rel:match("^([^/]+)/([^/]+)/([^/]+)/([^/]+)$")
+  if not instance or not name or not sub or not fname then
     return nil
   end
-
-  -- Subdir must be in the standard list, otherwise ignore.
-  local valid = false
-  for _, s in ipairs({ "inbox", "outbox", "processing", "archive", "responses" }) do
-    if s == sub then valid = true; break end
-  end
-  if not valid then return nil end
-  return rec, sub, id_from_filename(path)
+  -- Reconstruct the bare id. For `agent:<name>` mailboxes the bare
+  -- id is `agent:<name>`; for `nvim`/`user` it's the bare name.
+  local bare = name
+  if bare ~= "nvim" and bare ~= "user" then bare = "agent:" .. name end
+  events.publish("core.mailbox:stale_orphan_detected", {
+    path        = path,
+    mailbox_id  = bare .. ":" .. instance,
+    sub         = sub,
+    message_id  = id_from_filename(path),
+    reason      = "unregistered_mailbox",
+    context     = "router.classify",
+  })
+  return nil
 end
 
 ---@param key string
@@ -231,24 +248,45 @@ end
 
 ---@param root string
 local function scan_orphan_candidates(root)
+  -- v0.1.33: layout is `<root>/<instance>/<name>/<sub>/<file>` — two
+  -- levels deep before the subdir. Walk instance dirs, then name
+  -- dirs within. A name dir whose `<bare>:<instance>` reconstruction
+  -- isn't in the registry is an orphan candidate; classify() emits
+  -- the event for each .json file it sees.
   local seen = seen_set(root .. ":orphans")
   local sd = vim.uv.fs_scandir(root)
   if not sd then return end
   while true do
-    local mailbox_id, type_ = vim.uv.fs_scandir_next(sd)
-    if not mailbox_id then break end
-    if type_ == "directory" and not registry.get(mailbox_id) then
-      for _, sub in ipairs({ "inbox", "outbox", "responses" }) do
-        local dir = root .. "/" .. mailbox_id .. "/" .. sub
-        for _, mid in ipairs(scan_ids(dir)) do
-          local path = dir .. "/" .. mid .. ".json"
-          if not seen[path] then
-            seen[path] = true
-            classify(root, path)
+    local instance, type_ = vim.uv.fs_scandir_next(sd)
+    if not instance then break end
+    if type_ ~= "directory" then goto continue_instance end
+    -- Skip well-known non-instance entries at the workspace root.
+    if instance == "seen_revisions" then goto continue_instance end
+
+    local sd2 = vim.uv.fs_scandir(root .. "/" .. instance)
+    if not sd2 then goto continue_instance end
+    while true do
+      local name, type2 = vim.uv.fs_scandir_next(sd2)
+      if not name then break end
+      if type2 == "directory" then
+        local bare = name
+        if bare ~= "nvim" and bare ~= "user" then bare = "agent:" .. name end
+        local full = bare .. ":" .. instance
+        if not registry.get(full) then
+          for _, sub in ipairs({ "inbox", "outbox", "responses" }) do
+            local dir = root .. "/" .. instance .. "/" .. name .. "/" .. sub
+            for _, mid in ipairs(scan_ids(dir)) do
+              local path = dir .. "/" .. mid .. ".json"
+              if not seen[path] then
+                seen[path] = true
+                classify(root, path)
+              end
+            end
           end
         end
       end
     end
+    ::continue_instance::
   end
 end
 

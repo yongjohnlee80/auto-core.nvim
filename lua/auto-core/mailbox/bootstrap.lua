@@ -176,23 +176,23 @@ end
 ---rendered revision, skip the atomic write entirely. This keeps
 ---mtime stable and silences the router fs.watch on repeat
 ---`register()` calls with unchanged protocol inputs.
----@param opts { tool_root: string }
+---@param opts { root: string }  -- workspace mailbox root (absolute path)
 ---@return { path: string, revision: string, wrote: boolean }
 function M.upsert(opts)
-  if type(opts) ~= "table" or type(opts.tool_root) ~= "string"
-      or opts.tool_root == "" then
-    error("auto-core.mailbox.bootstrap.upsert: opts.tool_root "
+  if type(opts) ~= "table" or type(opts.root) ~= "string"
+      or opts.root == "" then
+    error("auto-core.mailbox.bootstrap.upsert: opts.root "
       .. "(absolute path) is required")
   end
   local text, revision = M.render()
-  local path = opts.tool_root .. "/bootstrap-mailbox.md"
+  local path = opts.root .. "/bootstrap-mailbox.md"
   if read_existing_revision(path) == revision then
     return { path = path, revision = revision, wrote = false }
   end
-  -- Ensure tool root exists before writing — register() normally
+  -- Ensure root exists before writing — register() normally
   -- creates the mailbox subtree which would mkdir the parent, but
   -- a caller invoking upsert directly might not have.
-  vim.fn.mkdir(opts.tool_root, "p")
+  vim.fn.mkdir(opts.root, "p")
   local ok, err = atomic_write(path, text)
   if not ok then
     error("auto-core.mailbox.bootstrap.upsert: " .. tostring(err))

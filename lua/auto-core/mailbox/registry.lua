@@ -99,13 +99,13 @@ function M.register(id, opts)
   end
 
   local root = opts.root and mb_path.normalize_root(opts.root)
-                       or mb_path.host_fallback_root()
-  local dir = fs_path.join(root, full_id)
+                       or mb_path.workspace_mailbox_root()
+  local dir = mb_path.mailbox_dir(full_id, root)
   ensure_dir(dir)
 
   local subs = {}
   for _, sub in ipairs(mb_path.SUBDIRS) do
-    local p = fs_path.join(dir, sub)
+    local p = mb_path.subdir(full_id, sub, root)
     ensure_dir(p)
     subs[sub] = p
   end
@@ -116,7 +116,7 @@ function M.register(id, opts)
   -- v0.1.8: bootstrap doc is per-tool-root (one doc shared across
   -- every mailbox under this root), not per-mailbox. v0.1.7's
   -- revision-skip keeps repeat calls free.
-  local boot = bootstrap.upsert({ tool_root = root })
+  local boot = bootstrap.upsert({ root = root })
 
   -- Executioner default keyed on the BARE id, so "nvim" still
   -- triggers the host-side executioner convention after the

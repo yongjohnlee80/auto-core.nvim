@@ -1,43 +1,61 @@
 ---auto-core.mailbox.path — mailbox root + per-mailbox path resolution.
 ---
----Two distinct concepts. **Do not conflate them.**
+---### Workspace-scoped mailbox layout (v0.1.33+)
 ---
----### Agent mailbox roots — `tool_root(tool)`
+---The mailbox tree lives **inside the workspace**, at
+---`<workspace_root>/.auto-agents/mailbox/`. This replaces the
+---v0.1.8 per-tool-root layout (`~/.claude/mailbox`, `~/.codex/
+---mailbox`, `~/.gemini/mailbox`). Rationale: visibility (the user
+---sees mailbox files alongside their code), prunability (one tree
+---per workspace; nuke when done), and accessibility (agents whose
+---cwd is at or under the workspace root get native filesystem
+---access without per-kind sandbox grants).
 ---
----Per ADR 0013 §3, an agent-backed mailbox lives under the
----CLI agent's own durable global config dir, where the agent's
----sandbox already grants read/write without an explicit permission
----prompt:
+---Per-mailbox dir layout:
 ---
----  - claude → `~/.claude/mailbox`
----  - gemini → `~/.gemini/mailbox`
----  - codex  → `~/.codex/mailbox`
+---   <root>/<instance_id>/<name>/inbox/
+---                              /outbox/
+---                              /processing/
+---                              /archive/
+---                              /responses/
 ---
----Call `path.tool_root("claude")` etc. when registering an agent
----mailbox so its data lives in the agent's natural workspace.
+---  - `<root>` is `workspace_mailbox_root()` (the workspace
+---    `.auto-agents/mailbox/` dir) unless `register()` was passed
+---    an explicit `root` opt.
+---  - `<instance_id>` scopes the tree to this nvim process so two
+---    nvims sharing a workspace get non-overlapping subtrees.
+---  - `<name>` is the filesystem-safe name extracted from the
+---    mailbox id: `agent:jarvis:1747-3478` → `jarvis`,
+---    `nvim:1747-3478` → `nvim`, `user` → `user`. The type prefix
+---    (`agent:`, `nvim:`) is dropped at filesystem level because
+---    it's redundant once you're already in the instance subtree.
 ---
----### Host coordination root — `host_fallback_root()`
+---Per-agent seen-revision file (for bootstrap re-ingestion):
 ---
----The `nvim` and `user` mailboxes don't have a tool config dir;
----they run on the host. They fall back to a Neovim-side
----coordination root, resolved (first hit wins):
+---   <root>/seen_revisions/<name>/seen_revision
+---
+---Per-workspace bootstrap doc:
+---
+---   <root>/bootstrap-mailbox.md
+---
+---### Addressing scheme is unchanged
+---
+---Messages still carry `to = "agent:jarvis"` (bare) and
+---`from = "agent:jarvis:1747-3478"` (full). The colons live in the
+---**addressing layer** only; the filesystem layer strips them. The
+---router resolves bare ids to full ids via the registry exactly as
+---before.
+---
+---### Workspace root resolution
+---
+---`workspace_mailbox_root(opts)` calls `auto-core.fs.path.workspace_root`
+---to find the bare-repo parent (or `.git` parent) of the current cwd,
+---then appends `.auto-agents/mailbox`. Overrides:
 ---
 ---  1. `cfg.root` — explicit override set via `mailbox.configure`
 ---     or `auto-core.setup({ mailbox = { root = ... } })`.
 ---  2. `$AUTO_AGENTS_MAILBOX_ROOT` — env override for one-off shells.
----  3. `$AUTO_AGENTS_CONFIG_DIR/mailbox`  — when the auto-agents
----     config dir is exported.
----  4. `dirname($AUTO_AGENTS_KB_ROOT)/mailbox` — derive the config
----     dir from the kb root env var.
----  5. `~/.config/nvim/.auto-agents-config/mailbox` — last-resort
----     default matching the auto-agents host config convention.
----
----**This host root is intentionally NOT the default for agent
----mailboxes** — it's the host coordination dir, used only when
----no explicit `root` was passed on register and the id is a
----host-side actor.
----
----No hard dependency on `vim.fn.getcwd()` or any worktree path.
+---  3. Otherwise: `<workspace_root>/.auto-agents/mailbox`.
 ---
 ---@module 'auto-core.mailbox.path'
 
@@ -45,7 +63,7 @@ local fs_path = require("auto-core.fs.path")
 
 local M = {}
 
-local DEFAULT_RELATIVE = ".config/nvim/.auto-agents-config/mailbox"
+local WORKSPACE_MAILBOX_SUFFIX = ".auto-agents/mailbox"
 
 -- v0.1.8 instance_id state. Set once per nvim process (or overridden
 -- via M.set_instance_id by tests / consumers). Format:
@@ -65,12 +83,11 @@ local INSTANCE_SUFFIX_PATTERN = ":[0-9]+%-[0-9]+$"
 local ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9:_%-]*$"
 
 -- Module-local override (set by `mailbox.configure`). Used as the
--- HOST-SIDE FALLBACK ROOT for mailboxes registered without an
--- explicit per-mailbox root.
+-- workspace-mailbox root override.
 local _override_root = nil
 
----Configure the host-side fallback root. nil clears it (fall back
----to env / default).
+---Configure an explicit mailbox root override. nil clears it (fall
+---back to env / workspace resolution).
 ---@param root string?
 function M.configure(root)
   if root == nil or root == "" then
@@ -80,17 +97,11 @@ function M.configure(root)
   end
 end
 
----Expand `~` and normalize a caller-supplied root. Centralized so
----`register({ root = "~/.claude/mailbox" })` behaves identically
----to absolute-path callers.
+---Expand `~` and normalize a caller-supplied root.
 ---@param root string
 ---@return string
 function M.normalize_root(root)
   if root == nil or root == "" then return "" end
-  -- Manually expand the leading `~` because vim.fs.normalize alone
-  -- doesn't on every nvim version. fs_path.normalize composes
-  -- fnamemodify(":p") which DOES expand it, but we keep this
-  -- self-contained so callers don't need to know the chain.
   if root:sub(1, 1) == "~" then
     local home = vim.env.HOME or ""
     root = home .. root:sub(2)
@@ -98,11 +109,14 @@ function M.normalize_root(root)
   return fs_path.normalize(root)
 end
 
----Resolve the host-side fallback root using the documented order.
----Used when register() is called without an explicit `root` —
----typically for `nvim` and `user` mailboxes.
+---Resolve the workspace mailbox root. Walks up via
+---`auto-core.fs.path.workspace_root` from `opts.cwd` (default
+---`vim.fn.getcwd()`) and appends `.auto-agents/mailbox`. Honors
+---the `configure()` override and the `$AUTO_AGENTS_MAILBOX_ROOT`
+---env var as higher-precedence escape hatches.
+---@param opts { cwd: string? }?
 ---@return string
-function M.host_fallback_root()
+function M.workspace_mailbox_root(opts)
   if _override_root and _override_root ~= "" then
     return _override_root
   end
@@ -110,58 +124,25 @@ function M.host_fallback_root()
   if env_mb and env_mb ~= "" then
     return fs_path.normalize(env_mb)
   end
-  local env_cfg = vim.env.AUTO_AGENTS_CONFIG_DIR
-  if env_cfg and env_cfg ~= "" then
-    return fs_path.normalize(fs_path.join(env_cfg, "mailbox"))
-  end
-  local env_kb = vim.env.AUTO_AGENTS_KB_ROOT
-  if env_kb and env_kb ~= "" then
-    return fs_path.normalize(fs_path.join(fs_path.parent(env_kb), "mailbox"))
-  end
-  return fs_path.normalize(fs_path.join(vim.env.HOME or "~", DEFAULT_RELATIVE))
+  opts = opts or {}
+  local start = opts.cwd or vim.fn.getcwd()
+  local ws = fs_path.workspace_root({ start = start })
+                or fs_path.normalize(start)
+  return fs_path.normalize(fs_path.join(ws, WORKSPACE_MAILBOX_SUFFIX))
 end
+
+---Back-compat alias for the v0.1.5..v0.1.32 host-fallback resolver.
+---Now resolves to `workspace_mailbox_root()`; existing callers see a
+---workspace-scoped path instead of `~/.config/nvim/.auto-agents-config/
+---mailbox`. The legacy AUTO_AGENTS_CONFIG_DIR / AUTO_AGENTS_KB_ROOT
+---fallback chain is gone (replaced by workspace walk-up).
+---@return string
+function M.host_fallback_root() return M.workspace_mailbox_root() end
 
 ---Legacy alias for v0.1.5 callers — same as `host_fallback_root`.
----@deprecated prefer host_fallback_root() (for nvim/user mailboxes)
----            or tool_root(tool) (for agent-backed mailboxes).
+---@deprecated prefer workspace_mailbox_root().
 ---@return string
-function M.root() return M.host_fallback_root() end
-
--- Known CLI agent tools and their canonical config-dir layout.
--- Agents launched in their respective sandboxes already have r/w
--- on these paths, so the mailbox tree under <tool_root>/mailbox/
--- needs no special permission grant.
-local TOOL_DIRS = {
-  claude = ".claude/mailbox",
-  gemini = ".gemini/mailbox",
-  codex  = ".codex/mailbox",
-}
-
----Resolve `<tool>`'s default mailbox root. Returns the absolute
----path under `$HOME`. Use this when registering an agent mailbox
----so the per-mailbox `root` opt matches the sandbox-allowed
----location for that tool.
----
----Example:
----   mailbox.register("agent:lector", {
----     root = path.tool_root("codex"),
----     wake = { command = "send_slot", args = { slot = "lector" } },
----   })
----
----Returns nil for unrecognized tools — callers can extend the
----table via `M.TOOL_DIRS["foo"] = ".foo/mailbox"` if a new tool
----joins the family.
----@param tool string
----@return string?
-function M.tool_root(tool)
-  if type(tool) ~= "string" or tool == "" then return nil end
-  local rel = TOOL_DIRS[tool]
-  if not rel then return nil end
-  return fs_path.normalize(fs_path.join(vim.env.HOME or "~", rel))
-end
-
----Set of recognized tool names (for tests + dynamic discovery).
-M.TOOL_DIRS = TOOL_DIRS
+function M.root() return M.workspace_mailbox_root() end
 
 ---Validate a mailbox id. Returns ok, err_string?. The id is
 ---used as a directory name; we reject anything that could escape
@@ -178,23 +159,56 @@ function M.validate_id(id)
   return true
 end
 
----Resolve `<root>/<mailbox-id>/`. Does NOT create the directory.
----When `root` is omitted, uses the host-side fallback.
+-- Extract the filesystem-safe name from a mailbox id (bare or full).
+-- Strips the type prefix (`agent:`, `tool:`, etc.) AND the instance
+-- suffix. Examples:
+--   "agent:jarvis:1747-3478" → "jarvis"
+--   "agent:jarvis"           → "jarvis"
+--   "nvim:1747-3478"         → "nvim"
+--   "nvim"                   → "nvim"
+--   "user"                   → "user"
+local function _name_from_id(id)
+  local bare = M.is_full_id(id) and M.bare_id(id) or id
+  -- bare may be "agent:jarvis" or "nvim" — strip up to the first ':'
+  -- if present (the type prefix).
+  local _, after = bare:match("^([^:]+):(.+)$")
+  return after or bare
+end
+M._name_from_id = _name_from_id
+
+-- Extract the instance_id (without the leading colon) from a full id.
+-- Returns nil for bare ids.
+local function _instance_from_full(id)
+  local suffix = id and id:match(INSTANCE_SUFFIX_PATTERN)
+  return suffix and suffix:sub(2) or nil
+end
+M._instance_from_full = _instance_from_full
+
+---Resolve the on-disk dir for a mailbox id. Returns
+---`<root>/<instance>/<name>/` for full ids; `<root>/<name>/` for
+---bare ids (test/special-case path — production register() always
+---works with full ids). When `root` is omitted, uses
+---`workspace_mailbox_root()`.
 ---@param id   string
 ---@param root string?
 ---@return string
 function M.mailbox_dir(id, root)
   local ok, err = M.validate_id(id)
   if not ok then error("auto-core.mailbox.path: " .. tostring(err)) end
-  local r = root and M.normalize_root(root) or M.host_fallback_root()
-  return fs_path.join(r, id)
+  local r = root and M.normalize_root(root) or M.workspace_mailbox_root()
+  local name = _name_from_id(id)
+  local instance = _instance_from_full(id)
+  if instance then
+    return fs_path.join(r, instance, name)
+  end
+  return fs_path.join(r, name)
 end
 
 ---The five subdirectories every mailbox has, in stable order.
 M.SUBDIRS = { "inbox", "outbox", "processing", "archive", "responses" }
 
----Resolve `<root>/<mailbox-id>/<sub>/`. Pass `root` to address a
----specific tool config dir; omit to use the host-side fallback.
+---Resolve `<mailbox_dir>/<sub>/`. Pass `root` to override; omit to
+---use the workspace mailbox root.
 ---@param id   string
 ---@param sub  string
 ---@param root string?
@@ -211,17 +225,22 @@ function M.subdir(id, sub, root)
   return fs_path.join(M.mailbox_dir(id, root), sub)
 end
 
+---Resolve the per-agent seen-revision file path. Used by agents to
+---record which revision of `bootstrap-mailbox.md` they last ingested
+---so they can detect protocol-doc updates and re-ingest on demand.
+---Per-agent (keyed on name, not instance) so the value persists
+---across nvim restarts — the doc revision is global, not per-spawn.
+---@param id   string  bare or full mailbox id
+---@param root string?
+---@return string
+function M.seen_revision_path(id, root)
+  local ok, err = M.validate_id(id)
+  if not ok then error("auto-core.mailbox.path: " .. tostring(err)) end
+  local r = root and M.normalize_root(root) or M.workspace_mailbox_root()
+  return fs_path.join(r, "seen_revisions", _name_from_id(id), "seen_revision")
+end
+
 -- ── instance_id (v0.1.8) ─────────────────────────────────────
---
--- The instance_id is the per-nvim suffix that scopes mailbox ids
--- to a particular nvim process. ADR 0013 / v0.1.8: each nvim
--- instance has its own subtree under the tool root, so two nvims
--- can run `agent:jarvis` simultaneously without misdelivery.
---
--- Default value is `<os.time>-<getpid>`, computed lazily on first
--- read. We don't compute at module-load to keep _reset_for_tests
--- deterministic and to let consumers override via `set_instance_id`
--- before the first registration.
 
 ---Return the currently-resolved instance_id, computing the default
 ---on first call. Stable for the lifetime of this nvim process
@@ -230,7 +249,6 @@ end
 function M.get_instance_id()
   if _instance_id then return _instance_id end
   if _instance_lock then
-    -- defensive — should not happen, but avoid recursion
     return "0-0"
   end
   _instance_lock = true
@@ -239,10 +257,10 @@ function M.get_instance_id()
   return _instance_id
 end
 
----Override the instance_id. Consumers (typically tests, or auto-agents
----when it wants to pin to a project-scoped id) call this before any
----`register()` to set the suffix used for subsequent registrations.
----Pass `nil` to clear and fall back to the default computation.
+---Override the instance_id. Consumers (typically tests) call this
+---before any `register()` to set the suffix used for subsequent
+---registrations. Pass `nil` to clear and fall back to the default
+---computation.
 ---@param id string?
 function M.set_instance_id(id)
   if id == nil then _instance_id = nil; return end
@@ -263,8 +281,7 @@ end
 
 ---Strip the instance_id suffix from a full id, returning the bare
 ---form (`agent:lector:1747-3478` → `agent:lector`). If the id has no
----suffix, returns it unchanged. Useful for executioner / role checks
----and for display purposes.
+---suffix, returns it unchanged.
 ---@param id string
 ---@return string
 function M.bare_id(id)
@@ -288,26 +305,14 @@ function M.full_id(id)
   return id .. ":" .. M.get_instance_id()
 end
 
----Path to the per-tool-root bootstrap doc. ADR 0013 v0.1.8 hoists
----the bootstrap doc from `<mailbox-dir>/bootstrap-mailbox.md` to
----`<tool-root>/bootstrap-mailbox.md` so a single canonical doc is
----shared across every agent under that tool. Pass either the tool
----name (`"codex"`) — resolves via `tool_root` — or a literal root
----path (must already be absolute).
----@param tool_or_root string
+---Path to the workspace-scoped bootstrap-mailbox.md. One doc per
+---workspace mailbox root (since all agents under a workspace share
+---the same protocol contract).
+---@param root string?
 ---@return string
-function M.bootstrap_doc_path(tool_or_root)
-  if type(tool_or_root) ~= "string" or tool_or_root == "" then
-    error("auto-core.mailbox.path.bootstrap_doc_path: pass a tool name "
-      .. "or absolute root path")
-  end
-  local root
-  if TOOL_DIRS[tool_or_root] then
-    root = M.tool_root(tool_or_root)
-  else
-    root = M.normalize_root(tool_or_root)
-  end
-  return fs_path.join(root, "bootstrap-mailbox.md")
+function M.bootstrap_doc_path(root)
+  local r = root and M.normalize_root(root) or M.workspace_mailbox_root()
+  return fs_path.join(r, "bootstrap-mailbox.md")
 end
 
 ---Test-only — clears the override so each test starts from defaults.
@@ -317,8 +322,8 @@ function M._reset_for_tests()
   _instance_lock = false
 end
 
-M.DEFAULT_RELATIVE       = DEFAULT_RELATIVE
-M.ID_PATTERN             = ID_PATTERN
-M.INSTANCE_SUFFIX_PATTERN = INSTANCE_SUFFIX_PATTERN
+M.WORKSPACE_MAILBOX_SUFFIX = WORKSPACE_MAILBOX_SUFFIX
+M.ID_PATTERN               = ID_PATTERN
+M.INSTANCE_SUFFIX_PATTERN  = INSTANCE_SUFFIX_PATTERN
 
 return M
