@@ -109,11 +109,34 @@ function M.normalize_root(root)
   return fs_path.normalize(root)
 end
 
----Resolve the workspace mailbox root. Walks up via
----`auto-core.fs.path.workspace_root` from `opts.cwd` (default
----`vim.fn.getcwd()`) and appends `.auto-agents/mailbox`. Honors
----the `configure()` override and the `$AUTO_AGENTS_MAILBOX_ROOT`
----env var as higher-precedence escape hatches.
+---Resolve the workspace mailbox root. Appends `.auto-agents/mailbox`
+---to the canonical workspace location.
+---
+---Per `shared/conventions/auto-family-state-ownership.md` rule #2,
+---`auto-core.git.worktree` owns "where this session lives". This
+---resolver consults that state rather than inventing a parallel
+---workspace answer in `auto-agents`.
+---
+---Resolution order (highest precedence first):
+---  1. `_override_root` — `configure()` / `mailbox.setup({ root })`.
+---  2. `$AUTO_AGENTS_MAILBOX_ROOT` env var.
+---  3. `auto-core.git.worktree.get_workspace_root()` — session-scoped
+---     family container (the typical multi-worktree-shared mailbox
+---     tree case, set by `worktree.nvim` at session start).
+---  4. `auto-core.git.worktree.get_active()` — session-scoped active
+---     worktree (more specific than workspace_root; used when only
+---     active is set, e.g. a plain single-repo session).
+---  5. `opts.cwd` — defensive fallback when auto-core state is unset
+---     (typically a headless smoke / out-of-band call).
+---  6. `vim.fn.getcwd()` — last resort.
+---
+---**Removed in v0.1.33:** the `fs_path.workspace_root` walk-up. It
+---returned `parent(git_root)` for plain single-repo layouts (e.g.
+---`~/Source/Projects/nvim-plugins`), placing the mailbox one level
+---above the project root — surprising and incorrect. Consumers
+---should populate `auto-core.git.worktree` state (worktree.nvim
+---does this automatically at session start) rather than rely on
+---path-walk heuristics in the mailbox layer.
 ---@param opts { cwd: string? }?
 ---@return string
 function M.workspace_mailbox_root(opts)
@@ -124,11 +147,20 @@ function M.workspace_mailbox_root(opts)
   if env_mb and env_mb ~= "" then
     return fs_path.normalize(env_mb)
   end
+  local ok, worktree = pcall(require, "auto-core.git.worktree")
+  if ok and worktree then
+    local ws = worktree.get_workspace_root()
+    if ws and ws ~= "" then
+      return fs_path.normalize(fs_path.join(ws, WORKSPACE_MAILBOX_SUFFIX))
+    end
+    local active = worktree.get_active()
+    if active and active ~= "" then
+      return fs_path.normalize(fs_path.join(active, WORKSPACE_MAILBOX_SUFFIX))
+    end
+  end
   opts = opts or {}
   local start = opts.cwd or vim.fn.getcwd()
-  local ws = fs_path.workspace_root({ start = start })
-                or fs_path.normalize(start)
-  return fs_path.normalize(fs_path.join(ws, WORKSPACE_MAILBOX_SUFFIX))
+  return fs_path.normalize(fs_path.join(start, WORKSPACE_MAILBOX_SUFFIX))
 end
 
 ---Back-compat alias for the v0.1.5..v0.1.32 host-fallback resolver.
@@ -144,9 +176,16 @@ function M.host_fallback_root() return M.workspace_mailbox_root() end
 ---@return string
 function M.root() return M.workspace_mailbox_root() end
 
+---Reserved bare names that the host coordination layer owns. An
+---agent named `nvim` or `user` would alias the host/user mailbox
+---under the v0.1.33 layout (both resolve to `<root>/<instance>/nvim`
+---or `<root>/<instance>/user` after the type prefix is stripped),
+---causing routing isolation to break. Reject these at validation.
+M.RESERVED_AGENT_NAMES = { nvim = true, user = true }
+
 ---Validate a mailbox id. Returns ok, err_string?. The id is
 ---used as a directory name; we reject anything that could escape
----the root.
+---the root OR collide with reserved host names.
 ---@param id string
 ---@return boolean ok, string? err
 function M.validate_id(id)
@@ -155,6 +194,14 @@ function M.validate_id(id)
   end
   if not id:match(ID_PATTERN) then
     return false, "mailbox id contains forbidden characters or shape: " .. id
+  end
+  -- Reject agent ids that collide with host/user reserved names.
+  -- `agent:nvim` / `agent:user` would resolve to the same filesystem
+  -- name as `nvim` / `user` after `_name_from_id` strips the prefix.
+  local agent_name = id:match("^agent:([^:]+)")
+  if agent_name and M.RESERVED_AGENT_NAMES[agent_name] then
+    return false, "agent name '" .. agent_name
+      .. "' is reserved (would collide with host/user mailbox)"
   end
   return true
 end

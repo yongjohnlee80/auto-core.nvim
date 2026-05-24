@@ -2,19 +2,19 @@
 ---outbox routing, inbox-arrival events, response-arrival events,
 ---and wake-hook dispatch.
 ---
----Architecture (ADR 0013, revised):
+---Architecture (ADR 0013, revised; v0.1.33 workspace layout):
 ---
----  - The router groups bookkeeping by unique tool root, but watcher
----    handles attach to each registered mailbox subtree:
----       <root>/<mailbox-id>/...
----    This keeps late-spawned agents under an existing tool root
+---  - The router groups bookkeeping by unique mailbox root, but
+---    watcher handles attach to each registered mailbox subtree:
+---       <root>/<instance>/<name>/...
+---    This keeps late-spawned agents under an existing root
 ---    wakeable after `mailbox.register()` refreshes the router.
 ---  - libuv's fs_event isn't recursive on Linux, so we walk each
 ---    mailbox dir and open one fs_event handle per existing
 ---    subdirectory (matching the proven pattern in
 ---    `auto-core.fs.watch`).
 ---  - On any event, the router classifies the path:
----       <root>/<mailbox-id>/<subdir>/<name>.json
+---       <root>/<instance>/<name>/<subdir>/<file>.json
 ---    and dispatches:
 ---       outbox    → atomic rename → recipient inbox; publish
 ---                   `core.mailbox:outbox_routed` or

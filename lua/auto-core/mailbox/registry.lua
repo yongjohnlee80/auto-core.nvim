@@ -10,22 +10,23 @@
 ---suffixed id to address a specific instance (rare; cross-instance
 ---is intentionally explicit).
 ---
----Registering a mailbox:
+---Registering a mailbox (v0.1.33 workspace layout):
 ---
 ---  1. Resolves the on-disk root. The caller may pass an explicit
----     `root` (e.g. `~/.claude/mailbox` for a claude-backed agent)
----     so the sandbox-allowed location is used. Without `root`,
----     auto-core falls back to the host-side default — see
----     `auto-core.mailbox.path.host_fallback_root`.
+---     `root` for tests / out-of-band callers. Without `root`,
+---     auto-core resolves the workspace mailbox root via
+---     `auto-core.mailbox.path.workspace_mailbox_root` (which
+---     consults `auto-core.git.worktree` per the auto-family state
+---     ownership convention).
 ---  2. Resolves the full id via `path.full_id(bare_id)` so each
 ---     registration is scoped to this nvim's instance_id.
----  3. Ensures `<root>/<full_id>/{inbox,outbox,processing,archive,
----     responses}/` exist.
+---  3. Ensures `<root>/<instance>/<name>/{inbox,outbox,processing,
+---     archive,responses}/` exist.
 ---  4. Stores the optional `wake = { command, args }` config so the
 ---     central router can dispatch a wake-up through the command
 ---     registry when new inbox/responses files arrive.
 ---  5. Upserts `<root>/bootstrap-mailbox.md` from the canonical
----     template (per-tool-root, shared across every mailbox in
+---     template (per-workspace, shared across every mailbox in
 ---     that root — v0.1.8 hoist). v0.1.7's revision-skip keeps
 ---     this cheap on repeat calls.
 ---  6. Publishes `core.mailbox:registered`.

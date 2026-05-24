@@ -3535,6 +3535,16 @@ ok("validate_id rejects path traversal '../boom'",
   not mb_path.validate_id("../boom"))
 ok("validate_id rejects slash 'a/b'",
   not mb_path.validate_id("a/b"))
+-- v0.1.33: reject `agent:nvim` / `agent:user` (would collide with the
+-- host/user mailbox after `_name_from_id` strips the type prefix).
+ok("validate_id rejects reserved agent name 'agent:nvim'",
+  not mb_path.validate_id("agent:nvim"))
+ok("validate_id rejects reserved agent name 'agent:user'",
+  not mb_path.validate_id("agent:user"))
+ok("validate_id rejects reserved agent name with instance suffix",
+  not mb_path.validate_id("agent:nvim:1747-3478"))
+ok("validate_id still accepts host bare names 'nvim' and 'user'",
+  (mb_path.validate_id("nvim")) and (mb_path.validate_id("user")))
 ok("validate_id rejects leading dot '.hidden'",
   not mb_path.validate_id(".hidden"))
 
@@ -3682,11 +3692,10 @@ ok("bootstrap doc body does NOT bake in any specific agent id (v0.1.8 hoist)",
   boot_text:find("agent:lector", 1, true) == nil)
 ok("bootstrap doc carries the audit instructions",
   boot_text:find("bootstrap audit protocol") ~= nil)
-ok("bootstrap doc stores seen-revision under persistent tool-root state",
-  boot_text:find('$(dirname "$AUTO_AGENTS_MAILBOX_BOOTSTRAP_DOC")/.agent-state/seen-revision',
+ok("bootstrap doc stores seen-revision under per-agent workspace state (schema_version 7)",
+  boot_text:find("seen_revisions/<your-agent-name>/seen_revision",
     1, true) ~= nil
-    and boot_text:find("Do not store this only under `$AUTO_AGENTS_MAILBOX_DIR`",
-      1, true) ~= nil)
+    and boot_text:find("schema_version 7", 1, true) ~= nil)
 ok("bootstrap doc still documents spawn-time permission grants",
   boot_text:find("Spawn-time permission grants", 1, true) ~= nil
     and boot_text:find("--add-dir <path>", 1, true) ~= nil)
