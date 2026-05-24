@@ -249,20 +249,33 @@ function M.scan_now() return router_mod.scan_now() end
 ---this nvim's live registry and whose mtime is older than
 ---`opts.max_age_seconds` (default: 7 days).
 ---
----v0.1.33 layout: `<root>/<instance>/<name>/` instead of the
----v0.1.33 layout `<root>/<instance>/<name>/`. Empty `<instance>/` parent dirs are
----rmdir'd after their children are pruned. The workspace
----bootstrap-mailbox.md and `seen_revisions/` tree are left intact.
+---v0.1.33 layout: `<root>/<instance>/<name>/`. Empty `<instance>/`
+---parent dirs are rmdir'd after their children are pruned. The
+---workspace bootstrap-mailbox.md and `seen_revisions/` tree are
+---left intact.
 ---
----Returns `{ removed = string[], kept_alive = string[],
---- kept_recent = string[], failed = string[] }`. Errors during
----individual rm are non-fatal — the path is reported in `failed`.
----@param opts { root: string?, max_age_seconds: integer? }?
----@return { removed: string[], kept_alive: string[], kept_recent: string[], failed: string[] }
+---**Safety rail (Lector audit round-2 deferred):** when an explicit
+---`opts.root` is passed that has ZERO live registrations in this
+---nvim's registry (e.g. cleaning up a legacy
+---`~/.claude/mailbox/` tree), the call refuses by default — returns
+---`{ refused = true, reason = "no_live_registrations", root = ... }`
+---without touching the filesystem. Bypass with `opts.force = true`
+---to confirm you want to wipe a non-live tree. Implicit-root calls
+---(no `opts.root`, which prune every registered root) are
+---unaffected because they only walk roots that ARE registered.
+---
+---Returns either:
+---  - `{ refused = true, reason, root }` on safety-rail trip
+---  - `{ removed[], kept_alive[], kept_recent[], failed[] }` otherwise
+---Errors during individual rm are non-fatal — the path is reported
+---in `failed`.
+---@param opts { root: string?, max_age_seconds: integer?, force: boolean? }?
+---@return table
 function M.prune(opts)
   opts = opts or {}
+  local explicit_root = type(opts.root) == "string" and opts.root ~= ""
   local roots
-  if type(opts.root) == "string" and opts.root ~= "" then
+  if explicit_root then
     roots = { path_mod.normalize_root(opts.root) }
   else
     roots = registry_mod.unique_roots()
@@ -275,7 +288,25 @@ function M.prune(opts)
   -- to mb_path.mailbox_dir at register-time, so this match stays
   -- layout-agnostic.
   local live = {}
-  for _, rec in ipairs(registry_mod.records()) do live[rec.dir] = true end
+  local live_roots = {}
+  for _, rec in ipairs(registry_mod.records()) do
+    live[rec.dir] = true
+    live_roots[rec.root] = (live_roots[rec.root] or 0) + 1
+  end
+
+  -- Safety rail: explicit root with no live registrations refuses
+  -- unless force=true. Protects accidental cleanup of legacy roots
+  -- (e.g. `~/.claude/mailbox`) from wiping the whole tree.
+  if explicit_root and opts.force ~= true then
+    local target = roots[1]
+    if not live_roots[target] then
+      return {
+        refused = true,
+        reason  = "no_live_registrations",
+        root    = target,
+      }
+    end
+  end
 
   local out = { removed = {}, kept_alive = {}, kept_recent = {}, failed = {} }
 

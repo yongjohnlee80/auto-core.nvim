@@ -5066,6 +5066,29 @@ print("\n[49p] mailbox.prune — sweep stale per-instance dirs")
   end
   ok("prune keeps recent dirs under the age threshold", fresh_kept,
     vim.inspect(result2.kept_recent))
+
+  -- v0.1.33 / Phase 8 safety rail: prune({ root = <legacy_root> })
+  -- where the root has ZERO live registrations refuses by default —
+  -- protects accidental cleanup of foreign trees. Bypass with force.
+  local legacy_only_root = vim.fn.tempname() .. "_legacy-only-root"
+  vim.fn.mkdir(legacy_only_root .. "/9999999999-9999/orphan-agent/inbox", "p")
+  os.execute("touch -d '8 days ago' " .. vim.fn.shellescape(
+    legacy_only_root .. "/9999999999-9999/orphan-agent"))
+  local refused = mailbox.prune({ root = legacy_only_root })
+  ok("Phase 8 safety rail: prune refuses root with zero live registrations",
+    refused.refused == true and refused.reason == "no_live_registrations"
+      and refused.root:sub(-#legacy_only_root) == legacy_only_root,
+    vim.inspect(refused))
+  ok("Phase 8 safety rail: refusal does NOT touch the filesystem",
+    vim.fn.isdirectory(legacy_only_root .. "/9999999999-9999/orphan-agent") == 1)
+  -- force=true bypasses the rail.
+  local forced = mailbox.prune({ root = legacy_only_root, force = true })
+  ok("Phase 8 safety rail: force=true bypasses (prune proceeds)",
+    forced.refused ~= true
+      and type(forced.removed) == "table"
+      and #forced.removed >= 1,
+    vim.inspect(forced))
+  pcall(vim.fn.delete, legacy_only_root, "rf")
 end)()
 
 -- ── 49o. teardown ───────────────────────────────────────────
