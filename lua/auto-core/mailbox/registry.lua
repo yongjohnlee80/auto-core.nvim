@@ -5,10 +5,12 @@
 ---`agent:lector`). v0.1.8 introduces **per-instance scoping**:
 ---bare ids passed to `register` are auto-suffixed with the current
 ---nvim's `instance_id` (`<unix-seconds>-<pid>`) so that multiple
----nvim processes sharing a tool root (~/.codex/mailbox/...) get
----non-overlapping mailbox subtrees. Callers can pass an already-
----suffixed id to address a specific instance (rare; cross-instance
----is intentionally explicit).
+---nvim processes sharing a workspace mailbox root get
+---non-overlapping mailbox subtrees (in the v0.1.33 layout the
+---instance becomes a directory level under the workspace root:
+---`<workspace>/.auto-agents/mailbox/<instance>/<name>/`). Callers
+---can pass an already-suffixed id to address a specific instance
+---(rare; cross-instance is intentionally explicit).
 ---
 ---Registering a mailbox (v0.1.33 workspace layout):
 ---
@@ -55,7 +57,7 @@ local _by_id = {}
 ---@field args    table?                  -- args passed to the handler
 
 ---@class AutoCoreMailboxRegisterOpts
----@field root        string?                    -- per-mailbox root (e.g. "~/.claude/mailbox"); falls back to host default
+---@field root        string?                    -- explicit override for the workspace mailbox root; falls back to `auto-core.mailbox.path.workspace_mailbox_root()`
 ---@field wake        AutoCoreMailboxWakeSpec?   -- dispatch on inbox/responses arrival
 ---@field executioner boolean?                   -- when true, the central router auto-claims+dispatches command messages via the registry and writes the response; default true for id='nvim', false elsewhere
 
@@ -63,7 +65,7 @@ local _by_id = {}
 ---@field id            string                       -- full id including `:<instance_id>` suffix
 ---@field bare_id       string                       -- caller's input form (without instance suffix)
 ---@field root          string                       -- resolved fallback or explicit root
----@field dir           string                       -- `<root>/<full_id>/`
+---@field dir           string                       -- `<root>/<instance>/<name>/` (v0.1.33 workspace layout)
 ---@field subs          table<string, string>        -- subdir name → absolute path
 ---@field wake          AutoCoreMailboxWakeSpec?
 ---@field executioner   boolean                      -- when true, router auto-dispatches commands addressed to this mailbox
@@ -114,7 +116,7 @@ function M.register(id, opts)
   local previous = _by_id[full_id]
   local registered_at = previous and previous.registered_at or message.now_iso()
 
-  -- v0.1.8: bootstrap doc is per-tool-root (one doc shared across
+  -- v0.1.33: bootstrap doc is per-workspace-root (one doc shared across
   -- every mailbox under this root), not per-mailbox. v0.1.7's
   -- revision-skip keeps repeat calls free.
   local boot = bootstrap.upsert({ root = root })

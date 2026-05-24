@@ -153,10 +153,10 @@ local function id_from_filename(path)
   return base:sub(1, -6)  -- strip ".json"
 end
 
----Classify a path observed under `<root>/<mailbox-id>/<sub>/<file>`
----into (mailbox_record, sub, message_id). Returns nil on no-match
----(e.g. the bootstrap-mailbox.md doc, or a file under an unknown
----subdir, or a non-json file).
+---Classify a path observed under `<root>/<instance>/<name>/<sub>/<file>`
+---(v0.1.33 workspace layout) into (mailbox_record, sub, message_id).
+---Returns nil on no-match (e.g. the bootstrap-mailbox.md doc, a
+---file under an unknown subdir, or a non-json file).
 ---
 ---ADR 0023 Track D: when the path matches the expected layout but
 ---the mailbox isn't registered with the live router (i.e. it's an
@@ -453,7 +453,7 @@ local function route_outbox(rec, mid)
   })
 
   -- Routing via rename does not always produce a separate, reliable
-  -- recipient-side fs_event across all tool roots. Dispatch the inbox
+  -- recipient-side fs_event on every filesystem. Dispatch the inbox
   -- arrival immediately; handle_inbox's seen set de-duplicates later
   -- watcher or scan_now passes for the same message id.
   if handle_inbox then handle_inbox(recipient, mid) end

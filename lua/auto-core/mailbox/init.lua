@@ -1,14 +1,17 @@
 ---auto-core.mailbox — durable, file-backed mailbox transport with
 ---central router + command registry.
 ---
----Phase 1 surface per ADR 0013 (revised after the per-tool-config-
----dir decision):
+---Phase 1 surface per ADR 0013 (revised for the v0.1.33
+---workspace-scoped layout):
 ---
----  * Per-mailbox roots so claude-backed agents live under
----    `~/.claude/mailbox`, gemini-backed under `~/.gemini/mailbox`,
----    etc — the sandbox already grants the agent read/write on
----    its own config dir.
----  * Per-mailbox `bootstrap-mailbox.md` upserted on every
+---  * Workspace-scoped mailbox root — every agent registered in
+---    this nvim session lives under
+---    `<workspace_root>/.auto-agents/mailbox/<instance>/<name>/`.
+---    The workspace root resolves via `auto-core.git.worktree`
+---    state per the auto-family state-ownership convention; agents
+---    inherit native filesystem access when their cwd is at or
+---    under the workspace.
+---  * Per-workspace `bootstrap-mailbox.md` upserted on every
 ---    `register()` from the canonical template. Agents audit the
 ---    `revision:` frontmatter field on wake to detect protocol
 ---    changes (see `lua/auto-core/mailbox/templates/bootstrap.md`).
@@ -115,11 +118,13 @@ end
 ---@return string
 function M.host_fallback_root() return path_mod.host_fallback_root() end
 
----Register a mailbox. The opts table carries per-mailbox `root`
----(typically a tool config dir like `~/.claude/mailbox`) and an
----optional `wake = { command, args }` for the router to dispatch
----on inbox/responses arrival. v0.1.8 auto-suffixes bare ids with
----this nvim's `instance_id` — see `mailbox.get_instance_id`.
+---Register a mailbox. The opts table carries an explicit
+---`root` override (rare — typically a test or out-of-band caller)
+---and an optional `wake = { command, args }` for the router to
+---dispatch on inbox/responses arrival. Without `root`, auto-core
+---resolves the workspace mailbox root via
+---`path.workspace_mailbox_root()`. v0.1.8 auto-suffixes bare ids
+---with this nvim's `instance_id` — see `mailbox.get_instance_id`.
 ---@param id   string
 ---@param opts AutoCoreMailboxRegisterOpts?
 function M.register(id, opts)
@@ -142,8 +147,9 @@ end
 ---This nvim's mailbox `instance_id` (`<unix-seconds>-<pid>` by
 ---default; stable for the lifetime of this nvim process). All
 ---bare mailbox ids registered via `register` are suffixed with
----this value, so two nvims sharing a tool root get
----non-overlapping mailbox subtrees.
+---this value; the v0.1.33 layout uses `<instance>` as a directory
+---level under the workspace root so two nvims sharing a workspace
+---get non-overlapping mailbox subtrees.
 ---@return string
 function M.get_instance_id() return path_mod.get_instance_id() end
 
@@ -162,7 +168,7 @@ function M.set_instance_id(id) return path_mod.set_instance_id(id) end
 ---  AUTO_AGENTS_INSTANCE_ID            — this nvim's instance_id
 ---  AUTO_AGENTS_MAILBOX_ID             — agent's full mailbox id
 ---  AUTO_AGENTS_MAILBOX_DIR            — agent's mailbox dir
----  AUTO_AGENTS_MAILBOX_BOOTSTRAP_DOC  — per-tool-root bootstrap doc
+---  AUTO_AGENTS_MAILBOX_BOOTSTRAP_DOC  — per-workspace bootstrap doc
 ---@param record AutoCoreMailboxRecord
 ---@return table<string, string>
 function M.env_for_agent(record)
@@ -244,7 +250,7 @@ function M.scan_now() return router_mod.scan_now() end
 ---`opts.max_age_seconds` (default: 7 days).
 ---
 ---v0.1.33 layout: `<root>/<instance>/<name>/` instead of the
----previous `<root>/<full_id>/`. Empty `<instance>/` parent dirs are
+---v0.1.33 layout `<root>/<instance>/<name>/`. Empty `<instance>/` parent dirs are
 ---rmdir'd after their children are pruned. The workspace
 ---bootstrap-mailbox.md and `seen_revisions/` tree are left intact.
 ---

@@ -167,13 +167,37 @@ end
 ---@param start string?       -- starting path (default cwd)
 ---@param markers string[]?   -- defaults to DEFAULT_PROJECT_MARKERS
 ---@return string?            -- absolute root, or nil if no marker found before /
+---Validate a `.git` marker before treating it as a git repo. Linked
+---worktrees use a FILE `gitdir: <path>` (accept as-is); regular and
+---bare repos use a DIRECTORY containing canonical entries
+---(HEAD / objects / refs). An empty `.git/` dir (e.g. a stray
+---`/tmp/.git/`) returns false so child dirs aren't misclassified
+---as in-repo. Per Lector audit 2026-05-24.
+---@param marker_path string
+---@return boolean
+local function _is_valid_git_marker(marker_path)
+  if M.is_file(marker_path) then return true end
+  if not M.is_dir(marker_path) then return false end
+  for _, entry in ipairs({ "HEAD", "objects", "refs" }) do
+    if M.exists(M.join(marker_path, entry)) then return true end
+  end
+  return false
+end
+
 local function walk_up_for_markers(start, markers)
   local cur = M.normalize(start or vim.fn.getcwd())
   if cur == "" then return nil end
   while cur ~= "" and cur ~= "/" do
     for _, marker in ipairs(markers) do
-      if M.exists(M.join(cur, marker)) then
-        return cur
+      local p = M.join(cur, marker)
+      if M.exists(p) then
+        -- For `.git` specifically, validate the marker shape so we
+        -- don't classify temp dirs with accidental empty `.git`
+        -- ancestors as in-repo (Lector audit 2026-05-24). Other
+        -- markers (go.mod, package.json, etc.) pass through.
+        if marker ~= ".git" or _is_valid_git_marker(p) then
+          return cur
+        end
       end
     end
     local parent = M.parent(cur)

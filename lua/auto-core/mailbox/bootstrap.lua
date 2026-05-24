@@ -1,21 +1,25 @@
 ---auto-core.mailbox.bootstrap — render the canonical bootstrap doc
----and upsert it at the per-tool-root location.
+---and upsert it at the workspace-mailbox-root location.
 ---
----v0.1.8 hoists the doc from `<mailbox-dir>/bootstrap-mailbox.md`
+---v0.1.8 hoisted the doc from `<mailbox-dir>/bootstrap-mailbox.md`
 ---(per agent, content with `{{id}}` and `{{dir}}` substituted) to
----`<tool-root>/bootstrap-mailbox.md` (one doc per tool root,
----agent-agnostic — agents discover their identity via spawn-time
----env vars). The template has no per-call substitutions beyond
----`{{revision}}` / `{{upserted_at}}`, so every agent under a given
----tool root sees the same doc and the same revision.
+---a single doc per root, agent-agnostic — agents discover their
+---identity via spawn-time env vars. v0.1.33 then re-anchored the
+---root from per-CLI config dirs to a workspace-scoped location:
+---`<workspace_root>/.auto-agents/mailbox/bootstrap-mailbox.md`
+---(one doc per workspace mailbox root; resolved via
+---`auto-core.git.worktree` state). The template has no per-call
+---substitutions beyond `{{revision}}` / `{{upserted_at}}`, so every
+---agent under a given workspace root sees the same doc and the same
+---revision.
 ---
----`register(id, opts)` calls `upsert({ tool_root })` to keep
----`<tool-root>/bootstrap-mailbox.md` in sync with the canonical
----protocol. The `revision:` field in the frontmatter is the sha256
----of the rendered body with placeholders substituted — "same
----content" → "same revision", regardless of when it was written.
----Agents compare this revision to their last-acknowledged value on
----wake to detect protocol changes (see template body).
+---`register(id, opts)` calls `upsert({ root })` to keep
+---`<root>/bootstrap-mailbox.md` in sync with the canonical protocol.
+---The `revision:` field in the frontmatter is the sha256 of the
+---rendered body with placeholders substituted — "same content" →
+---"same revision", regardless of when it was written. Agents compare
+---this revision to their last-acknowledged value on wake to detect
+---protocol changes (see template body).
 ---
 ---v0.1.7's no-op short-circuit is preserved: if the existing doc's
 ---revision already matches the rendered revision, the atomic write
@@ -170,8 +174,9 @@ local function read_existing_revision(path)
       or data:match("^revision:%s*([%w]+)")
 end
 
----Render and upsert `bootstrap-mailbox.md` into the **tool root**
----(v0.1.8 layout — one doc per tool root, not per-mailbox). No-op
+---Render and upsert `bootstrap-mailbox.md` into the **workspace
+---mailbox root** (v0.1.33 layout — one doc per workspace, not
+---per-mailbox; replaces the v0.1.8 per-tool-root location). No-op
 ---short-circuit: if the existing doc on disk already carries the
 ---rendered revision, skip the atomic write entirely. This keeps
 ---mtime stable and silences the router fs.watch on repeat

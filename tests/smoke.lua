@@ -735,9 +735,12 @@ ok("exists false on a non-existent path",
 
 -- ─────────────────────── 24. fs.path root resolvers ─────────────
 print("\n[24] fs.path — project_root / git_root / workspace_root")
--- Build a fake worktree-style layout under a tempdir.
+-- Build a fake worktree-style layout under a tempdir. The `.git/`
+-- needs a `HEAD` entry to pass v0.1.33's empty-`.git` validator
+-- (Lector audit 2026-05-24); plant the minimal real-git shape.
 local repo = td .. "/proj-fake"
 vim.fn.mkdir(repo .. "/.git", "p")
+vim.fn.writefile({ "ref: refs/heads/main" }, repo .. "/.git/HEAD")
 vim.fn.writefile({ "" }, repo .. "/go.mod")
 local sub = repo .. "/internal/pkg"
 vim.fn.mkdir(sub, "p")
@@ -799,6 +802,41 @@ ok("git.repo.is_git false on a fresh empty dir",
 ok("git.repo.root nil on a fresh empty dir",
   repo_mod.root(non_git) == nil)
 pcall(vim.fn.delete, non_git, "rf")
+
+-- v0.1.33 / Lector round-3 regression: an EMPTY `.git/` directory
+-- ancestor must not be treated as a valid git marker. Before the
+-- validator was added, a stray `/tmp/.git/` (common on dev
+-- machines) caused every `/tmp/<x>/` to misclassify as in-repo.
+do
+  local stray_root = vim.fn.tempname() .. "-empty-git-ancestor"
+  local stray_git  = stray_root .. "/.git"
+  local child      = stray_root .. "/sub/leaf"
+  vim.fn.mkdir(stray_git, "p")  -- empty .git dir
+  vim.fn.mkdir(child, "p")
+  ok("git.repo.is_git rejects empty `.git` ancestor",
+    repo_mod.is_git(child) == false,
+    "got: " .. tostring(repo_mod.is_git(child)))
+  ok("git.repo.root nil when ancestor `.git` is empty",
+    repo_mod.root(child) == nil,
+    "got: " .. tostring(repo_mod.root(child)))
+  -- Plant a `HEAD` ref to verify the validator accepts a real
+  -- repository-shaped `.git/` once entries appear.
+  vim.fn.writefile({ "ref: refs/heads/main" }, stray_git .. "/HEAD")
+  ok("git.repo.is_git accepts `.git` ancestor with HEAD",
+    repo_mod.is_git(child) == true,
+    "got: " .. tostring(repo_mod.is_git(child)))
+  -- And a FILE `.git` (linked-worktree gitdir indirection) — also
+  -- accepted, separate from the dir-marker validator.
+  local lwt_root = vim.fn.tempname() .. "-linked-worktree"
+  vim.fn.mkdir(lwt_root, "p")
+  vim.fn.writefile({ "gitdir: /elsewhere/repo/.git/worktrees/lwt" },
+    lwt_root .. "/.git")
+  ok("git.repo.is_git accepts file-marker `.git` (linked-worktree gitdir indirection)",
+    repo_mod.is_git(lwt_root) == true,
+    "got: " .. tostring(repo_mod.is_git(lwt_root)))
+  pcall(vim.fn.delete, stray_root, "rf")
+  pcall(vim.fn.delete, lwt_root, "rf")
+end
 
 -- ─────────────────────── 26. fs.watch — libuv watcher + events ──────────────
 print("\n[26] fs.watch — start/stop, events, debounce, ignore, max_handles")
