@@ -3414,8 +3414,9 @@ ok("M.debug.winlog.stop is a function",
   type(core.debug.winlog.stop) == "function")
 ok("M.mailbox is a table on the public surface (ADR 0013 Phase 1)",
   type(core.mailbox) == "table")
-ok("M.mailbox surface includes send/claim/complete/start/stop/refresh/scan_now",
+ok("M.mailbox surface includes send/unregister/claim/complete/start/stop/refresh/scan_now",
   type(core.mailbox.send) == "function"
+    and type(core.mailbox.unregister) == "function"
     and type(core.mailbox.claim) == "function"
     and type(core.mailbox.complete) == "function"
     and type(core.mailbox.start) == "function"
@@ -4006,7 +4007,7 @@ commands.register("send_slot", {
 })
 
 -- Register user FIRST so its wake hook is in place before we send.
-mailbox.register("user", {
+local user_rec = mailbox.register("user", {
   wake = { command = "send_slot", args = { slot = "user_terminal" } },
 })
 
@@ -4038,6 +4039,53 @@ ok("wake hook dispatched send_slot on inbox arrival for the new message",
     return false
   end)(),
   vim.inspect(wake_invocations))
+
+-- Regression: a mailbox registered after router.start under an already
+-- watched root must still get its own mailbox-subtree watcher coverage.
+-- This is the common Claude-backed multi-agent shape.
+local watched_before = router.status().roots[claude_like_root]
+  and router.status().roots[claude_like_root].watched or 0
+local late_claude = mailbox.register("agent:late-claude", {
+  root = claude_like_root,
+  wake = { command = "send_slot", args = { slot = "late-claude" } },
+})
+local watched_after = router.status().roots[claude_like_root]
+  and router.status().roots[claude_like_root].watched or 0
+ok("router.refresh adds mailbox-subtree watchers for same-root late mailboxes",
+  watched_after > watched_before,
+  "before=" .. tostring(watched_before) .. " after=" .. tostring(watched_after))
+
+local late_msg = message.build({
+  from = "user", to = late_claude.id,
+  body = "late claude wake test",
+})
+vim.fn.writefile({ vim.json.encode(late_msg) },
+  user_rec.subs.outbox .. "/" .. late_msg.id .. ".json")
+router.scan_now()
+vim.wait(300, function()
+  for _, inv in ipairs(wake_invocations) do
+    if inv.ctx.arrival_id == late_msg.id then return true end
+  end
+  return false
+end, 25)
+ok("routed mail immediately dispatches wake for same-root late mailbox",
+  (function()
+    for _, inv in ipairs(wake_invocations) do
+      if inv.ctx.arrival_id == late_msg.id
+          and inv.ctx.mailbox == "agent:late-claude"
+          and inv.args.slot == "late-claude"
+      then return true end
+    end
+    return false
+  end)(),
+  vim.inspect(wake_invocations))
+
+local removed_late = mailbox.unregister("agent:late-claude")
+local watched_removed = router.status().roots[claude_like_root]
+  and router.status().roots[claude_like_root].watched or 0
+ok("mailbox.unregister returns removed record and releases watcher coverage",
+  removed_late == late_claude and watched_removed < watched_after,
+  "after=" .. tostring(watched_after) .. " removed=" .. tostring(watched_removed))
 
 -- Wake also fires for response arrivals to the sender. Subscribe
 -- AFTER the send so we only capture the response leg.
@@ -4884,18 +4932,25 @@ print("\n[49o] ADR 0023 Phase 1 — stale orphan event + wake identity_hint")
   mailbox_m.scan_now()
   vim.wait(150, function() return #orphan_events > 0 end, 20)
 
+  local orphan_event
+  for _, event in ipairs(orphan_events) do
+    if event.mailbox_id == orphan_id then
+      orphan_event = event
+      break
+    end
+  end
   ok("ADR 0023 §3.6: stale orphan write under unregistered mailbox emits event",
-    #orphan_events >= 1, vim.inspect(orphan_events))
+    orphan_event ~= nil, vim.inspect(orphan_events))
   ok("ADR 0023 §3.6: orphan event payload carries mailbox_id + reason",
-    orphan_events[1]
-      and orphan_events[1].mailbox_id == orphan_id
-      and orphan_events[1].reason == "unregistered_mailbox",
-    vim.inspect(orphan_events[1]))
+    orphan_event
+      and orphan_event.mailbox_id == orphan_id
+      and orphan_event.reason == "unregistered_mailbox",
+    vim.inspect(orphan_event))
   ok("ADR 0023 §3.6: orphan event payload carries sub + message_id + path",
-    orphan_events[1]
-      and orphan_events[1].sub == "outbox"
-      and orphan_events[1].message_id == "orphan-msg-id-001"
-      and orphan_events[1].path == orphan_file)
+    orphan_event
+      and orphan_event.sub == "outbox"
+      and orphan_event.message_id == "orphan-msg-id-001"
+      and orphan_event.path == orphan_file)
 
   events_m.unsubscribe(orphan_sub)
 

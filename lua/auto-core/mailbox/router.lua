@@ -4,13 +4,13 @@
 ---
 ---Architecture (ADR 0013, revised):
 ---
----  - The router opens ONE walk-and-watch per UNIQUE registered
----    root. So claude-backed mailboxes under `~/.claude/mailbox`
----    share one watcher; gemini-backed ones under `~/.gemini/
----    mailbox` get their own; host-side `nvim`/`user` share the
----    fallback root's watcher. Typical session: 2–4 root watchers.
+---  - The router groups bookkeeping by unique tool root, but watcher
+---    handles attach to each registered mailbox subtree:
+---       <root>/<mailbox-id>/...
+---    This keeps late-spawned agents under an existing tool root
+---    wakeable after `mailbox.register()` refreshes the router.
 ---  - libuv's fs_event isn't recursive on Linux, so we walk each
----    root at start and open one fs_event handle per existing
+---    mailbox dir and open one fs_event handle per existing
 ---    subdirectory (matching the proven pattern in
 ---    `auto-core.fs.watch`).
 ---  - On any event, the router classifies the path:
@@ -31,9 +31,9 @@
 ---
 ---Lifecycle:
 ---  - `router.start()`   idempotent; opens watchers for every
----                       currently-registered unique root.
+---                       currently-registered mailbox subtree.
 ---  - `router.refresh()` re-scans the registry, opens watchers for
----                       any newly-registered root, closes watchers
+---                       newly-registered mailboxes, closes watchers
 ---                       for roots that no longer have any mailbox.
 ---  - `router.stop()`    closes everything.
 ---
@@ -61,6 +61,10 @@ local LOG_COMPONENT = "auto-core.mailbox.router"
 
 local M = {}
 
+-- Forward declaration: successful outbox delivery immediately handles the
+-- recipient inbox so wake dispatch does not depend on a second fs_event.
+local handle_inbox
+
 local DEFAULT_DEBOUNCE_MS    = 25
 local DEFAULT_MAX_HANDLES    = 1024
 local DEFAULT_POLL_INTERVAL  = 1000   -- ms; honored when any root falls back to poll, or when mode='poll'
@@ -82,9 +86,10 @@ local DEFAULT_POLL_INTERVAL  = 1000   -- ms; honored when any root falls back to
 
 ---@class AutoCoreMailboxRouterRootEntry
 ---@field root        string
----@field handles     userdata[]   -- fs_event objects we own
----@field watched     string[]     -- subdir paths under this root that have a handle
----@field poll_active boolean      -- true if this root relies on the poll timer (watch unavailable or mode='poll')
+---@field handles       userdata[]              -- fs_event objects we own
+---@field watched       string[]                -- mailbox-subtree dirs with a handle
+---@field handle_by_dir table<string, userdata> -- dir path → fs_event handle
+---@field poll_active   boolean                 -- true if this root relies on the poll timer (watch unavailable or mode='poll')
 
 ---@type AutoCoreMailboxRouterState
 local _state = {
@@ -222,6 +227,29 @@ end
 ---@return string[]
 local function scan_ids(dir)
   return transport._list_dir_ids(dir)
+end
+
+---@param root string
+local function scan_orphan_candidates(root)
+  local seen = seen_set(root .. ":orphans")
+  local sd = vim.uv.fs_scandir(root)
+  if not sd then return end
+  while true do
+    local mailbox_id, type_ = vim.uv.fs_scandir_next(sd)
+    if not mailbox_id then break end
+    if type_ == "directory" and not registry.get(mailbox_id) then
+      for _, sub in ipairs({ "inbox", "outbox", "responses" }) do
+        local dir = root .. "/" .. mailbox_id .. "/" .. sub
+        for _, mid in ipairs(scan_ids(dir)) do
+          local path = dir .. "/" .. mid .. ".json"
+          if not seen[path] then
+            seen[path] = true
+            classify(root, path)
+          end
+        end
+      end
+    end
+  end
 end
 
 -- ── wake-hook dispatch ────────────────────────────────────
@@ -385,6 +413,12 @@ local function route_outbox(rec, mid)
     id          = mid,
     path        = dst,
   })
+
+  -- Routing via rename does not always produce a separate, reliable
+  -- recipient-side fs_event across all tool roots. Dispatch the inbox
+  -- arrival immediately; handle_inbox's seen set de-duplicates later
+  -- watcher or scan_now passes for the same message id.
+  if handle_inbox then handle_inbox(recipient, mid) end
 end
 
 -- ── arrival handling ──────────────────────────────────────
@@ -451,7 +485,7 @@ end
 
 ---@param rec AutoCoreMailboxRecord
 ---@param mid string
-local function handle_inbox(rec, mid)
+handle_inbox = function(rec, mid)
   local seen = seen_set(rec.subs.inbox)
   if seen[mid] then return end
   seen[mid] = true
@@ -598,32 +632,7 @@ local function watch_one_dir(dir, root)
 end
 
 ---@param root string
-local function open_root(root)
-  if _state.roots[root] then return end
-  local dirs = collect_dirs(root)
-  local handles = {}
-  local watched = {}
-  -- mode 'poll' deliberately skips opening fs_event handles.
-  if _state.cfg.mode ~= "poll" then
-    for _, d in ipairs(dirs) do
-      if #handles >= DEFAULT_MAX_HANDLES then break end
-      local h = watch_one_dir(d, root)
-      if h then
-        handles[#handles + 1] = h
-        watched[#watched + 1] = d
-      end
-    end
-  end
-  -- Poll-active when we couldn't (or chose not to) open any watcher
-  -- for this root. In mode 'watch', this is a hard failure and the
-  -- caller can see it via router.status().
-  local poll_active = (#handles == 0 and _state.cfg.mode ~= "watch")
-  _state.roots[root] = {
-    root        = root,
-    handles     = handles,
-    watched     = watched,
-    poll_active = poll_active,
-  }
+local function seed_existing_arrivals(root)
   -- Pre-seed seen sets for inbox/responses across every mailbox under
   -- this root, so existing files don't replay as new arrivals.
   for _, rec in ipairs(registry.records()) do
@@ -636,6 +645,97 @@ local function open_root(root)
       end
     end
   end
+end
+
+---@param entry AutoCoreMailboxRouterRootEntry
+local function rebuild_watch_arrays(entry)
+  entry.handles = {}
+  entry.watched = {}
+  for dir in pairs(entry.handle_by_dir or {}) do
+    entry.watched[#entry.watched + 1] = dir
+  end
+  table.sort(entry.watched)
+  for _, dir in ipairs(entry.watched) do
+    entry.handles[#entry.handles + 1] = entry.handle_by_dir[dir]
+  end
+end
+
+---@param entry AutoCoreMailboxRouterRootEntry
+---@param desired table<string, boolean>
+local function close_stale_watchers(entry, desired)
+  for dir, handle in pairs(entry.handle_by_dir or {}) do
+    if not desired[dir] then
+      pcall(handle.stop, handle)
+      pcall(handle.close, handle)
+      entry.handle_by_dir[dir] = nil
+    end
+  end
+end
+
+---@param root string
+local function desired_watch_dirs(root)
+  local desired = {}
+  local ordered = {}
+  for _, rec in ipairs(registry.records()) do
+    if rec.root == root then
+      for _, dir in ipairs(collect_dirs(rec.dir)) do
+        if not desired[dir] then
+          desired[dir] = true
+          ordered[#ordered + 1] = dir
+        end
+      end
+    end
+  end
+  table.sort(ordered)
+  return desired, ordered
+end
+
+---@param root string
+local function refresh_root(root)
+  local entry = _state.roots[root]
+  if not entry then
+    entry = {
+      root          = root,
+      handles       = {},
+      watched       = {},
+      handle_by_dir = {},
+      poll_active   = false,
+    }
+    _state.roots[root] = entry
+  end
+
+  local desired, ordered = desired_watch_dirs(root)
+  close_stale_watchers(entry, desired)
+
+  local missing_watch = false
+  if _state.cfg.mode == "poll" then
+    close_stale_watchers(entry, {})
+  else
+    for _, dir in ipairs(ordered) do
+      if not entry.handle_by_dir[dir] then
+        local current = 0
+        for _ in pairs(entry.handle_by_dir) do current = current + 1 end
+        if current >= DEFAULT_MAX_HANDLES then
+          missing_watch = true
+        else
+          local handle = watch_one_dir(dir, root)
+          if handle then
+            entry.handle_by_dir[dir] = handle
+          else
+            missing_watch = true
+          end
+        end
+      end
+    end
+  end
+
+  rebuild_watch_arrays(entry)
+  -- Poll-active when we couldn't (or chose not to) open complete watcher
+  -- coverage for this root. In mode 'watch', this is a hard failure and
+  -- the caller can see it via router.status().
+  entry.poll_active = _state.cfg.mode ~= "watch"
+    and (_state.cfg.mode == "poll" or #entry.handles == 0 or missing_watch)
+  seed_existing_arrivals(root)
 end
 
 ---@param root string
@@ -696,7 +796,7 @@ function M.start()
   if _state.running then return end
   _state.running = true
   for _, root in ipairs(registry.unique_roots()) do
-    open_root(root)
+    refresh_root(root)
   end
   _sync_poll_timer()
 
@@ -732,7 +832,7 @@ function M.refresh()
   local active = {}
   for _, root in ipairs(registry.unique_roots()) do
     active[root] = true
-    open_root(root)
+    refresh_root(root)
   end
   for root in pairs(_state.roots) do
     if not active[root] then close_root(root) end
@@ -783,7 +883,12 @@ end
 ---tests that want to verify dispatch without waiting on fs_event
 ---latency, and for the rare case where a wake hook missed an event.
 function M.scan_now()
+  local scanned_roots = {}
   for _, rec in ipairs(registry.records()) do
+    if not scanned_roots[rec.root] then
+      scanned_roots[rec.root] = true
+      scan_orphan_candidates(rec.root)
+    end
     for _, mid in ipairs(scan_ids(rec.subs.outbox)) do
       route_outbox(rec, mid)
     end

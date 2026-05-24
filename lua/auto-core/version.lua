@@ -527,6 +527,6 @@ return {
   -- nvim. auto-agents `dock.init` carries the same `{ win = winid }`
   -- pattern at lines 225-226 and will receive the matching patch
   -- in auto-agents' next release.
-  version     = "0.1.31",
+  version     = "0.1.32",
   api_version = "0.1",
 }

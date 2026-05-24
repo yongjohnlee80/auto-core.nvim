@@ -128,6 +128,17 @@ function M.register(id, opts)
   return rec
 end
 
+---Forget a live mailbox registration and release any router watcher
+---coverage that only existed for that mailbox. On-disk mailbox dirs are
+---preserved for audit; this only changes live routing state.
+---@param id string
+---@return AutoCoreMailboxRecord? removed
+function M.unregister(id)
+  local removed = registry_mod.unregister(id)
+  if router_mod.is_running() then router_mod.refresh() end
+  return removed
+end
+
 ---This nvim's mailbox `instance_id` (`<unix-seconds>-<pid>` by
 ---default; stable for the lifetime of this nvim process). All
 ---bare mailbox ids registered via `register` are suffixed with

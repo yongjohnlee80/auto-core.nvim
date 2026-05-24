@@ -208,9 +208,21 @@ end
 ---on-disk directories — those persist for audit. Accepts bare or
 ---full ids (bare resolves against this nvim's instance_id).
 ---@param id string
+---@return AutoCoreMailboxRecord? removed
 function M.unregister(id)
-  if type(id) ~= "string" or id == "" then return end
-  _by_id[mb_path.full_id(id)] = nil
+  if type(id) ~= "string" or id == "" then return nil end
+  local full = mb_path.full_id(id)
+  local previous = _by_id[full]
+  _by_id[full] = nil
+  if previous then
+    events.publish("core.mailbox:unregistered", {
+      mailbox = previous.id,
+      bare_id = previous.bare_id,
+      dir     = previous.dir,
+      root    = previous.root,
+    })
+  end
+  return previous
 end
 
 ---Test-only — clears the in-memory registry. Does NOT delete the
