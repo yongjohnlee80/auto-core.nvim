@@ -1,7 +1,7 @@
 ---
 revision: {{revision}}
 upserted_at: {{upserted_at}}
-schema_version: 6
+schema_version: 7
 ---
 
 # Mailbox bootstrap (auto-core v0.1.8+)
@@ -13,10 +13,22 @@ compare the `revision:` frontmatter to a persisted seen-revision
 value to detect protocol updates without re-reading the doc on
 every wake.
 
-This bootstrap doc is **shared across every mailbox under this
-tool root**. Your own identity is provided to you via environment
-variables at spawn time; this doc is the protocol contract that
-applies to all of you.
+This bootstrap doc is **shared across every mailbox under one
+workspace mailbox root**. As of schema_version 7+ (auto-core
+v0.1.33+) mailboxes live at:
+
+    <workspace_root>/.auto-agents/mailbox/<instance>/<name>/[inbox|outbox|processing|archive|responses]/
+
+`<workspace_root>` is the bare-repo parent of the host nvim's cwd
+(or the cwd itself if not in a git layout). `<instance>` is the
+host nvim's `<unix>-<pid>`. `<name>` is the bare agent name (no
+`agent:` prefix, no instance suffix). This replaces the v0.1.8
+per-CLI-config-dir layout (`~/.claude/mailbox`, `~/.codex/mailbox`,
+etc.).
+
+Your own identity is provided to you via environment variables at
+spawn time; this doc is the protocol contract that applies to all
+of you.
 
 ## Your identity (read these env vars on first wake)
 
@@ -53,15 +65,15 @@ Every time you wake, **before reading inbox or responses**:
 
 1. `stat $AUTO_AGENTS_MAILBOX_BOOTSTRAP_DOC`.
 2. Read the `revision:` field from its frontmatter.
-3. Compare it to the revision you last acknowledged. Persist your
-   last-acknowledged revision somewhere durable that you control.
-   The default is the tool-root state file next to the shared
-   bootstrap doc:
-   `$(dirname "$AUTO_AGENTS_MAILBOX_BOOTSTRAP_DOC")/.agent-state/seen-revision`.
-   Do not store this only under `$AUTO_AGENTS_MAILBOX_DIR`, because
-   that directory is instance-scoped and may be pruned between
-   sessions. If you have never seen a revision before, treat this
-   as a first-time bootstrap.
+3. Compare it to the revision you last acknowledged. The default
+   location (schema_version 7+, workspace-scoped layout) is:
+   `<workspace_mailbox_root>/seen_revisions/<your-agent-name>/seen_revision`
+   where `<workspace_mailbox_root>` is `$(dirname "$AUTO_AGENTS_MAILBOX_BOOTSTRAP_DOC")`
+   and `<your-agent-name>` is the bare name from your `$AUTO_AGENTS_MAILBOX_ID`
+   (e.g. `agent:jarvis:1747-3478` → `jarvis`). The file persists
+   across nvim restarts: the doc revision is a global protocol
+   property, not a per-spawn one. If you have never seen a revision
+   before, treat this as a first-time bootstrap.
 4. If the revision **differs** from your last-acknowledged value,
    the protocol changed between your last wake and this one.
    **Re-read this entire document end-to-end** and update your
