@@ -149,15 +149,15 @@ without re-reading the entire doc. The summary should cover:
    your CLI via the standard repeatable directory flag where one
    exists:
 
-   | Kind          | Flag                                                                   |
-   |---------------|------------------------------------------------------------------------|
-   | `claude`      | `--add-dir <path>` (repeatable)                                        |
-   | `codex`       | `--add-dir <path>` (repeatable; same flag name as Claude)              |
-   | `antigravity` | _(no documented per-session grant flag; agent runs unchanged at v0.2.30)_ |
+   | Kind          | Flag                                                       |
+   |---------------|------------------------------------------------------------|
+   | `claude`      | `--add-dir <path>` (repeatable)                            |
+   | `codex`       | `--add-dir <path>` (repeatable; same flag name as Claude)  |
+   | `antigravity` | `--add-dir <path>` (repeatable; v0.2.32+, confirmed in `agy --help`) |
 
-   Kinds without a documented flag (`antigravity`, `junie`, `goose`,
-   `opencode`, `copilot`, `generic`) get no extra argv — the agent
-   runs unchanged. These flags are appended to your spawn argv every
+   Kinds without a documented flag (`junie`, `goose`, `opencode`,
+   `copilot`, `generic`) get no extra argv — the agent runs
+   unchanged. These flags are appended to your spawn argv every
    restart — the grant is per-session and self-rebuilds. **The host
    does NOT mutate your CLI's persistent config** (no `writable_roots`
    writes into `~/.codex/config.toml`, no `~/.claude/settings.json`
