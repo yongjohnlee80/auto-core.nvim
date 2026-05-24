@@ -48,14 +48,27 @@
 ---
 ---### Workspace root resolution
 ---
----`workspace_mailbox_root(opts)` calls `auto-core.fs.path.workspace_root`
----to find the bare-repo parent (or `.git` parent) of the current cwd,
----then appends `.auto-agents/mailbox`. Overrides:
+---`workspace_mailbox_root(opts)` consults `auto-core.git.worktree`
+---state per `shared/conventions/auto-family-state-ownership.md` —
+---auto-core owns the canonical workspace location, this module
+---just appends `.auto-agents/mailbox`. Resolution order, highest
+---precedence first:
 ---
 ---  1. `cfg.root` — explicit override set via `mailbox.configure`
 ---     or `auto-core.setup({ mailbox = { root = ... } })`.
 ---  2. `$AUTO_AGENTS_MAILBOX_ROOT` — env override for one-off shells.
----  3. Otherwise: `<workspace_root>/.auto-agents/mailbox`.
+---  3. `auto-core.git.worktree.get_workspace_root()` — session-scoped
+---     family container set by `worktree.nvim`.
+---  4. `auto-core.git.worktree.get_active()` — session-scoped active
+---     worktree (used when only active is set).
+---  5. `opts.cwd` — defensive fallback when worktree state is unset
+---     (typically a headless smoke / out-of-band call).
+---  6. `vim.fn.getcwd()` — last resort.
+---
+---The full chain is documented at `workspace_mailbox_root`'s
+---function header. The `auto-core.fs.path.workspace_root` walk-up
+---is intentionally NOT in this chain — see the "Removed in v0.1.33"
+---note on the function.
 ---
 ---@module 'auto-core.mailbox.path'
 
