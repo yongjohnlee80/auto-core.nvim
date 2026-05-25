@@ -6140,6 +6140,185 @@ print("\n[54] todo.yaml — strict-subset decode / encode")
   end
 end)()
 
+-- ─────────────────────── 55. todo.schema — v1 validator (ADR 0031 §2) ────
+print("\n[55] todo.schema — v1 schema validation")
+;(function()
+  local ok_req, schema = pcall(require, "auto-core.todo.schema")
+  ok("auto-core.todo.schema loads", ok_req, tostring(schema))
+  if not ok_req then return end
+
+  -- ── blank() produces a valid skeleton ────────────────────────
+  local b = schema.blank()
+  ok("schema.blank() returns a table", type(b) == "table")
+  ok("schema.blank() has version 1", b.version == 1)
+  ok("schema.blank() has status 'open'", b.status == "open")
+  ok("schema.blank() has matching id/created/updated/status_changed",
+    type(b.id) == "string" and type(b.created) == "string"
+    and b.updated == b.created and b.status_changed == b.created)
+  local r_blank = schema.validate(b)
+  ok("validate(blank()) succeeds", r_blank.ok, r_blank.err)
+
+  -- ── full happy-path task ─────────────────────────────────────
+  local full = schema.blank({
+    id          = "2026-05-25-implement-todo-system",
+    title       = "Implement the todo system",
+    description = "Multi-line goal.",
+    priority    = "high",
+    tags        = { "auto-core", "workflow" },
+    adr         = { "shared/adrs/0031-auto-core-per-project-todo-task-system.md" },
+    blocked     = { "2026-05-20-prereq" },
+  })
+  ok("validate(full happy task) succeeds", schema.validate(full).ok)
+
+  -- ── required-field absence ───────────────────────────────────
+  local missing_id = schema.blank()
+  missing_id.id = nil
+  local r_mid = schema.validate(missing_id)
+  ok("validate rejects missing required id",
+    (not r_mid.ok) and r_mid.field == "id" and r_mid.err:find("missing"), r_mid.err)
+
+  local missing_title = schema.blank()
+  missing_title.title = nil
+  local r_mt = schema.validate(missing_title)
+  ok("validate rejects missing required title",
+    (not r_mt.ok) and r_mt.field == "title", r_mt.err)
+
+  -- ── unknown top-level key ────────────────────────────────────
+  local bogus = schema.blank()
+  bogus.surprise_field = "noooo"
+  local r_un = schema.validate(bogus)
+  ok("validate rejects unknown top-level key",
+    (not r_un.ok) and r_un.err:find("unknown top%-level key"), r_un.err)
+
+  -- ── enum violations ──────────────────────────────────────────
+  local bad_status = schema.blank()
+  bad_status.status = "in_progress"  -- wrong enum
+  local r_st = schema.validate(bad_status)
+  ok("validate rejects invalid status enum",
+    (not r_st.ok) and r_st.field == "status", r_st.err)
+
+  local bad_prio = schema.blank({ priority = "urgent" })
+  local r_pr = schema.validate(bad_prio)
+  ok("validate rejects invalid priority enum",
+    (not r_pr.ok) and r_pr.field == "priority", r_pr.err)
+
+  -- ── type violations ──────────────────────────────────────────
+  local bad_tags = schema.blank({ tags = { "ok", 42 } })
+  local r_tg = schema.validate(bad_tags)
+  ok("validate rejects non-string in tags list",
+    (not r_tg.ok) and r_tg.field == "tags", r_tg.err)
+
+  local bad_version = schema.blank()
+  bad_version.version = 2
+  local r_v = schema.validate(bad_version)
+  ok("validate rejects version mismatch",
+    (not r_v.ok) and r_v.field == "version" and r_v.err:find("v1"), r_v.err)
+
+  local bad_dt = schema.blank()
+  bad_dt.created = "2026-05-25"  -- date only, no time/offset
+  local r_dt = schema.validate(bad_dt)
+  ok("validate rejects datetime without time + offset",
+    (not r_dt.ok) and r_dt.field == "created", r_dt.err)
+
+  -- ── lifecycle consistency invariants ─────────────────────────
+  local completed_no_ts = schema.blank({ status = "completed" })
+  -- blank() defaults status='open' so completed_at is unset; force the
+  -- override and expect a failure for missing completed_at.
+  completed_no_ts.completed_at = nil
+  local r_c1 = schema.validate(completed_no_ts)
+  ok("validate rejects status=completed without completed_at",
+    (not r_c1.ok) and r_c1.err:find("completed_at must be set"), r_c1.err)
+
+  local open_with_completed_at = schema.blank()
+  open_with_completed_at.completed_at = "2026-05-25T12:00:00Z"
+  local r_c2 = schema.validate(open_with_completed_at)
+  ok("validate rejects status=open with completed_at set",
+    (not r_c2.ok) and r_c2.err:find("completed_at must be nil"), r_c2.err)
+
+  local archived_no_ts = schema.blank({
+    status       = "archived",
+    completed_at = "2026-05-01T10:00:00Z",
+  })
+  archived_no_ts.archived_at = nil
+  local r_a1 = schema.validate(archived_no_ts)
+  ok("validate rejects status=archived without archived_at",
+    (not r_a1.ok) and r_a1.err:find("archived_at must be set"), r_a1.err)
+
+  local completed_ok = schema.blank({
+    status       = "completed",
+    completed_at = "2026-05-20T10:00:00-07:00",
+  })
+  ok("validate accepts status=completed with completed_at set",
+    schema.validate(completed_ok).ok)
+
+  local archived_ok = schema.blank({
+    status       = "archived",
+    completed_at = "2026-05-20T10:00:00Z",
+    archived_at  = "2026-06-17T10:00:00Z",
+  })
+  ok("validate accepts status=archived with both completed_at + archived_at set",
+    schema.validate(archived_ok).ok)
+
+  -- ── errors[] shape ───────────────────────────────────────────
+  local with_errors = schema.blank({
+    errors = {
+      {
+        field    = "blocked[0]",
+        code     = "not-found",
+        message  = "Task '2026-05-20-prereq' does not exist",
+        detected = "2026-05-25T22:00:00-07:00",
+      },
+    },
+  })
+  ok("validate accepts well-formed errors[] entry", schema.validate(with_errors).ok)
+
+  local bad_err_code = schema.blank({
+    errors = {
+      { field = "blocked[0]", code = "made-up-code",
+        message = "x", detected = "2026-05-25T22:00:00-07:00" },
+    },
+  })
+  local r_be = schema.validate(bad_err_code)
+  ok("validate rejects unknown errors[].code",
+    (not r_be.ok) and r_be.err:find("code"), r_be.err)
+
+  local extra_key_in_err = schema.blank({
+    errors = {
+      { field = "wip", code = "not-found", message = "x",
+        detected = "2026-05-25T22:00:00-07:00", extra = "boo" },
+    },
+  })
+  local r_ek = schema.validate(extra_key_in_err)
+  ok("validate rejects unknown keys inside errors[] entry",
+    (not r_ek.ok) and r_ek.err:find("unknown key"), r_ek.err)
+
+  -- ── non-table input is rejected cleanly ──────────────────────
+  local r_nt = schema.validate("not a table")
+  ok("validate rejects non-table input",
+    (not r_nt.ok) and r_nt.err:find("mapping"), r_nt.err)
+
+  -- ── decode + validate end-to-end ─────────────────────────────
+  -- Confirms the schema validator wires to the YAML decoder cleanly.
+  local yaml = require("auto-core.todo.yaml")
+  local src = table.concat({
+    'id: "2026-05-25-e2e"',
+    "version: 1",
+    'created: "2026-05-25T14:32:00-07:00"',
+    'updated: "2026-05-25T14:32:00-07:00"',
+    'status_changed: "2026-05-25T14:32:00-07:00"',
+    "status: open",
+    "title: End-to-end YAML+schema test",
+    "description: minimum viable task",
+    "",
+  }, "\n")
+  local dec = yaml.decode(src)
+  ok("e2e: yaml.decode succeeds", dec.ok, dec.err)
+  if dec.ok then
+    ok("e2e: schema.validate of decoded value succeeds",
+      schema.validate(dec.value).ok)
+  end
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
