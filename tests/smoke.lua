@@ -6585,6 +6585,134 @@ print("\n[58] todo — add / get / list / update / remove")
   cleanup()
 end)()
 
+-- ─────────────────────── 59. todo.status / archive — lifecycle (ADR §3.2) ─
+print("\n[59] todo.status / archive — transitions + lifecycle timestamps")
+;(function()
+  local ok_req, todo = pcall(require, "auto-core.todo")
+  if not ok_req then return end
+
+  local tmp_root = vim.fn.tempname()
+  vim.fn.mkdir(tmp_root, "p")
+  local worktree = require("auto-core.git.worktree")
+  worktree.set_workspace_root(tmp_root)
+  local td = todo._todo_dir()
+  local function cleanup() vim.fn.delete(tmp_root, "rf") end
+
+  -- ── open → completed sets completed_at, leaves archived_at nil ──
+  local id1 = todo.add({ id = "2026-05-25-cycle", title = "Cycle test" })
+  local r1, e1 = todo.status(id1, "completed")
+  ok("status(open→completed) succeeds", r1 ~= nil, e1)
+  ok("status(→completed) sets completed_at",
+    r1 and type(r1.completed_at) == "string"
+      and r1.completed_at:match("^%d%d%d%d%-") ~= nil,
+    r1 and tostring(r1.completed_at))
+  ok("status(→completed) leaves archived_at nil",
+    r1 and r1.archived_at == nil)
+  ok("status(→completed) bumped status_changed",
+    r1 and r1.status_changed ~= nil)
+  ok("status(→completed) did NOT bump updated",
+    r1 and r1.updated == r1.created)
+  -- File should have moved.
+  ok("file moved to completed/ bucket",
+    vim.fn.filereadable(td .. "/completed/" .. id1 .. ".yaml") == 1
+      and vim.fn.filereadable(td .. "/open/" .. id1 .. ".yaml") == 0)
+
+  -- ── completed → archived preserves completed_at ─────────────
+  local prior_completed_at = r1.completed_at
+  local r2, _ = todo.status(id1, "archived")
+  ok("status(completed→archived) succeeds", r2 ~= nil)
+  ok("status(completed→archived) sets archived_at",
+    r2 and type(r2.archived_at) == "string")
+  ok("status(completed→archived) PRESERVES completed_at",
+    r2 and r2.completed_at == prior_completed_at,
+    "expected " .. tostring(prior_completed_at)
+      .. ", got " .. tostring(r2.completed_at))
+  -- File moved to archived/YYYY/MM/.
+  local y, m = r2.archived_at:match("^(%d%d%d%d)%-(%d%d)")
+  ok("file moved to archived/YYYY/MM/",
+    vim.fn.filereadable(td .. "/archived/" .. y .. "/" .. m .. "/" .. id1 .. ".yaml") == 1
+      and vim.fn.filereadable(td .. "/completed/" .. id1 .. ".yaml") == 0)
+
+  -- ── archived → open clears both lifecycle timestamps ────────
+  local r3, _ = todo.status(id1, "open")
+  ok("status(archived→open) clears completed_at",
+    r3 and r3.completed_at == nil)
+  ok("status(archived→open) clears archived_at",
+    r3 and r3.archived_at == nil)
+  ok("file moved back to open/",
+    vim.fn.filereadable(td .. "/open/" .. id1 .. ".yaml") == 1
+      and vim.fn.filereadable(td .. "/archived/" .. y .. "/" .. m .. "/" .. id1 .. ".yaml") == 0)
+
+  -- ── open → archived (direct, never went through completed) ──
+  -- Per the rules, completed_at MUST be nil because we never completed.
+  local id2 = todo.add({ id = "2026-05-25-direct-arch", title = "Direct archive" })
+  local r4, _ = todo.status(id2, "archived")
+  ok("status(open→archived) leaves completed_at nil",
+    r4 and r4.completed_at == nil)
+  ok("status(open→archived) sets archived_at",
+    r4 and type(r4.archived_at) == "string")
+
+  -- ── deferred is a flat bucket; transitions work both ways ───
+  local id3 = todo.add({ id = "2026-05-25-defer-me", title = "Defer me" })
+  local r5, _ = todo.status(id3, "deferred")
+  ok("status(open→deferred) places file in deferred/",
+    vim.fn.filereadable(td .. "/deferred/" .. id3 .. ".yaml") == 1
+      and vim.fn.filereadable(td .. "/open/" .. id3 .. ".yaml") == 0)
+  ok("status(→deferred) leaves both lifecycle timestamps nil",
+    r5 and r5.completed_at == nil and r5.archived_at == nil)
+  todo.status(id3, "open")
+  ok("status(deferred→open) moves file back to open/",
+    vim.fn.filereadable(td .. "/open/" .. id3 .. ".yaml") == 1
+      and vim.fn.filereadable(td .. "/deferred/" .. id3 .. ".yaml") == 0)
+
+  -- ── idempotent no-op ────────────────────────────────────────
+  local before = todo.get(id3)
+  local r6, _ = todo.status(id3, "open")
+  ok("status(same status) is idempotent (no-op, returns task)", r6 ~= nil)
+  -- File still in same place.
+  ok("idempotent no-op didn't move the file",
+    vim.fn.filereadable(td .. "/open/" .. id3 .. ".yaml") == 1)
+  -- status_changed should be unchanged (we early-returned before
+  -- bumping anything).
+  ok("idempotent no-op didn't bump status_changed",
+    r6 and before and r6.status_changed == before.status_changed)
+
+  -- ── invalid inputs ──────────────────────────────────────────
+  local _, e_id = todo.status("", "open")
+  ok("status('') returns err on empty id", e_id and e_id:find("non%-empty"))
+  local _, e_st = todo.status(id3, "in_progress")
+  ok("status(invalid_enum) returns err",
+    e_st and e_st:find("must be one of"))
+  local _, e_no = todo.status("nonexistent-id", "completed")
+  ok("status(unknown_id) returns err",
+    e_no and e_no:find("not found"))
+
+  -- ── archive() shorthand ─────────────────────────────────────
+  local id4 = todo.add({ id = "2026-05-25-arch-shortcut", title = "Archive me" })
+  local r7, _ = todo.archive(id4)
+  ok("archive() shortcut sets status=archived", r7 and r7.status == "archived")
+  local y4, m4 = r7.archived_at:match("^(%d%d%d%d)%-(%d%d)")
+  ok("archive() shortcut moves file to archived/YYYY/MM/",
+    vim.fn.filereadable(td .. "/archived/" .. y4 .. "/" .. m4 .. "/" .. id4 .. ".yaml") == 1)
+
+  -- ── core.todo.status:changed event fires ────────────────────
+  local events = require("auto-core.events")
+  events._reset_for_tests()
+  local hits = {}
+  events.subscribe("core.todo.status:changed", function(payload)
+    table.insert(hits, payload)
+  end)
+  local id5 = todo.add({ id = "2026-05-25-event-test", title = "Event test" })
+  todo.status(id5, "completed")
+  ok("status() publishes core.todo.status:changed",
+    #hits == 1 and hits[1].id == id5
+      and hits[1].from == "open" and hits[1].to == "completed",
+    "hits=" .. tostring(#hits))
+
+  worktree.set_workspace_root(nil)
+  cleanup()
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

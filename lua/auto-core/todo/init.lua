@@ -442,6 +442,125 @@ function M.update(id, patch)
   return task
 end
 
+-- ─── public: status / archive — lifecycle transitions ────────
+
+---Transition a task to a new status. Per ADR-0031 §3.2, this is the
+---API path that fires side-effect events (mailbox notifications etc.
+---land in task 5+ as events emit). Direct YAML `status:` edits remain
+---supported but skip the event surface — by design.
+---
+---Lifecycle-timestamp side effects:
+---  → completed: sets completed_at = now, clears archived_at
+---  → archived:  sets archived_at  = now; preserves completed_at if
+---               coming from completed, otherwise leaves it nil
+---  → open:      clears both completed_at and archived_at
+---  → deferred:  clears both completed_at and archived_at
+---
+---Also bumps `status_changed` to now. `updated` is NOT bumped (it
+---tracks content mutations only, per the schema separation).
+---
+---The file is physically moved to the bucket matching the new status.
+---No-op when `new` equals current status (idempotent).
+---@param id string
+---@param new string   one of {open, completed, deferred, archived}
+---@return table? updated_task, string? err
+function M.status(id, new)
+  if type(id) ~= "string" or id == "" then
+    return nil, "auto-core.todo.status: id must be a non-empty string"
+  end
+  if type(new) ~= "string" or not schema.VALID_STATUS[new] then
+    return nil, "auto-core.todo.status: new status must be one of "
+      .. "{open,completed,deferred,archived}; got " .. tostring(new)
+  end
+
+  local td   = M._todo_dir()
+  local file = find_task_path(td, id)
+  if not file then return nil, "task '" .. id .. "' not found in " .. td end
+
+  local text, read_err = read_file(file)
+  if not text then return nil, read_err end
+  local dec = yaml.decode(text)
+  if not dec.ok then return nil, "yaml.decode: " .. tostring(dec.err) end
+  local task = dec.value
+  if type(task) ~= "table" then
+    return nil, "task '" .. id .. "' decoded to non-table"
+  end
+
+  local old = task.status
+
+  -- Idempotent no-op.
+  if old == new then return task end
+
+  local now = M._now_iso()
+  task.status         = new
+  task.status_changed = now
+
+  -- Lifecycle-timestamp maintenance per the rules above.
+  if new == "open" or new == "deferred" then
+    task.completed_at = nil
+    task.archived_at  = nil
+  elseif new == "completed" then
+    task.completed_at = now
+    task.archived_at  = nil
+  elseif new == "archived" then
+    task.archived_at = now
+    -- completed_at preserved iff coming FROM completed (preserves
+    -- "when was this done → when was this archived" history).
+    if old ~= "completed" then
+      task.completed_at = nil
+    end
+  end
+
+  local v = schema.validate(task)
+  if not v.ok then return nil, "schema: " .. tostring(v.err) end
+
+  -- Compute new file path and atomically write + remove the old file.
+  -- We write the new file FIRST, then unlink the old — so a crash
+  -- between the two leaves a duplicate (recoverable by refresh) rather
+  -- than a lost file.
+  local new_file = paths.task_file_path(td, id, new, task.archived_at)
+  local rendered, render_err = render_task(task)
+  if render_err then return nil, render_err end
+  local ok, err = atomic_write(new_file, rendered)
+  if not ok then return nil, "write: " .. tostring(err) end
+
+  if new_file ~= file then
+    local _, unlink_err = vim.uv.fs_unlink(file)
+    if unlink_err then
+      -- Best-effort cleanup; the new file is the source of truth and a
+      -- subsequent refresh() will reconcile a stray old file.
+      local ok_log, log = pcall(require, "auto-core.log")
+      if ok_log and log and type(log.warn) == "function" then
+        pcall(log.warn, string.format(
+          "[auto-core.todo] status(%s, %s) wrote new file but failed to unlink old: %s",
+          id, new, tostring(unlink_err)))
+      end
+    end
+  end
+
+  -- Best-effort event publish so consumers (auto-finder panel,
+  -- auto-agents admin panel) can react in-process without polling.
+  local ok_ev, events = pcall(require, "auto-core.events")
+  if ok_ev and events and type(events.publish) == "function" then
+    pcall(events.publish, "core.todo.status:changed", {
+      id   = id,
+      from = old,
+      to   = new,
+      at   = now,
+    })
+  end
+
+  return task
+end
+
+---Shorthand: `status(id, "archived")`. Irrespective of age; the
+---28-day auto-archive rule lives in `refresh()` (task 6).
+---@param id string
+---@return table? updated_task, string? err
+function M.archive(id)
+  return M.status(id, "archived")
+end
+
 -- ─── public: remove ───────────────────────────────────────────
 
 ---Hard-delete a task. Returns `(true, nil)` on success or
