@@ -442,6 +442,202 @@ function M.update(id, patch)
   return task
 end
 
+-- ─── refresh helpers ─────────────────────────────────────────
+
+---Approximate "older than 28 days" check on an ISO 8601 timestamp.
+---Timezone-naive: extracts the YYYY-MM-DD prefix from both `iso_ts`
+---and `now`, treats each as midnight in os.time's local frame, and
+---compares the difference. Accuracy is within ~1 day at the edges —
+---ample for a 28-day archive window. Returns false on malformed
+---input (defensive — refresh shouldn't crash on garbage data).
+---@param iso_ts string
+---@param now_iso string
+---@return boolean
+local function older_than_28_days(iso_ts, now_iso)
+  if type(iso_ts) ~= "string" or type(now_iso) ~= "string" then return false end
+  local function date_secs(s)
+    local y, mo, d = s:match("^(%d+)%-(%d+)%-(%d+)")
+    if not y then return nil end
+    local yn, mon, dn = tonumber(y), tonumber(mo), tonumber(d)
+    if not (yn and mon and dn) then return nil end
+    return os.time({
+      year = yn, month = mon, day = dn,
+      hour = 0, min = 0, sec = 0,
+    })
+  end
+  local a, b = date_secs(iso_ts), date_secs(now_iso)
+  if not a or not b then return false end
+  return (b - a) > 28 * 86400
+end
+
+---Walk every YAML task file under `td`. Returns the list of absolute
+---paths, in stable order (open → deferred → completed → archived
+---YYYY/MM ascending, lexicographic within each leaf dir). Files that
+---can't be statted are silently skipped.
+---@param td string
+---@return string[]
+local function walk_task_files(td)
+  local out = {}
+  local function scan_flat_dir(dir)
+    if not fs_path.is_dir(dir) then return end
+    local files = vim.fn.readdir(dir) or {}
+    table.sort(files)
+    for _, f in ipairs(files) do
+      if f:match("%.yaml$") then
+        out[#out + 1] = fs_path.join(dir, f)
+      end
+    end
+  end
+  scan_flat_dir(fs_path.join(td, "open"))
+  scan_flat_dir(fs_path.join(td, "deferred"))
+  scan_flat_dir(fs_path.join(td, "completed"))
+  local a_dir = fs_path.join(td, "archived")
+  if fs_path.is_dir(a_dir) then
+    local years = vim.fn.readdir(a_dir) or {}
+    table.sort(years)
+    for _, y in ipairs(years) do
+      local y_dir = fs_path.join(a_dir, y)
+      if fs_path.is_dir(y_dir) then
+        local months = vim.fn.readdir(y_dir) or {}
+        table.sort(months)
+        for _, m in ipairs(months) do
+          scan_flat_dir(fs_path.join(y_dir, m))
+        end
+      end
+    end
+  end
+  return out
+end
+
+---Move a task file from `from_path` to `to_path` atomically. The
+---write-new-then-unlink-old order matches M.status() so a crash mid-
+---move leaves a duplicate that refresh can recover from on the next
+---run.
+---@param from_path string
+---@param to_path string
+---@param text string
+---@return boolean ok, string? err
+local function move_task(from_path, to_path, text)
+  if from_path == to_path then
+    -- In-place rewrite (errors:[] etc. — task 7).
+    return atomic_write(from_path, text)
+  end
+  local wok, werr = atomic_write(to_path, text)
+  if not wok then return false, werr end
+  local _, uerr = vim.uv.fs_unlink(from_path)
+  if uerr then
+    local ok_log, log = pcall(require, "auto-core.log")
+    if ok_log and log and type(log.warn) == "function" then
+      pcall(log.warn, string.format(
+        "[auto-core.todo.refresh] moved %s → %s but failed to unlink old: %s",
+        from_path, to_path, tostring(uerr)))
+    end
+  end
+  return true
+end
+
+-- ─── public: refresh ─────────────────────────────────────────
+
+---Reconcile the todo directory: every readable task file is checked
+---against its status (and lifecycle timestamps); if its current
+---directory disagrees with the status-derived bucket, the file is
+---moved. Auto-archive rule: any `status:completed` task whose
+---`completed_at` is older than 28 days is transitioned to archived
+---(via the same path M.status uses) — bumps `status_changed`, sets
+---`archived_at`, preserves `completed_at`, moves the file.
+---
+---Returns a summary table:
+---  {
+---    scanned   = <int>,    -- total YAML files walked
+---    moved     = <int>,    -- files relocated to a different bucket
+---    archived  = <int>,    -- completed→archived via the 28-day rule
+---    skipped   = <int>,    -- files that couldn't be parsed/validated
+---  }
+---
+---NOTE: reference validation + errors:[] maintenance lands in task 7.
+---@return table summary
+function M.refresh()
+  local td  = M._todo_dir()
+  local now = M._now_iso()
+
+  local summary = { scanned = 0, moved = 0, archived = 0, skipped = 0 }
+
+  if not fs_path.is_dir(td) then return summary end
+
+  for _, file in ipairs(walk_task_files(td)) do
+    summary.scanned = summary.scanned + 1
+
+    local text, _read_err = read_file(file)
+    if not text then
+      summary.skipped = summary.skipped + 1
+    else
+      local dec = yaml.decode(text)
+      if not dec.ok or type(dec.value) ~= "table" then
+        summary.skipped = summary.skipped + 1
+      else
+        local task = dec.value
+        if not schema.validate(task).ok then
+          summary.skipped = summary.skipped + 1
+        else
+          local needs_write = false
+
+          -- 1. Auto-archive rule: completed → archived if completed_at
+          --    is older than 28 days. The rule fires regardless of
+          --    where the file currently sits on disk (a misplaced
+          --    completed file STILL ages out).
+          if task.status == "completed"
+              and type(task.completed_at) == "string"
+              and older_than_28_days(task.completed_at, now)
+          then
+            task.status         = "archived"
+            task.status_changed = now
+            task.archived_at    = now
+            -- completed_at preserved (we're coming from completed).
+            needs_write = true
+            summary.archived = summary.archived + 1
+          end
+
+          -- 2. Compute the bucket the file SHOULD be in now.
+          local target_path
+          if task.status == "archived" then
+            target_path = paths.task_file_path(td, task.id, "archived", task.archived_at)
+          else
+            target_path = paths.task_file_path(td, task.id, task.status, nil)
+          end
+
+          if needs_write or target_path ~= file then
+            -- Re-validate after any auto-archive mutation so a corrupt
+            -- transition doesn't slip through.
+            local v = schema.validate(task)
+            if not v.ok then
+              summary.skipped = summary.skipped + 1
+            else
+              local rendered, render_err = render_task(task)
+              if render_err then
+                summary.skipped = summary.skipped + 1
+              else
+                local mok, _merr = move_task(file, target_path, rendered)
+                if mok and target_path ~= file then
+                  summary.moved = summary.moved + 1
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  -- Best-effort event publish so consumers know to refresh their
+  -- views (auto-finder panel, auto-agents admin panel).
+  local ok_ev, events = pcall(require, "auto-core.events")
+  if ok_ev and events and type(events.publish) == "function" then
+    pcall(events.publish, "core.todo:refreshed", { summary = summary, at = now })
+  end
+
+  return summary
+end
+
 -- ─── public: status / archive — lifecycle transitions ────────
 
 ---Transition a task to a new status. Per ADR-0031 §3.2, this is the

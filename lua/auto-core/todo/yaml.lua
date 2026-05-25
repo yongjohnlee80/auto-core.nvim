@@ -300,17 +300,22 @@ encode_value = function(v, indent)
       end
       return "\n" .. table.concat(lines, "\n")
     else
-      -- Mapping.
-      local child_indent = indent .. "  "
+      -- Mapping. Keys are emitted at the CURRENT indent (so a
+      -- top-level mapping with indent="" emits its keys at column
+      -- 0, as YAML requires). Nested values continue at indent+2.
+      local nested_indent = indent .. "  "
       local lines = {}
       for _, k in ipairs(sorted_keys(v)) do
         local val = v[k]
-        local emitted = encode_value(val, child_indent)
         if type(val) == "table" and next(val) ~= nil then
-          -- Nested mapping/sequence: key on its own line, body on next.
-          lines[#lines + 1] = child_indent .. k .. ":" .. emitted
+          -- Nested mapping/sequence: key on its own line, body on
+          -- continuation lines indented +2 from this key.
+          local emitted = encode_value(val, nested_indent)
+          lines[#lines + 1] = indent .. k .. ":" .. emitted
         else
-          lines[#lines + 1] = child_indent .. k .. ": " .. emitted
+          -- Scalar: inline `key: value` at the current indent.
+          local emitted = encode_value(val, indent)
+          lines[#lines + 1] = indent .. k .. ": " .. emitted
         end
       end
       return "\n" .. table.concat(lines, "\n")

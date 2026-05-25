@@ -6071,11 +6071,11 @@ print("\n[54] todo.yaml — strict-subset decode / encode")
     })
     ok("encode: multi-line string uses `|` block scalar",
       enc_multi:find("notes: |\n") ~= nil, enc_multi)
-    -- Body indent = parent-key indent (2 for top-level mapping) + 2 more
-    -- for the block-scalar body itself = 4 spaces.
-    ok("encode: block-scalar body lines are indented 4 spaces",
-      enc_multi:find("\n    line one\n") ~= nil
-        and enc_multi:find("\n    line two\n") ~= nil, enc_multi)
+    -- Top-level key is at column 0, so its block-scalar body is at
+    -- indent+2 = 2 spaces.
+    ok("encode: block-scalar body lines are indented 2 spaces",
+      enc_multi:find("\n  line one\n") ~= nil
+        and enc_multi:find("\n  line two\n") ~= nil, enc_multi)
 
     -- ── encode: ISO datetime is quoted ────────────────────────
     local enc_ts = yaml.encode({
@@ -6708,6 +6708,136 @@ print("\n[59] todo.status / archive — transitions + lifecycle timestamps")
     #hits == 1 and hits[1].id == id5
       and hits[1].from == "open" and hits[1].to == "completed",
     "hits=" .. tostring(#hits))
+
+  worktree.set_workspace_root(nil)
+  cleanup()
+end)()
+
+-- ─────────────────────── 60. todo.refresh — reconciliation + 28-day auto-archive (§3) ─
+print("\n[60] todo.refresh — bucket reconciliation + auto-archive")
+;(function()
+  local ok_req, todo = pcall(require, "auto-core.todo")
+  if not ok_req then return end
+  local fs_path = require("auto-core.fs.path")
+
+  local tmp_root = vim.fn.tempname()
+  vim.fn.mkdir(tmp_root, "p")
+  local worktree = require("auto-core.git.worktree")
+  worktree.set_workspace_root(tmp_root)
+  local td = todo._todo_dir()
+  local function cleanup() vim.fn.delete(tmp_root, "rf") end
+
+  -- ── empty workspace: refresh is a no-op ─────────────────────
+  local s_empty = todo.refresh()
+  ok("refresh on empty dir returns zeroed summary",
+    s_empty.scanned == 0 and s_empty.moved == 0
+      and s_empty.archived == 0 and s_empty.skipped == 0)
+
+  -- ── reconciliation: file in wrong bucket gets moved ─────────
+  -- Manually plant a task in open/ but with status=completed in its
+  -- YAML. Refresh should move it to completed/.
+  local id1 = "2026-05-25-misplaced-completed"
+  todo.add({ id = id1, title = "Misplaced completed" })
+  -- Hand-edit the file: flip status to completed without using the API.
+  local src_file = td .. "/open/" .. id1 .. ".yaml"
+  local lines = vim.fn.readfile(src_file)
+  for i, line in ipairs(lines) do
+    if line:match("^status:") then
+      lines[i] = "status: completed"
+    end
+  end
+  -- Also add a completed_at so schema validation accepts it.
+  table.insert(lines, 'completed_at: "2026-05-20T10:00:00-07:00"')
+  vim.fn.writefile(lines, src_file)
+
+  local s1 = todo.refresh()
+  ok("refresh detects misplaced file (scanned=1)", s1.scanned == 1,
+    "summary=" .. vim.inspect(s1))
+  ok("refresh moved the misplaced file (moved=1)", s1.moved == 1,
+    "summary=" .. vim.inspect(s1))
+  ok("refresh: file is now in completed/",
+    fs_path.is_file(td .. "/completed/" .. id1 .. ".yaml")
+      and not fs_path.is_file(src_file))
+
+  -- ── 28-day auto-archive rule fires for old completed ────────
+  -- Plant a completed task with completed_at = 30 days ago.
+  local id2 = "2026-04-20-aged-completed"
+  todo.add({
+    id           = id2,
+    title        = "Aged completed",
+    status       = "completed",
+    completed_at = "2026-04-20T10:00:00-07:00",  -- ~35 days before today (2026-05-25)
+  })
+  ok("setup: aged task lives in completed/",
+    fs_path.is_file(td .. "/completed/" .. id2 .. ".yaml"))
+
+  local s2 = todo.refresh()
+  ok("refresh archived the aged task (archived=1)",
+    s2.archived == 1, "summary=" .. vim.inspect(s2))
+  -- File should now be in archived/YYYY/MM/
+  ok("refresh moved aged task out of completed/",
+    not fs_path.is_file(td .. "/completed/" .. id2 .. ".yaml"))
+  -- Find it by glob to be timezone-tolerant.
+  local found_in_archived = false
+  local a_dir = td .. "/archived"
+  if fs_path.is_dir(a_dir) then
+    for _, y in ipairs(vim.fn.readdir(a_dir) or {}) do
+      for _, m in ipairs(vim.fn.readdir(a_dir .. "/" .. y) or {}) do
+        if fs_path.is_file(a_dir .. "/" .. y .. "/" .. m .. "/" .. id2 .. ".yaml") then
+          found_in_archived = true
+          break
+        end
+      end
+      if found_in_archived then break end
+    end
+  end
+  ok("refresh: aged file is now in archived/YYYY/MM/", found_in_archived)
+
+  -- Read it back: completed_at must be preserved through auto-archive
+  -- (per the lifecycle rules).
+  local aged = todo.get(id2)
+  ok("auto-archived task preserves completed_at",
+    aged and aged.completed_at == "2026-04-20T10:00:00-07:00",
+    aged and tostring(aged.completed_at))
+  ok("auto-archived task has archived_at set",
+    aged and type(aged.archived_at) == "string")
+
+  -- ── recent completed (< 28 days) is NOT archived ────────────
+  local id3 = "2026-05-20-recent-completed"
+  todo.add({
+    id           = id3,
+    title        = "Recent completed",
+    status       = "completed",
+    completed_at = "2026-05-20T10:00:00-07:00",  -- 5 days before today
+  })
+  local s3 = todo.refresh()
+  ok("refresh did NOT archive a recent completed task",
+    s3.archived == 0, "summary=" .. vim.inspect(s3))
+  ok("recent completed task is still in completed/",
+    fs_path.is_file(td .. "/completed/" .. id3 .. ".yaml"))
+
+  -- ── refresh is idempotent: running twice = no further moves ─
+  local s4 = todo.refresh()
+  ok("second refresh moved nothing (already reconciled)",
+    s4.moved == 0 and s4.archived == 0)
+
+  -- ── core.todo:refreshed event fires ─────────────────────────
+  local events = require("auto-core.events")
+  events._reset_for_tests()
+  local fired = {}
+  events.subscribe("core.todo:refreshed", function(p) table.insert(fired, p) end)
+  local s5 = todo.refresh()
+  ok("refresh publishes core.todo:refreshed event",
+    #fired == 1 and fired[1].summary
+      and fired[1].summary.scanned == s5.scanned)
+
+  -- ── malformed file is skipped, not crashed ──────────────────
+  vim.fn.mkdir(td .. "/open", "p")
+  vim.fn.writefile({ "not: ", "valid: yaml: shape", "missing required fields" },
+    td .. "/open/2026-05-25-broken.yaml")
+  local s6 = todo.refresh()
+  ok("refresh: malformed file counted as skipped",
+    s6.skipped >= 1, "skipped=" .. tostring(s6.skipped))
 
   worktree.set_workspace_root(nil)
   cleanup()
