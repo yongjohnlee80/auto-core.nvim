@@ -7115,6 +7115,74 @@ print("\n[62] todo — dir override + known_dirs registry")
   cleanup()
 end)()
 
+-- ─────────────────────── 63. todo — :AutoCoreTodoRefresh + autocmd (§3) ─
+print("\n[63] todo — user command + BufWritePost autocmd")
+;(function()
+  -- ── :AutoCoreTodoRefresh user command is registered ─────────
+  local cmds = vim.api.nvim_get_commands({})
+  ok(":AutoCoreTodoRefresh is a registered user command",
+    cmds.AutoCoreTodoRefresh ~= nil)
+
+  -- ── AutoCoreTodo autocmd group exists with a BufWritePost ───
+  local autos = vim.api.nvim_get_autocmds({ group = "AutoCoreTodo" })
+  ok("AutoCoreTodo augroup exists with at least one BufWritePost",
+    type(autos) == "table" and #autos >= 1
+      and autos[1].event == "BufWritePost")
+
+  -- ── BufWritePost fires only inside the resolved todo dir ────
+  local todo = require("auto-core.todo")
+  local worktree = require("auto-core.git.worktree")
+
+  local state_tmp = vim.fn.tempname()
+  vim.fn.mkdir(state_tmp, "p")
+  require("auto-core.state").configure({ persist_dir = state_tmp })
+
+  local tmp_root = vim.fn.tempname()
+  vim.fn.mkdir(tmp_root, "p")
+  worktree.set_workspace_root(tmp_root)
+
+  -- Subscribe to core.todo:refreshed so we can detect autocmd firing.
+  local events = require("auto-core.events")
+  events._reset_for_tests()
+  local fired = 0
+  events.subscribe("core.todo:refreshed", function() fired = fired + 1 end)
+
+  -- Add a task so the dir exists, then write to a file UNDER the
+  -- todo dir → autocmd should fire refresh.
+  local id1 = todo.add({ id = "2026-05-25-autocmd-target", title = "Autocmd target" })
+  local todo_file = todo.get_todo_dir() .. "/open/" .. id1 .. ".yaml"
+  fired = 0  -- reset counter (add doesn't fire refresh by itself)
+  -- Open + save the buffer to simulate a hand-edit.
+  vim.cmd.edit(todo_file)
+  vim.cmd("noautocmd write")  -- skip the first write
+  fired = 0
+  vim.cmd.write()             -- this one should trigger the autocmd
+  ok("BufWritePost inside todo dir triggers refresh", fired >= 1,
+    "fired=" .. tostring(fired))
+
+  -- Now write to a yaml file OUTSIDE the todo dir → no refresh.
+  local outside = tmp_root .. "/random.yaml"
+  vim.fn.writefile({ "k: v" }, outside)
+  fired = 0
+  vim.cmd.edit(outside)
+  vim.cmd.write()
+  ok("BufWritePost outside todo dir does NOT trigger refresh",
+    fired == 0, "fired=" .. tostring(fired))
+
+  -- ── User command invocation also triggers refresh ───────────
+  fired = 0
+  vim.cmd("AutoCoreTodoRefresh")
+  ok(":AutoCoreTodoRefresh fires refresh", fired >= 1,
+    "fired=" .. tostring(fired))
+
+  -- Cleanup.
+  vim.cmd("bwipeout!")  -- close the test buffers
+  worktree.set_workspace_root(nil)
+  require("auto-core.state").configure({ persist_dir = nil })
+  vim.fn.delete(tmp_root, "rf")
+  vim.fn.delete(state_tmp, "rf")
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

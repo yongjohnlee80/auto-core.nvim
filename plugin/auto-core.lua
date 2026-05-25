@@ -479,3 +479,56 @@ do
     })
   end
 end
+
+-- ─── auto-core.todo — user command + autocmd (ADR-0031 §3) ────
+--
+-- :AutoCoreTodoRefresh reconciles the resolved `.todo-list/`
+-- directory: enforces dir == status, applies the 28-day auto-archive
+-- rule, re-validates references, and updates errors[]. A summary is
+-- printed via vim.notify so the user sees what changed.
+--
+-- The BufWritePost autocmd fires for any .yaml save inside the
+-- currently-resolved todo dir (honoring set_todo_dir overrides). It
+-- uses a callback-time filter rather than a fixed pattern so the
+-- dir override can change at runtime without re-registering the
+-- autocmd.
+vim.api.nvim_create_user_command("AutoCoreTodoRefresh", function()
+  local ok, todo = pcall(require, "auto-core.todo")
+  if not ok then
+    vim.notify("auto-core.todo unavailable: " .. tostring(todo), vim.log.levels.ERROR)
+    return
+  end
+  local ok_run, summary = pcall(todo.refresh)
+  if not ok_run then
+    vim.notify("auto-core.todo.refresh failed: " .. tostring(summary), vim.log.levels.ERROR)
+    return
+  end
+  vim.notify(string.format(
+    "auto-core.todo: scanned=%d moved=%d archived=%d skipped=%d errors_set=%d rewritten=%d",
+    summary.scanned, summary.moved, summary.archived, summary.skipped,
+    summary.errors_set, summary.rewritten), vim.log.levels.INFO)
+end, { desc = "Reconcile .todo-list/ files (status ↔ dir, 28-day auto-archive, refs)" })
+
+do
+  local group = vim.api.nvim_create_augroup("AutoCoreTodo", { clear = true })
+  vim.api.nvim_create_autocmd("BufWritePost", {
+    group   = group,
+    pattern = "*.yaml",
+    callback = function(args)
+      local ok_t, todo = pcall(require, "auto-core.todo")
+      if not ok_t then return end
+      local ok_p, fs_path = pcall(require, "auto-core.fs.path")
+      if not ok_p then return end
+      local td = todo.get_todo_dir()
+      if type(td) ~= "string" or td == "" then return end
+      local saved_file = args.file
+      if type(saved_file) ~= "string" or saved_file == "" then return end
+      -- Only fire when the saved file is under the currently-resolved
+      -- todo dir. Buffers in unrelated yaml files (pubspec.yaml,
+      -- action workflows, etc.) get a no-op short-circuit here.
+      if fs_path.is_under(saved_file, td) then
+        pcall(todo.refresh)
+      end
+    end,
+  })
+end
