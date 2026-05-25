@@ -5970,6 +5970,176 @@ vim.api.nvim_set_option_value("signcolumn",     saved.signcolumn,     {})
 vim.api.nvim_set_option_value("foldcolumn",     saved.foldcolumn,     {})
 end)()
 
+-- ─────────────────────── 54. todo.yaml — strict-subset YAML adapter (ADR 0031 §2) ─
+print("\n[54] todo.yaml — strict-subset decode / encode")
+;(function()
+  local ok_req, yaml = pcall(require, "auto-core.todo.yaml")
+  ok("auto-core.todo.yaml loads", ok_req, tostring(yaml))
+  if ok_req then
+
+    -- ── decode: happy path ────────────────────────────────────
+    local src_basic = table.concat({
+      "id: 2026-05-25-foo",
+      "version: 1",
+      "status: open",
+      "title: Test task",
+      "tags:",
+      "  - workflow",
+      "  - testing",
+      "",
+    }, "\n")
+    local r = yaml.decode(src_basic)
+    ok("decode: minimal task succeeds", r.ok, r.err)
+    ok("decode: id round-trips",
+      r.ok and r.value and r.value.id == "2026-05-25-foo",
+      r.ok and ("got " .. tostring(r.value and r.value.id)))
+    ok("decode: version stays numeric",
+      r.ok and r.value and r.value.version == 1)
+    ok("decode: tags is a sequence of two items",
+      r.ok and r.value and type(r.value.tags) == "table"
+        and r.value.tags[1] == "workflow" and r.value.tags[2] == "testing")
+
+    -- ── decode: strict-subset rejections ──────────────────────
+    local rej_anchor = yaml.decode("foo: &my_anchor 42\nbar: *my_anchor\n")
+    ok("decode: rejects YAML anchor",
+      (not rej_anchor.ok) and rej_anchor.err and rej_anchor.err:find("anchor"),
+      rej_anchor.err)
+
+    local rej_alias = yaml.decode("foo: 42\nbar: *some_alias\n")
+    ok("decode: rejects YAML alias (no anchor in scope)",
+      (not rej_alias.ok) and rej_alias.err and rej_alias.err:find("alias"),
+      rej_alias.err)
+
+    local rej_merge = yaml.decode(table.concat({
+      "base: &b",
+      "  k: v",
+      "child:",
+      "  <<: *b",
+      "  k2: v2",
+      "",
+    }, "\n"))
+    ok("decode: rejects YAML merge key `<<:`",
+      (not rej_merge.ok) and rej_merge.err
+        and (rej_merge.err:find("merge") or rej_merge.err:find("anchor")),
+      rej_merge.err)
+
+    local rej_tag = yaml.decode("created: !!timestamp 2026-05-25T12:00:00Z\n")
+    ok("decode: rejects YAML explicit tag `!!type`",
+      (not rej_tag.ok) and rej_tag.err and rej_tag.err:find("explicit tag"),
+      rej_tag.err)
+
+    -- ── decode: block-scalar bodies are exempt from the check ─
+    -- A `description: |` block whose body contains `&foo` is content,
+    -- not a YAML anchor — must not be rejected.
+    local block_with_ampersand = table.concat({
+      "id: 2026-05-25-bar",
+      "description: |",
+      "  Free-form prose. Mentioning &foo and *bar and !!baz",
+      "  here is just text; these are not YAML constructs.",
+      "",
+    }, "\n")
+    local r_block = yaml.decode(block_with_ampersand)
+    ok("decode: forbidden markers inside `|` block scalar bodies do NOT reject",
+      r_block.ok, r_block.err)
+    ok("decode: block-scalar body preserves the literal content",
+      r_block.ok and r_block.value
+        and type(r_block.value.description) == "string"
+        and r_block.value.description:find("&foo")
+        and r_block.value.description:find("*bar")
+        and r_block.value.description:find("!!baz"))
+
+    -- ── encode: happy path ────────────────────────────────────
+    local enc_basic = yaml.encode({
+      id      = "2026-05-25-foo",
+      version = 1,
+      status  = "open",
+      title   = "Test task",
+    })
+    ok("encode: emits a string", type(enc_basic) == "string")
+    -- Date-shaped strings are double-quoted by the encoder (round-trip
+    -- safe given the strict subset disables native timestamp coercion).
+    ok("encode: contains the id line (quoted because date-shaped)",
+      enc_basic:find('id: "2026%-05%-25%-foo"') ~= nil, enc_basic)
+    ok("encode: contains the version line",
+      enc_basic:find("version: 1") ~= nil, enc_basic)
+    ok("encode: ends with a trailing newline",
+      enc_basic:sub(-1) == "\n", "tail=" .. string.format("%q", enc_basic:sub(-5)))
+
+    -- ── encode: multi-line strings use `|` literal block ──────
+    local enc_multi = yaml.encode({
+      notes = "line one\nline two\nline three",
+    })
+    ok("encode: multi-line string uses `|` block scalar",
+      enc_multi:find("notes: |\n") ~= nil, enc_multi)
+    -- Body indent = parent-key indent (2 for top-level mapping) + 2 more
+    -- for the block-scalar body itself = 4 spaces.
+    ok("encode: block-scalar body lines are indented 4 spaces",
+      enc_multi:find("\n    line one\n") ~= nil
+        and enc_multi:find("\n    line two\n") ~= nil, enc_multi)
+
+    -- ── encode: ISO datetime is quoted ────────────────────────
+    local enc_ts = yaml.encode({
+      created = "2026-05-25T14:32:00-07:00",
+    })
+    ok("encode: ISO 8601 timestamp is double-quoted (round-trip safe)",
+      enc_ts:find('created: "2026%-05%-25T14:32:00%-07:00"') ~= nil, enc_ts)
+
+    -- ── encode: sequence of mappings (errors[] shape) ─────────
+    local enc_errors = yaml.encode({
+      errors = {
+        { field = "blocked[0]", code = "not-found", message = "missing",
+          detected = "2026-05-25T22:00:00-07:00" },
+      },
+    })
+    -- First entry: `- code: not-found` (alphabetical order) inline
+    -- after the dash; remaining keys indented by two spaces.
+    ok("encode: list-of-mappings emits `- key: value` on first key",
+      enc_errors:find("\n  %- code: not%-found\n") ~= nil, enc_errors)
+    ok("encode: list-of-mappings indents subsequent keys to align",
+      enc_errors:find("\n    detected:") ~= nil
+        and enc_errors:find("\n    field: ") ~= nil
+        and enc_errors:find("\n    message: missing") ~= nil, enc_errors)
+
+    -- ── round-trip ────────────────────────────────────────────
+    local round_input = {
+      id          = "2026-05-25-rt",
+      version     = 1,
+      status      = "open",
+      title       = "Round-trip test",
+      description = "First line.\nSecond line.",
+      tags        = { "a", "b", "c" },
+      blocked     = { "2026-05-20-prereq" },
+    }
+    local round_yaml = yaml.encode(round_input)
+    local round_dec  = yaml.decode(round_yaml)
+    ok("round-trip: decode succeeds on encode output",
+      round_dec.ok, round_dec.err)
+    if round_dec.ok then
+      local v = round_dec.value
+      ok("round-trip: id preserved", v.id == round_input.id)
+      ok("round-trip: version preserved", v.version == round_input.version)
+      ok("round-trip: status preserved", v.status == round_input.status)
+      ok("round-trip: title preserved", v.title == round_input.title)
+      -- Block scalar with `|` includes a trailing newline by spec.
+      ok("round-trip: description preserved (modulo block-scalar trailing \\n)",
+        v.description == round_input.description
+          or v.description == (round_input.description .. "\n"),
+        "got " .. string.format("%q", tostring(v.description)))
+      ok("round-trip: tags preserved",
+        type(v.tags) == "table"
+          and v.tags[1] == "a" and v.tags[2] == "b" and v.tags[3] == "c")
+      ok("round-trip: blocked preserved",
+        type(v.blocked) == "table" and v.blocked[1] == "2026-05-20-prereq")
+    end
+
+    -- ── decode: non-string source rejected cleanly ────────────
+    local rej_type = yaml.decode(42)
+    ok("decode: non-string source returns ok=false with type error",
+      (not rej_type.ok) and rej_type.err and rej_type.err:find("string"),
+      rej_type.err)
+  end
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
