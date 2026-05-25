@@ -6995,6 +6995,126 @@ print("\n[61] todo.refresh — reference validation + errors[] stability")
   worktree.set_workspace_root(nil)
 end)()
 
+-- ─────────────────────── 62. todo.set_todo_dir / get_todo_dir / known_dirs (§3.3) ─
+print("\n[62] todo — dir override + known_dirs registry")
+;(function()
+  local ok_req, todo = pcall(require, "auto-core.todo")
+  if not ok_req then return end
+
+  -- Isolate the state store for this test — point persist_dir at a
+  -- tempdir so prior runs of these smokes can't leak in. (After we
+  -- configure, the namespace handle is recreated lazily via the next
+  -- access since state.configure invalidates the persist path.)
+  local state_tmp = vim.fn.tempname()
+  vim.fn.mkdir(state_tmp, "p")
+  require("auto-core.state").configure({ persist_dir = state_tmp })
+
+  local tmp_root = vim.fn.tempname()
+  vim.fn.mkdir(tmp_root, "p")
+  local worktree = require("auto-core.git.worktree")
+  worktree.set_workspace_root(tmp_root)
+
+  local function cleanup()
+    vim.fn.delete(tmp_root, "rf")
+    vim.fn.delete(state_tmp, "rf")
+    require("auto-core.state").configure({ persist_dir = nil })
+    worktree.set_workspace_root(nil)
+  end
+
+  -- ── default resolution: no override → <ws>/.todo-list ──────
+  ok("get_todo_dir() defaults to <ws>/.todo-list",
+    todo.get_todo_dir() == tmp_root .. "/.todo-list",
+    "got " .. todo.get_todo_dir())
+
+  -- ── set_todo_dir applies the override ───────────────────────
+  local override_dir = tmp_root .. "/custom-todo-store"
+  todo.set_todo_dir(override_dir)
+  ok("after set_todo_dir, get_todo_dir returns override",
+    todo.get_todo_dir() == override_dir, "got " .. todo.get_todo_dir())
+
+  -- A task added now lands in the override location.
+  local id_under_override = todo.add({ id = "2026-05-25-overridden", title = "Override task" })
+  ok("task written under override dir",
+    vim.fn.filereadable(override_dir .. "/open/" .. id_under_override .. ".yaml") == 1
+      and vim.fn.filereadable(tmp_root .. "/.todo-list/open/" .. id_under_override .. ".yaml") == 0)
+
+  -- ── clear the override (nil) → fall back to default ────────
+  todo.set_todo_dir(nil)
+  ok("set_todo_dir(nil) clears override; default resumes",
+    todo.get_todo_dir() == tmp_root .. "/.todo-list")
+
+  -- ── clear via empty string also works ───────────────────────
+  todo.set_todo_dir(override_dir)
+  todo.set_todo_dir("")
+  ok("set_todo_dir('') also clears override",
+    todo.get_todo_dir() == tmp_root .. "/.todo-list")
+
+  -- ── ~-prefixed paths are expanded ───────────────────────────
+  todo.set_todo_dir("~/auto-core-test-tilde-todo")
+  ok("set_todo_dir('~/...') expands ~ via vim.fn.expand",
+    todo.get_todo_dir() == vim.fn.expand("~/auto-core-test-tilde-todo"))
+  todo.set_todo_dir(nil)
+
+  -- ── known_dirs reflects every touched dir ───────────────────
+  todo.set_todo_dir(override_dir)
+  todo.add({ id = "2026-05-25-trace-1", title = "Trace 1" })
+  todo.set_todo_dir(nil)
+  todo.add({ id = "2026-05-25-trace-2", title = "Trace 2" })
+
+  local kd = todo.known_dirs()
+  ok("known_dirs returns a table",
+    type(kd) == "table", "type " .. type(kd))
+  -- Should contain at least: default dir + override dir (state-fresh
+  -- after configure(persist_dir=tmp) but there may be remnants from
+  -- earlier sections this run; so use >=).
+  local saw_default, saw_override = false, false
+  for _, entry in ipairs(kd) do
+    if entry.todo_dir == tmp_root .. "/.todo-list" then saw_default = true end
+    if entry.todo_dir == override_dir then saw_override = true end
+  end
+  ok("known_dirs contains the default <ws>/.todo-list entry", saw_default)
+  ok("known_dirs contains the override entry", saw_override)
+
+  -- ── workspace_roots IS A LIST (N-to-1) ──────────────────────
+  -- Add a SECOND workspace that points at the SAME override dir.
+  local second_ws = vim.fn.tempname()
+  vim.fn.mkdir(second_ws, "p")
+  worktree.set_workspace_root(second_ws)
+  todo.set_todo_dir(override_dir)  -- same dir, different workspace
+  todo.add({ id = "2026-05-25-second-ws", title = "Second ws" })
+
+  -- Restore original ws.
+  worktree.set_workspace_root(tmp_root)
+
+  local kd2 = todo.known_dirs()
+  local override_entry
+  for _, entry in ipairs(kd2) do
+    if entry.todo_dir == override_dir then override_entry = entry; break end
+  end
+  ok("known_dirs entry for shared override exists", override_entry ~= nil)
+  ok("known_dirs[shared].workspace_roots contains BOTH ws roots",
+    override_entry and type(override_entry.workspace_roots) == "table"
+      and #override_entry.workspace_roots == 2,
+    override_entry and ("ws_roots: " .. vim.inspect(override_entry.workspace_roots)))
+
+  -- ── workspace_roots dedupes on repeated add() from same ws ──
+  local count_before = #override_entry.workspace_roots
+  todo.set_todo_dir(override_dir)
+  todo.add({ id = "2026-05-25-dup-trace", title = "Dup trace" })
+  local kd3 = todo.known_dirs()
+  for _, entry in ipairs(kd3) do
+    if entry.todo_dir == override_dir then
+      ok("workspace_roots does NOT duplicate the same ws on repeat add",
+        #entry.workspace_roots == count_before,
+        "before=" .. count_before .. " after=" .. #entry.workspace_roots)
+      break
+    end
+  end
+
+  vim.fn.delete(second_ws, "rf")
+  cleanup()
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

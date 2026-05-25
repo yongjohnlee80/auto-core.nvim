@@ -893,6 +893,58 @@ function M.refresh()
   return summary
 end
 
+-- ─── public: dir override + registry (ADR-0031 §3.3) ─────────
+
+---Set (or clear) the per-workspace todo-dir override. Accepts an
+---absolute path or `~`-prefixed path; pass `nil` or an empty string
+---to clear and fall back to the default `<workspace>/.todo-list/`.
+---
+---The override is persisted in `auto-core.state.namespace('todo')`
+---keyed by the resolved workspace_root.
+---@param path string?
+function M.set_todo_dir(path)
+  local ws_root   = paths.workspace_root()
+  local ns        = state()
+  local overrides = ns:get("dir_overrides") or {}
+
+  if path == nil or path == "" then
+    overrides[ws_root] = nil
+  else
+    if type(path) ~= "string" then
+      error("auto-core.todo.set_todo_dir: path must be a string or nil, got "
+        .. type(path))
+    end
+    local abs = fs_path.normalize(vim.fn.expand(path))
+    overrides[ws_root] = abs
+  end
+  ns:set("dir_overrides", overrides)
+
+  -- Eagerly touch the registry so the new (or restored-default) dir
+  -- is visible via known_dirs() before any task is added there.
+  pcall(M._upsert_known, M._todo_dir(), M._now_iso())
+end
+
+---Resolved absolute todo dir for the current workspace, honoring any
+---active override.
+---@return string
+function M.get_todo_dir()
+  return M._todo_dir()
+end
+
+---Return the registry of known todo dirs as a stable, sorted array
+---of entries `{workspace_roots = {…}, todo_dir = <abs>, last_touched = <iso>}`.
+---Sorted by `todo_dir` for predictable iteration.
+---@return table[]
+function M.known_dirs()
+  local known = state():get("known_dirs") or {}
+  local out = {}
+  for _, entry in pairs(known) do
+    out[#out + 1] = entry
+  end
+  table.sort(out, function(a, b) return (a.todo_dir or "") < (b.todo_dir or "") end)
+  return out
+end
+
 -- ─── public: status / archive — lifecycle transitions ────────
 
 ---Transition a task to a new status. Per ADR-0031 §3.2, this is the
