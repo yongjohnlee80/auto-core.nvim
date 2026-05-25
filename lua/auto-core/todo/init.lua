@@ -130,14 +130,85 @@ local function read_file(path)
   return data
 end
 
--- ─── current todo-dir (state integration is task 8/9) ─────────
+-- ─── state namespace (ADR-0031 §3.3, [[auto-family-state-ownership]]) ─
 
--- For task 4, we resolve the dir purely from `paths.workspace_root()`
--- with no override. Task 9 will replace this with a state-namespace
--- lookup.
+---Lazy-cached handle to `auto-core.state.namespace('todo', {persist='json'})`.
+---Keys layered under this namespace:
+---  • `dir_overrides[<workspace_root>] -> <path>`
+---  • `known_dirs[<absolute_dir>]      -> {workspace_roots, todo_dir, last_touched}`
+---@type any?
+local _state_handle = nil
+
+---@return any   the auto-core.state namespace for todos
+local function state()
+  if _state_handle then return _state_handle end
+  local ok, mod = pcall(require, "auto-core.state")
+  if not ok or type(mod) ~= "table" or type(mod.namespace) ~= "function" then
+    error("auto-core.todo: auto-core.state module unavailable")
+  end
+  _state_handle = mod.namespace("todo", { persist = "json" })
+  return _state_handle
+end
+
+---Read the dir override for a given workspace root, or nil if unset.
+---@param ws_root string
+---@return string?
+local function get_override(ws_root)
+  local overrides = state():get("dir_overrides") or {}
+  local v = overrides[ws_root]
+  if type(v) == "string" and v ~= "" then return v end
+  return nil
+end
+
+---Upsert the known-dirs registry. `workspace_roots` is a list so one
+---override dir can serve multiple workspaces (per ADR-0031 §3.3 +
+---lector round-2 caution). On every call we append the current
+---workspace root if it isn't already in the list and refresh
+---`last_touched`.
+---@param td string         absolute todo dir
+---@param ws_root string    current workspace root
+---@param now string        ISO timestamp
+local function upsert_known(td, ws_root, now)
+  local ns        = state()
+  local known     = ns:get("known_dirs") or {}
+  local entry     = known[td]
+  if not entry then
+    entry = { workspace_roots = {}, todo_dir = td, last_touched = now }
+  else
+    entry.todo_dir     = td       -- defensive: ensure invariant
+    entry.last_touched = now
+    entry.workspace_roots = entry.workspace_roots or {}
+  end
+  local seen = false
+  for _, r in ipairs(entry.workspace_roots) do
+    if r == ws_root then seen = true; break end
+  end
+  if not seen then
+    table.insert(entry.workspace_roots, ws_root)
+  end
+  known[td] = entry
+  ns:set("known_dirs", known)
+end
+
+-- ─── current todo-dir resolver ────────────────────────────────
+
+---Resolve the absolute todo dir for the current workspace. Honors
+---a per-workspace override from the state namespace; falls back to
+---`<workspace_root>/.todo-list/`.
 ---@return string
 function M._todo_dir()
-  return paths.resolve_todo_dir(nil)
+  local ws = paths.workspace_root()
+  local override = get_override(ws)
+  return paths.resolve_todo_dir(override)
+end
+
+---Expose the upsert helper to internal callers (M.add / M.refresh /
+---future M.import). Kept on M with a leading underscore — internal,
+---but reachable from the same module via `M._upsert_known`.
+---@param td string
+---@param now string
+function M._upsert_known(td, now)
+  upsert_known(td, paths.workspace_root(), now)
 end
 
 -- ─── render: validate + encode + header ───────────────────────
@@ -254,6 +325,7 @@ function M.add(spec)
   local ok, err = atomic_write(file, text)
   if not ok then error("auto-core.todo.add: write failed: " .. tostring(err)) end
 
+  pcall(M._upsert_known, td, now)
   return id
 end
 
@@ -806,6 +878,10 @@ function M.refresh()
       end
     end
   end
+
+  -- Touch the known-dirs registry — even an empty refresh counts as
+  -- "auto-core has operated on this dir".
+  pcall(M._upsert_known, td, now)
 
   -- Best-effort event publish so consumers know to refresh their
   -- views (auto-finder panel, auto-agents admin panel).
