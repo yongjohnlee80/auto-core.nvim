@@ -10,6 +10,47 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.2.0] — 2026-05-26 — `auto-core.todo`: per-project YAML task store (ADR-0031)
+
+**Adds `auto-core.todo`** — a per-project task store that lands the
+contract from [ADR-0031](https://github.com/yongjohnlee80/auto-agents).
+Tasks live under `<workspace>/.todo-list/` as one YAML file per task,
+bucketed by status. `auto-finder` and `auto-agents` consume this
+surface in their own upcoming releases.
+
+**`api_version` bumps to `0.2`.** Strictly additive — no existing
+function, state-namespace key, event topic, or persisted schema
+changes shape. Consumers pinning `^0.1.0` keep working; switch to
+`^0.2.0` to opt into `auto-core.todo` capability detection.
+
+Public surface (Lua):
+- `require("auto-core.todo").{list,get,add,update,status,archive,remove}` — CRUD + status lifecycle
+- `.refresh()` — reconciles `status ↔ directory`, applies the 28-day auto-archive rule (keyed off `completed_at`), validates path-based refs, updates `errors[]`
+- `.set_todo_dir / .get_todo_dir / .known_dirs` — per-workspace dir override + registry of known dirs (multi-workspace sharing supported via list-typed `workspace_roots`)
+- `.import(source, opts)` — migration entry point for `kb-todo-list` / `legacy-todos-md` (active) and `asana-json` (stub for the post-`/asana-sync`-rewrite path)
+
+User command + autocmd:
+- `:AutoCoreTodoRefresh` — manual reconcile with a summary `vim.notify`
+- `AutoCoreTodo` augroup `BufWritePost` autocmd — fires on saves under the currently-resolved todo dir (override-aware via callback-time `fs_path.is_under`)
+
+Schema (v1):
+- Lifecycle timestamps split: `updated` (content) vs `status_changed` vs `completed_at` / `archived_at`. The 28-day clock is `completed_at`, not `updated`.
+- `errors[]` is auto-managed: stable `detected` per `{field, code}`; omitted from the YAML entirely when empty (zero diff noise on clean files).
+- Header comment block + hand-edit vs managed-field policy documented inline in every emitted task.
+
+State (`auto-core.state.namespace('todo', { persist = 'json' })`):
+- `dir_overrides[<workspace_root>] -> <path>`
+- `known_dirs[<absolute_dir>] -> { workspace_roots = [<root>, ...], todo_dir, last_touched }`
+
+Events:
+- `core.todo.status:changed` `{ id, from, to, at }`
+- `core.todo:refreshed` `{ summary, at }`
+
+Vendored:
+- `lua/auto-core/vendor/tinyyaml.lua` — `peposso/lua-tinyyaml@master` (MIT), with one local patch disabling native YAML 1.1 timestamp coercion (keeps date-shaped task ids round-trip-stable). License preserved at `vendor/LICENSE-tinyyaml`.
+
+Tests: 11 new sections `[54]`–`[64]` in `tests/smoke.lua` covering every layer; 220+ assertions, all green.
+
 ## [v0.1.30] — 2026-05-23 — revert v0.1.29 `WinNew` guard (no real-world vector demonstrated)
 
 Reverts the panel `WinNew` option-inheritance guard introduced in

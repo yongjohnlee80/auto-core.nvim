@@ -527,6 +527,18 @@ return {
   -- nvim. auto-agents `dock.init` carries the same `{ win = winid }`
   -- pattern at lines 225-226 and will receive the matching patch
   -- in auto-agents' next release.
-  version     = "0.1.35",
-  api_version = "0.1",
+  -- v0.2.0 (2026-05-26): introduces the auto-core.todo subsystem
+  -- (ADR-0031) — per-project YAML task store with CRUD, status
+  -- lifecycle, refresh + 28-day auto-archive, reference validation
+  -- with stable errors[] detected, dir-override + known-dirs state,
+  -- and import for kb-todo-list / legacy-todos-md sources. Strictly
+  -- additive — no existing function, state-namespace key, event
+  -- topic, or persisted schema changes shape. api_version bumps to
+  -- 0.2 to expose the new public surface for capability detection
+  -- (consumers may `if require("auto-core").api_version >= "0.2"`
+  -- to feature-gate todo usage). v0.1.x consumer pins (`^0.1.0`)
+  -- continue to work because v0.2 is a separate caret range; the
+  -- todo system is opt-in via the new module path.
+  version     = "0.2.0",
+  api_version = "0.2",
 }
