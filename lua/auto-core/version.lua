@@ -527,18 +527,28 @@ return {
   -- nvim. auto-agents `dock.init` carries the same `{ win = winid }`
   -- pattern at lines 225-226 and will receive the matching patch
   -- in auto-agents' next release.
-  -- v0.2.0 (2026-05-26): introduces the auto-core.todo subsystem
-  -- (ADR-0031) — per-project YAML task store with CRUD, status
-  -- lifecycle, refresh + 28-day auto-archive, reference validation
-  -- with stable errors[] detected, dir-override + known-dirs state,
-  -- and import for kb-todo-list / legacy-todos-md sources. Strictly
-  -- additive — no existing function, state-namespace key, event
-  -- topic, or persisted schema changes shape. api_version bumps to
-  -- 0.2 to expose the new public surface for capability detection
-  -- (consumers may `if require("auto-core").api_version >= "0.2"`
-  -- to feature-gate todo usage). v0.1.x consumer pins (`^0.1.0`)
-  -- continue to work because v0.2 is a separate caret range; the
-  -- todo system is opt-in via the new module path.
-  version     = "0.2.0",
-  api_version = "0.2",
+  -- v0.1.36 (2026-05-26): introduces the auto-core.todo subsystem
+  -- (ADR-0031) — per-project task store, one MARKDOWN file per task
+  -- with YAML frontmatter. Files land under `<workspace>/.todo-list/`
+  -- bucketed by status. The subsystem ships CRUD + status lifecycle,
+  -- refresh with 28-day auto-archive (keyed off completed_at),
+  -- reference validation with stable errors[] detected, per-workspace
+  -- dir-override + known-dirs registry in state, and an import path
+  -- for kb-todo-list / legacy-todos-md sources.
+  --
+  -- DESIGN-PIVOT NOTE (preserved in branch history): an earlier
+  -- iteration on this branch shipped the same data shape as pure
+  -- .yaml files and bumped to v0.2.0. After landing it, the user
+  -- pivoted to .md + YAML frontmatter for Obsidian-compatibility and
+  -- coherence with the KB's existing dual-surface convention (see
+  -- KB_RULES R2). Because no consumer ever pinned ^0.2.0 — the YAML
+  -- iteration was never published — the version stays on the v0.1.x
+  -- patch line. The git history retains every YAML commit as design
+  -- audit trail; the tip of `feat/todo-system` is the MD format.
+  -- api_version stays at 0.1 (strictly additive surface: new module
+  -- `auto-core.todo`, new state namespace `todo`, two new event
+  -- topics; nothing in events/state/ui/fs/git/tasks/log/health
+  -- changes shape).
+  version     = "0.1.36",
+  api_version = "0.1",
 }

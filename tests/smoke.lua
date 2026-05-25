@@ -86,14 +86,14 @@ ok("M.version is a semver string",
   tostring(core.version))
 -- FIXME (baseline-stale): see the long FIXME in section [48] below —
 -- this literal-string version assertion needs manual updating on
--- each minor bump. v0.2.0 introduces auto-core.todo (ADR-0031); the
--- pattern now matches the v0.2.x line. Left stale across bumps so
+-- each patch bump. v0.1.36 introduces auto-core.todo (ADR-0031);
+-- the pattern matches the v0.1.x line. Left stale across bumps so
 -- the failure stays discoverable.
-ok("M.version matches the v0.2.x line",
-  type(core.version) == "string" and core.version:match("^0%.2%.%d+$") ~= nil,
+ok("M.version matches the v0.1.x line",
+  type(core.version) == "string" and core.version:match("^0%.1%.%d+$") ~= nil,
   "got " .. tostring(core.version))
-ok("M.api_version is 0.2 (auto-core.todo subsystem added; all prior surfaces unchanged)",
-  select(1, eq(core.api_version, "0.2")))
+ok("M.api_version is 0.1 (auto-core.todo additive; all prior surfaces unchanged)",
+  select(1, eq(core.api_version, "0.1")))
 ok("M.setup is a function", type(core.setup) == "function")
 ok("M.config table present",
   type(core.config) == "table"
@@ -3436,10 +3436,10 @@ end)()
 print("\n[48] version + api_version sanity")
 ;(function()
 local v = require("auto-core.version")
-ok("version is on the v0.2.x line",
-  type(v.version) == "string" and v.version:match("^0%.2%.%d+$") ~= nil,
+ok("version is on the v0.1.x line",
+  type(v.version) == "string" and v.version:match("^0%.1%.%d+$") ~= nil,
   "got " .. tostring(v.version))
-ok("api_version is 0.2 (auto-core.todo additive surface)", v.api_version == "0.2")
+ok("api_version is 0.1 (auto-core.todo additive surface)", v.api_version == "0.1")
 -- :h api_version semver gate consumers will use.
 local core = require("auto-core")
 ok("M.debug is a table on the public surface",

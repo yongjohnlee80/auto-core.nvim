@@ -10,33 +10,72 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
-## [v0.2.0] — 2026-05-26 — `auto-core.todo`: per-project YAML task store (ADR-0031)
+## [v0.1.36] — 2026-05-26 — `auto-core.todo`: per-project task store (ADR-0031)
 
 **Adds `auto-core.todo`** — a per-project task store that lands the
 contract from [ADR-0031](https://github.com/yongjohnlee80/auto-agents).
-Tasks live under `<workspace>/.todo-list/` as one YAML file per task,
-bucketed by status. `auto-finder` and `auto-agents` consume this
-surface in their own upcoming releases.
+Tasks live under `<workspace>/.todo-list/` as one **Markdown file per
+task with YAML frontmatter**, bucketed by status (`open/`,
+`deferred/`, `completed/`, `archived/YYYY/MM/`). `auto-finder` and
+`auto-agents` consume this surface in their own upcoming releases.
 
-**`api_version` bumps to `0.2`.** Strictly additive — no existing
-function, state-namespace key, event topic, or persisted schema
-changes shape. Consumers pinning `^0.1.0` keep working; switch to
-`^0.2.0` to opt into `auto-core.todo` capability detection.
+**Strictly additive surface** — `api_version` stays at `0.1`. No
+existing function, state-namespace key, event topic, or persisted
+schema changes shape.
+
+> **Design-pivot note** preserved in `feat/todo-system` branch
+> history: this branch went through a YAML-only iteration before
+> landing on Markdown + YAML frontmatter. The MD format was chosen
+> for Obsidian compatibility (the team's existing doc workflow) and
+> coherence with the KB's existing dual-surface convention (per
+> `KB_RULES.md` R2: every `shared/` doc already carries frontmatter +
+> markdown body). The YAML iteration was never released; its commits
+> remain in branch history as design audit trail.
+
+File shape (one task = one `.md` file):
+
+```markdown
+---
+id: 2026-05-25-implement-foo
+version: 1
+status: open
+title: Implement foo
+due: 2026-06-15
+priority: normal
+tags: [auto-core, workflow]
+adr: [shared/adrs/0031-auto-core-per-project-todo-task-system.md]
+created: 2026-05-25T14:32:00-07:00
+updated: 2026-05-25T14:32:00-07:00
+status_changed: 2026-05-25T14:32:00-07:00
+---
+
+<!-- ─── auto-core.todo schema v1 — managed file ─── -->
+
+# Implement foo
+
+Multi-line markdown body = the task's `description`. Full markdown
+support: **bold**, [[wikilinks]], code blocks, tables, anything you'd
+write in a KB doc. Working-dir links, PR URLs, doc references all
+live here as natural markdown.
+```
 
 Public surface (Lua):
 - `require("auto-core.todo").{list,get,add,update,status,archive,remove}` — CRUD + status lifecycle
 - `.refresh()` — reconciles `status ↔ directory`, applies the 28-day auto-archive rule (keyed off `completed_at`), validates path-based refs, updates `errors[]`
 - `.set_todo_dir / .get_todo_dir / .known_dirs` — per-workspace dir override + registry of known dirs (multi-workspace sharing supported via list-typed `workspace_roots`)
-- `.import(source, opts)` — migration entry point for `kb-todo-list` / `legacy-todos-md` (active) and `asana-json` (stub for the post-`/asana-sync`-rewrite path)
+- `.import(source, opts)` — migration entry point for `kb-todo-list` / `legacy-todos-md` sources
 
 User command + autocmd:
 - `:AutoCoreTodoRefresh` — manual reconcile with a summary `vim.notify`
-- `AutoCoreTodo` augroup `BufWritePost` autocmd — fires on saves under the currently-resolved todo dir (override-aware via callback-time `fs_path.is_under`)
+- `AutoCoreTodo` augroup `BufWritePost` autocmd, pattern `*.md` — fires on saves under the currently-resolved todo dir (override-aware via callback-time `fs_path.is_under`)
 
 Schema (v1):
+- Frontmatter (managed — do not hand-edit): `id`, `version`, `created`, `updated`, `status_changed`, `completed_at`, `archived_at`, `errors`
+- Frontmatter (hand-editable): `title`, `status`, `due`, `priority`, `assignee`, `tags`, `adr`, `review`, `blocked`
+- Body (hand-editable): H1 = `title` (duplicated for Obsidian-native display); rest = `description` (free-form markdown)
 - Lifecycle timestamps split: `updated` (content) vs `status_changed` vs `completed_at` / `archived_at`. The 28-day clock is `completed_at`, not `updated`.
-- `errors[]` is auto-managed: stable `detected` per `{field, code}`; omitted from the YAML entirely when empty (zero diff noise on clean files).
-- Header comment block + hand-edit vs managed-field policy documented inline in every emitted task.
+- `errors[]` is auto-managed: stable `detected` per `{field, code}`; omitted from the YAML frontmatter entirely when empty (zero diff noise on clean files).
+- Header `<!-- … -->` HTML comment lives inside the body between frontmatter and H1, documenting the hand-edit vs managed-field policy.
 
 State (`auto-core.state.namespace('todo', { persist = 'json' })`):
 - `dir_overrides[<workspace_root>] -> <path>`
@@ -47,9 +86,9 @@ Events:
 - `core.todo:refreshed` `{ summary, at }`
 
 Vendored:
-- `lua/auto-core/vendor/tinyyaml.lua` — `peposso/lua-tinyyaml@master` (MIT), with one local patch disabling native YAML 1.1 timestamp coercion (keeps date-shaped task ids round-trip-stable). License preserved at `vendor/LICENSE-tinyyaml`.
+- `lua/auto-core/vendor/tinyyaml.lua` — `peposso/lua-tinyyaml@master` (MIT), with one local patch disabling native YAML 1.1 timestamp coercion (keeps date-shaped task ids round-trip-stable). License preserved at `vendor/LICENSE-tinyyaml`. Used for frontmatter parsing.
 
-Tests: 11 new sections `[54]`–`[64]` in `tests/smoke.lua` covering every layer; 220+ assertions, all green.
+Tests: 11 sections `[54]`–`[64]` in `tests/smoke.lua` covering every layer end-to-end.
 
 ## [v0.1.30] — 2026-05-23 — revert v0.1.29 `WinNew` guard (no real-world vector demonstrated)
 
