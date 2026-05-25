@@ -6427,6 +6427,164 @@ print("\n[57] todo.header — canonical comment block")
     not header.is_present(""))
 end)()
 
+-- ─────────────────────── 58. todo (CRUD + atomic write) — ADR-0031 §3.2 ──
+print("\n[58] todo — add / get / list / update / remove")
+;(function()
+  local ok_req, todo = pcall(require, "auto-core.todo")
+  ok("auto-core.todo loads", ok_req, tostring(todo))
+  if not ok_req then return end
+
+  -- ── isolated workspace fixture ──────────────────────────────
+  local tmp_root = vim.fn.tempname()
+  vim.fn.mkdir(tmp_root, "p")
+  local worktree = require("auto-core.git.worktree")
+  worktree.set_workspace_root(tmp_root)
+
+  local function cleanup() vim.fn.delete(tmp_root, "rf") end
+
+  ok("fixture: workspace_root applied",
+    require("auto-core.todo.paths").workspace_root() == tmp_root)
+  local td = todo._todo_dir()
+  ok("fixture: todo_dir resolved under workspace",
+    td == tmp_root .. "/.todo-list", "got " .. td)
+
+  -- ── _now_iso shape ──────────────────────────────────────────
+  local now = todo._now_iso()
+  ok("_now_iso returns ISO 8601 with offset",
+    now:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d[Z+%-]") ~= nil,
+    "got " .. now)
+
+  -- ── add: basic + file placement ─────────────────────────────
+  local id1 = todo.add({ title = "First task" })
+  ok("add returns a non-empty id", type(id1) == "string" and id1 ~= "")
+  ok("add id matches paths.make_id shape",
+    id1:match("^%d%d%d%d%-%d%d%-%d%d%-first%-task$") ~= nil,
+    "got " .. id1)
+
+  local f1 = td .. "/open/" .. id1 .. ".yaml"
+  ok("add wrote file under .todo-list/open/", vim.fn.filereadable(f1) == 1,
+    "expected " .. f1)
+
+  -- ── header comment + body present in the written file ──────
+  local lines1 = vim.fn.readfile(f1)
+  ok("written file starts with the canonical header",
+    lines1[1] and lines1[1]:match("^# ─── auto%-core%.todo schema v1") ~= nil,
+    "first line: " .. tostring(lines1[1]))
+
+  -- ── add: explicit id + spec fields propagated ───────────────
+  local id2 = todo.add({
+    id          = "2026-05-25-explicit",
+    title       = "Explicit id task",
+    description = "with prose",
+    tags        = { "alpha", "beta" },
+    priority    = "high",
+    assignee    = "jarvis",
+  })
+  ok("add honors explicit id", id2 == "2026-05-25-explicit")
+  local t2 = todo.get(id2)
+  ok("get reads the task back", type(t2) == "table" and t2.id == id2,
+    t2 and tostring(t2.id))
+  ok("get: description preserved",
+    t2 and t2.description == "with prose")
+  ok("get: tags preserved",
+    t2 and t2.tags and t2.tags[1] == "alpha" and t2.tags[2] == "beta")
+  ok("get: priority preserved", t2 and t2.priority == "high")
+  ok("get: assignee preserved", t2 and t2.assignee == "jarvis")
+
+  -- ── add: refuses missing/empty title ────────────────────────
+  ok("add refuses missing title", not pcall(todo.add, {}))
+  ok("add refuses empty title",   not pcall(todo.add, { title = "" }))
+
+  -- ── add: refuses duplicate id ───────────────────────────────
+  ok("add refuses duplicate id",
+    not pcall(todo.add, { id = id2, title = "dup" }))
+
+  -- ── add: deferred status places file in deferred bucket ─────
+  local id3 = todo.add({ id = "2026-05-25-deferred-foo", title = "Deferred",
+    status = "deferred" })
+  local f3  = td .. "/deferred/" .. id3 .. ".yaml"
+  ok("add(status=deferred) places file in deferred/", vim.fn.filereadable(f3) == 1)
+
+  -- ── get: unknown id ─────────────────────────────────────────
+  local t_unk, err_unk = todo.get("never-existed")
+  ok("get(unknown) returns nil + err",
+    t_unk == nil and type(err_unk) == "string" and err_unk:find("not found"))
+
+  -- ── list: status filtering ──────────────────────────────────
+  local all = todo.list()
+  ok("list() returns array of all tasks",
+    type(all) == "table" and #all == 3, "got " .. tostring(#all))
+  local opens = todo.list({ status = "open" })
+  ok("list(status=open) returns just the 2 open tasks",
+    #opens == 2, "got " .. tostring(#opens))
+  local deferred = todo.list({ status = "deferred" })
+  ok("list(status=deferred) returns just the deferred task",
+    #deferred == 1 and deferred[1].id == id3)
+
+  -- ── list: filters ───────────────────────────────────────────
+  local by_tag = todo.list({ tag = "alpha" })
+  ok("list(tag=alpha) returns only id2",
+    #by_tag == 1 and by_tag[1].id == id2)
+  local by_assignee = todo.list({ assignee = "jarvis" })
+  ok("list(assignee=jarvis) returns only id2",
+    #by_assignee == 1 and by_assignee[1].id == id2)
+  local by_prio = todo.list({ priority = "high" })
+  ok("list(priority=high) returns only id2",
+    #by_prio == 1 and by_prio[1].id == id2)
+  local with_errors = todo.list({ has_errors = true })
+  ok("list(has_errors=true) returns [] (none yet)", #with_errors == 0)
+
+  -- ── update: content fields succeed ──────────────────────────
+  local before = todo.get(id2)
+  local upd, upd_err = todo.update(id2, { notes = "added a note", priority = "low" })
+  ok("update returns the new task table", type(upd) == "table" and upd.id == id2,
+    upd_err)
+  ok("update wrote notes", upd and upd.notes == "added a note")
+  ok("update wrote priority", upd and upd.priority == "low")
+  ok("update bumped `updated`",
+    upd and before and upd.updated >= before.updated)
+
+  -- ── update: refuses status change ───────────────────────────
+  local _, e_st = todo.update(id2, { status = "completed" })
+  ok("update refuses status changes (must use M.status)",
+    e_st and e_st:find("M%.status") ~= nil, e_st)
+
+  -- ── update: refuses managed fields ──────────────────────────
+  local _, e_mg = todo.update(id2, { created = "2020-01-01T00:00:00Z" })
+  ok("update refuses managed fields (e.g. created)",
+    e_mg and e_mg:find("not hand%-editable") ~= nil, e_mg)
+
+  local _, e_un = todo.update(id2, { surprise = "nope" })
+  ok("update refuses unknown fields",
+    e_un and e_un:find("not hand%-editable") ~= nil, e_un)
+
+  -- ── update: unknown id ──────────────────────────────────────
+  local _, e_no = todo.update("never-existed", { notes = "x" })
+  ok("update returns err on unknown id",
+    e_no and e_no:find("not found") ~= nil, e_no)
+
+  -- ── remove: deletes the file, returns true ──────────────────
+  local rok, rerr = todo.remove(id1)
+  ok("remove returns true on success", rok, rerr)
+  ok("remove actually unlinks the file",
+    vim.fn.filereadable(td .. "/open/" .. id1 .. ".yaml") == 0)
+  local rok2, _ = todo.remove(id1)
+  ok("remove returns false on missing id", not rok2)
+
+  -- ── atomic write: no .tmp- file lingers in open/ ────────────
+  local open_dir = td .. "/open"
+  local files = vim.fn.readdir(open_dir) or {}
+  local tmp_lingering = false
+  for _, f in ipairs(files) do
+    if f:match("^%.tmp%-") then tmp_lingering = true; break end
+  end
+  ok("atomic_write: no .tmp- residue in open/", not tmp_lingering)
+
+  -- ── teardown ────────────────────────────────────────────────
+  worktree.set_workspace_root(nil)
+  cleanup()
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
