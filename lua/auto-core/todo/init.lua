@@ -1064,6 +1064,18 @@ function M.archive(id)
   return M.status(id, "archived")
 end
 
+-- ─── public: import (ADR-0031 §3.4) ──────────────────────────
+
+---Delegate to `auto-core.todo.import.import`. See ADR-0031 §3.4 for
+---the supported kinds (kb-todo-list / legacy-todos-md / asana-json)
+---and the result shape.
+---@param source string
+---@param opts table?
+---@return table[]
+function M.import(source, opts)
+  return require("auto-core.todo.import").import(source, opts)
+end
+
 -- ─── public: remove ───────────────────────────────────────────
 
 ---Hard-delete a task. Returns `(true, nil)` on success or

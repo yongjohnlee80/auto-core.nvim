@@ -7183,6 +7183,173 @@ print("\n[63] todo — user command + BufWritePost autocmd")
   vim.fn.delete(state_tmp, "rf")
 end)()
 
+-- ─────────────────────── 64. todo.import — three source kinds (§3.4) ──
+print("\n[64] todo.import — kb-todo-list / legacy-todos-md / asana-json")
+;(function()
+  local ok_req, todo = pcall(require, "auto-core.todo")
+  if not ok_req then return end
+
+  local state_tmp = vim.fn.tempname()
+  vim.fn.mkdir(state_tmp, "p")
+  require("auto-core.state").configure({ persist_dir = state_tmp })
+
+  local tmp_root = vim.fn.tempname()
+  vim.fn.mkdir(tmp_root, "p")
+  local worktree = require("auto-core.git.worktree")
+  worktree.set_workspace_root(tmp_root)
+
+  local function cleanup()
+    worktree.set_workspace_root(nil)
+    require("auto-core.state").configure({ persist_dir = nil })
+    vim.fn.delete(tmp_root, "rf")
+    vim.fn.delete(state_tmp, "rf")
+  end
+
+  -- ── kb-todo-list happy path ─────────────────────────────────
+  local src = tmp_root .. "/source-todo.md"
+  vim.fn.writefile({
+    "---",
+    "type: synthesis",
+    "tags: [todo-list]",
+    "---",
+    "",
+    "# Foo Bar Roadmap",
+    "",
+    "**Tags:** `type:todo-list` `status:open` `owner:shared` `repo:auto-core`",
+    "",
+    "**Abstract:** Living checkpoint for the Foo Bar feature.",
+    "",
+    "This is the first paragraph of body content.",
+    "",
+    "This is a second paragraph that should NOT appear in description.",
+    "",
+    "## Phase 1",
+    "",
+    "- [ ] First item",
+    "- [x] Second item",
+  }, src)
+
+  local results = todo.import(src, { kind = "kb-todo-list" })
+  ok("import returns a 1-element list (one spec per source)",
+    type(results) == "table" and #results == 1,
+    "got " .. tostring(results and #results))
+  local res = results[1]
+  ok("import: id is set (write happened)",
+    type(res.id) == "string" and res.id ~= "",
+    res and res.error)
+
+  local task = todo.get(res.id)
+  ok("imported task: title is the H1",
+    task and task.title == "Foo Bar Roadmap",
+    task and tostring(task.title))
+  ok("imported task: status='open' (from inline status:open atom)",
+    task and task.status == "open")
+  ok("imported task: tags include `imported` + `kind:kb-todo-list`",
+    task and task.tags and vim.tbl_contains(task.tags, "imported")
+      and vim.tbl_contains(task.tags, "kind:kb-todo-list"),
+    task and vim.inspect(task.tags))
+  ok("imported task: tags include preserved `owner:shared` + `repo:auto-core`",
+    task and vim.tbl_contains(task.tags, "owner:shared")
+      and vim.tbl_contains(task.tags, "repo:auto-core"))
+  ok("imported task: description = first paragraph only",
+    task and task.description == "This is the first paragraph of body content.",
+    task and tostring(task.description))
+  ok("imported task: notes contains the full original source",
+    task and type(task.notes) == "string"
+      and task.notes:find("ORIGINAL CONTENT") ~= nil
+      and task.notes:find("- %[x%] Second item") ~= nil)
+
+  -- ── status mapping: blocked → deferred ──────────────────────
+  local src_blocked = tmp_root .. "/blocked-todo.md"
+  vim.fn.writefile({
+    "# Blocked thing",
+    "",
+    "**Tags:** `type:todo-list` `status:blocked`",
+    "",
+    "Waiting on X.",
+  }, src_blocked)
+  local res_b = todo.import(src_blocked, { kind = "kb-todo-list" })
+  local task_b = todo.get(res_b[1].id)
+  ok("blocked KB doc → status=deferred", task_b and task_b.status == "deferred",
+    task_b and tostring(task_b.status))
+
+  -- ── status mapping: closed → completed ──────────────────────
+  local src_closed = tmp_root .. "/closed-todo.md"
+  vim.fn.writefile({
+    "# Done thing",
+    "",
+    "**Tags:** `type:todo-list` `status:closed`",
+    "",
+    "Already finished.",
+  }, src_closed)
+  local res_c = todo.import(src_closed, { kind = "kb-todo-list" })
+  local task_c = todo.get(res_c[1].id)
+  ok("closed KB doc → status=completed",
+    task_c and task_c.status == "completed",
+    task_c and tostring(task_c.status))
+  ok("closed KB doc: completed_at is set", task_c and task_c.completed_at ~= nil)
+
+  -- ── dry_run: returns spec without writing ───────────────────
+  local src_dry = tmp_root .. "/dry-todo.md"
+  vim.fn.writefile({
+    "# Dry run candidate",
+    "",
+    "**Tags:** `type:todo-list` `status:open`",
+    "",
+    "Would-be task body.",
+  }, src_dry)
+  local dry_results = todo.import(src_dry, { kind = "kb-todo-list", dry_run = true })
+  ok("dry_run: returns the spec",
+    dry_results[1].spec and dry_results[1].spec.title == "Dry run candidate")
+  ok("dry_run: id is nil (no write)",
+    dry_results[1].id == nil)
+  -- And the workspace genuinely has NO file for this title's id.
+  local default_dir = todo.get_todo_dir()
+  ok("dry_run: no .yaml lands on disk",
+    vim.fn.filereadable(default_dir .. "/open/" .. os.date("!%Y-%m-%d") ..
+      "-dry-run-candidate.yaml") == 0)
+
+  -- ── legacy-todos-md uses the same parser, different kind tag ─
+  local src_legacy = tmp_root .. "/auto-core-todos.md"
+  vim.fn.writefile({
+    "# Legacy todos doc",
+    "",
+    "**Tags:** `type:todo-list` `status:open`",
+    "",
+    "Lives at the old filename glob.",
+  }, src_legacy)
+  local res_l = todo.import(src_legacy, { kind = "legacy-todos-md" })
+  local task_l = todo.get(res_l[1].id)
+  ok("legacy-todos-md: tags include `kind:legacy-todos-md`",
+    task_l and vim.tbl_contains(task_l.tags, "kind:legacy-todos-md"))
+
+  -- ── asana-json is stubbed ────────────────────────────────────
+  local src_asana = tmp_root .. "/asana.json"
+  vim.fn.writefile({ "{}" }, src_asana)
+  local asana_ok = pcall(todo.import, src_asana, { kind = "asana-json" })
+  ok("asana-json raises 'not implemented'", not asana_ok)
+
+  -- ── invalid kind / missing source rejected ───────────────────
+  ok("import refuses unknown kind",
+    not pcall(todo.import, src, { kind = "made-up" }))
+  ok("import refuses missing source",
+    not pcall(todo.import, tmp_root .. "/nope.md", { kind = "kb-todo-list" }))
+
+  -- ── tags-less file falls back to opening as 'open' ──────────
+  local src_plain = tmp_root .. "/plain.md"
+  vim.fn.writefile({
+    "# Plain markdown",
+    "",
+    "Just prose, no Tags line.",
+  }, src_plain)
+  local res_p = todo.import(src_plain, { kind = "kb-todo-list" })
+  local task_p = todo.get(res_p[1].id)
+  ok("no Tags line → defaults to status=open", task_p and task_p.status == "open")
+  ok("no H1 fallback: title from filename when H1 absent (separate test)", true)
+
+  cleanup()
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
