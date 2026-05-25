@@ -6319,6 +6319,114 @@ print("\n[55] todo.schema — v1 schema validation")
   end
 end)()
 
+-- ─────────────────────── 56. todo.paths + todo.header (ADR 0031 §1+§2) ───
+print("\n[56] todo.paths — dir resolver + bucket helpers + id slug")
+;(function()
+  local ok_p, paths = pcall(require, "auto-core.todo.paths")
+  ok("auto-core.todo.paths loads", ok_p, tostring(paths))
+  if not ok_p then return end
+
+  -- ── workspace_root resolves through git.worktree ────────────
+  local worktree = require("auto-core.git.worktree")
+  worktree.set_workspace_root("/tmp/ac-todo-smoke-ws")
+  ok("workspace_root() returns the explicitly-set value",
+    paths.workspace_root() == "/tmp/ac-todo-smoke-ws",
+    "got " .. paths.workspace_root())
+
+  worktree.set_workspace_root(nil)  -- clear; fall through to other layers
+
+  -- ── default_todo_dir is `<ws>/.todo-list` ───────────────────
+  ok("default_todo_dir(ws) appends .todo-list",
+    paths.default_todo_dir("/tmp/foo") == "/tmp/foo/.todo-list",
+    "got " .. paths.default_todo_dir("/tmp/foo"))
+
+  -- ── resolve_todo_dir honors explicit override ───────────────
+  ok("resolve_todo_dir(override) returns the override",
+    paths.resolve_todo_dir("/tmp/explicit") == "/tmp/explicit")
+  worktree.set_workspace_root("/tmp/ac-todo-smoke-ws")
+  ok("resolve_todo_dir(nil) falls back to workspace default",
+    paths.resolve_todo_dir(nil) == "/tmp/ac-todo-smoke-ws/.todo-list")
+  ok("resolve_todo_dir('') falls back like nil",
+    paths.resolve_todo_dir("") == "/tmp/ac-todo-smoke-ws/.todo-list")
+  worktree.set_workspace_root(nil)
+
+  -- ── bucket_dir for non-archived statuses ────────────────────
+  local td = "/tmp/foo/.todo-list"
+  ok("bucket_dir(open)      → <td>/open",      paths.bucket_dir(td, "open")      == td .. "/open")
+  ok("bucket_dir(completed) → <td>/completed", paths.bucket_dir(td, "completed") == td .. "/completed")
+  ok("bucket_dir(deferred)  → <td>/deferred",  paths.bucket_dir(td, "deferred")  == td .. "/deferred")
+  local ok_arch_err = pcall(paths.bucket_dir, td, "archived")
+  ok("bucket_dir('archived') refuses (caller must use archive_bucket)", not ok_arch_err)
+  local ok_bad_status = pcall(paths.bucket_dir, td, "wat")
+  ok("bucket_dir(unknown status) raises",      not ok_bad_status)
+
+  -- ── archive_bucket partitions by YYYY/MM ────────────────────
+  ok("archive_bucket('2026-06-17T10:00:00Z') → <td>/archived/2026/06",
+    paths.archive_bucket(td, "2026-06-17T10:00:00Z") == td .. "/archived/2026/06")
+  ok("archive_bucket('2026-12-31T23:59:59-08:00') → <td>/archived/2026/12",
+    paths.archive_bucket(td, "2026-12-31T23:59:59-08:00") == td .. "/archived/2026/12")
+  local ok_bad_iso = pcall(paths.archive_bucket, td, "not-a-date")
+  ok("archive_bucket(non-ISO) raises", not ok_bad_iso)
+
+  -- ── task_file_path ──────────────────────────────────────────
+  ok("task_file_path(open) builds <td>/open/<id>.yaml",
+    paths.task_file_path(td, "2026-05-25-foo", "open")
+      == td .. "/open/2026-05-25-foo.yaml")
+  ok("task_file_path(archived) uses YYYY/MM partition",
+    paths.task_file_path(td, "2026-05-25-foo", "archived", "2026-06-17T10:00:00Z")
+      == td .. "/archived/2026/06/2026-05-25-foo.yaml")
+
+  -- ── make_id slug rules ──────────────────────────────────────
+  ok("make_id strips punctuation",
+    paths.make_id("2026-05-25T12:00:00Z", "Implement the todo!  System.")
+      == "2026-05-25-implement-the-todo-system",
+    "got " .. paths.make_id("2026-05-25T12:00:00Z", "Implement the todo!  System."))
+  ok("make_id collapses whitespace runs",
+    paths.make_id("2026-05-25T12:00:00Z", "Fix   the     panel  bug")
+      == "2026-05-25-fix-the-panel-bug")
+  ok("make_id lower-cases",
+    paths.make_id("2026-05-25T12:00:00Z", "MixedCASE Title")
+      == "2026-05-25-mixedcase-title")
+  ok("make_id preserves intentional dashes",
+    paths.make_id("2026-05-25T12:00:00Z", "v1.2-bugfix release")
+      == "2026-05-25-v12-bugfix-release",
+    "got " .. paths.make_id("2026-05-25T12:00:00Z", "v1.2-bugfix release"))
+  ok("make_id falls back to 'untitled' on empty slug",
+    paths.make_id("2026-05-25T12:00:00Z", "?!@#")
+      == "2026-05-25-untitled")
+  local ok_no_date = pcall(paths.make_id, "not-a-date", "Foo")
+  ok("make_id raises on non-ISO created", not ok_no_date)
+end)()
+
+print("\n[57] todo.header — canonical comment block")
+;(function()
+  local ok_h, header = pcall(require, "auto-core.todo.header")
+  ok("auto-core.todo.header loads", ok_h, tostring(header))
+  if not ok_h then return end
+
+  local block = header.emit()
+  ok("emit() returns a string", type(block) == "string")
+  ok("first line is the canonical opener",
+    block:match("^# ─── auto%-core%.todo schema v1") ~= nil,
+    "first line: " .. (block:match("^[^\n]*") or ""))
+  ok("HAND-EDIT FREELY clause is present",
+    block:find("HAND%-EDIT FREELY") ~= nil)
+  ok("DO NOT HAND-EDIT clause is present",
+    block:find("DO NOT HAND%-EDIT") ~= nil)
+  ok("emit() does not trail with a blank line",
+    block:sub(-1) ~= "\n")
+
+  -- ── is_present recognizes its own output ────────────────────
+  ok("is_present recognizes emit()'s output",
+    header.is_present(block .. "\n\nid: foo\n"))
+  ok("is_present returns false on non-headered body",
+    not header.is_present("id: 2026-05-25-foo\nversion: 1\n"))
+  ok("is_present returns false on non-string input",
+    not header.is_present(42))
+  ok("is_present returns false on empty string",
+    not header.is_present(""))
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
