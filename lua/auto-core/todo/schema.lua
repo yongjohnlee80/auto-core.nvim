@@ -33,7 +33,7 @@ M.VALID_ERROR_CODE = {
 
 -- Field-shape catalog. Drives both presence-checks and unknown-key
 -- detection. Order is not semantically meaningful here (the canonical
--- writer in task-writer.lua owns ordering).
+-- writer in md.lua owns ordering).
 local FIELDS = {
   -- Managed (required, system-owned)
   id             = { required = true,  kind = "string"   },
@@ -51,21 +51,25 @@ local FIELDS = {
   -- Hand-editable content
   title          = { required = true,  kind = "string"   },
   description    = { required = true,  kind = "string"   },
+  due            = { required = false, kind = "date_or_null"   },
   priority       = { required = false, kind = "priority" },
   assignee       = { required = false, kind = "string_or_null" },
   tags           = { required = false, kind = "string_list" },
-  notes          = { required = false, kind = "string"   },
 
-  -- Hand-editable references
+  -- Hand-editable references (paths checked by refresh)
   adr            = { required = false, kind = "string_list" },
-  wip            = { required = false, kind = "string_or_null" },
-  pr             = { required = false, kind = "string_list" },
   review         = { required = false, kind = "string_or_null" },
-  links          = { required = false, kind = "string_list" },
   blocked        = { required = false, kind = "string_list" },
 
   -- Auto-managed
   errors         = { required = false, kind = "error_list" },
+
+  -- Note (v0.1.36): `wip`, `pr`, `links`, `notes` are removed from
+  -- the structured schema. Free-form working-dir references, PR
+  -- URLs, doc links, and scratch notes all live in the markdown
+  -- body (the `description` field's content) where they read more
+  -- naturally and are not required by auto-finder. auto-finder
+  -- consumes only the frontmatter for panel rendering.
 }
 
 -- ── kind validators ───────────────────────────────────────────
@@ -105,6 +109,23 @@ end
 local function is_datetime_or_null(v)
   if v == nil then return true end
   return is_datetime(v)
+end
+
+---Bare ISO 8601 date in `YYYY-MM-DD` form. Used for the `due` field
+---where time-of-day isn't meaningful. Distinguished from `datetime`
+---which requires a `T` separator and timezone offset.
+---@param v any
+---@return boolean ok, string? err
+local function is_date_or_null(v)
+  if v == nil then return true end
+  if type(v) ~= "string" then
+    return false, "expected YYYY-MM-DD date string, got " .. type(v)
+  end
+  if not v:match("^%d%d%d%d%-%d%d%-%d%d$") then
+    return false, "string '" .. v .. "' is not a bare YYYY-MM-DD date "
+      .. "(use datetime form only for created/updated/etc.)"
+  end
+  return true
 end
 
 ---@param v any
@@ -198,6 +219,7 @@ local KIND_VALIDATORS = {
   integer           = is_integer,
   datetime          = is_datetime,
   datetime_or_null  = is_datetime_or_null,
+  date_or_null      = is_date_or_null,
   string_or_null    = is_string_or_null,
   status            = is_status,
   priority          = is_priority,

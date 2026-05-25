@@ -6369,12 +6369,12 @@ print("\n[56] todo.paths — dir resolver + bucket helpers + id slug")
   ok("archive_bucket(non-ISO) raises", not ok_bad_iso)
 
   -- ── task_file_path ──────────────────────────────────────────
-  ok("task_file_path(open) builds <td>/open/<id>.yaml",
+  ok("task_file_path(open) builds <td>/open/<id>.md",
     paths.task_file_path(td, "2026-05-25-foo", "open")
-      == td .. "/open/2026-05-25-foo.yaml")
+      == td .. "/open/2026-05-25-foo.md")
   ok("task_file_path(archived) uses YYYY/MM partition",
     paths.task_file_path(td, "2026-05-25-foo", "archived", "2026-06-17T10:00:00Z")
-      == td .. "/archived/2026/06/2026-05-25-foo.yaml")
+      == td .. "/archived/2026/06/2026-05-25-foo.md")
 
   -- ── make_id slug rules ──────────────────────────────────────
   ok("make_id strips punctuation",
@@ -6406,8 +6406,8 @@ print("\n[57] todo.header — canonical comment block")
 
   local block = header.emit()
   ok("emit() returns a string", type(block) == "string")
-  ok("first line is the canonical opener",
-    block:match("^# ─── auto%-core%.todo schema v1") ~= nil,
+  ok("first line is the canonical HTML-comment opener",
+    block:match("^<!%-%- ─── auto%-core%.todo schema v1") ~= nil,
     "first line: " .. (block:match("^[^\n]*") or ""))
   ok("HAND-EDIT FREELY clause is present",
     block:find("HAND%-EDIT FREELY") ~= nil)
@@ -6415,6 +6415,9 @@ print("\n[57] todo.header — canonical comment block")
     block:find("DO NOT HAND%-EDIT") ~= nil)
   ok("emit() does not trail with a blank line",
     block:sub(-1) ~= "\n")
+  ok("emit() ends with the canonical HTML-comment closer",
+    block:match("─── %-%->%s*$") ~= nil,
+    "last bytes: " .. block:sub(-30))
 
   -- ── is_present recognizes its own output ────────────────────
   ok("is_present recognizes emit()'s output",
@@ -6461,15 +6464,21 @@ print("\n[58] todo — add / get / list / update / remove")
     id1:match("^%d%d%d%d%-%d%d%-%d%d%-first%-task$") ~= nil,
     "got " .. id1)
 
-  local f1 = td .. "/open/" .. id1 .. ".yaml"
+  local f1 = td .. "/open/" .. id1 .. ".md"
   ok("add wrote file under .todo-list/open/", vim.fn.filereadable(f1) == 1,
     "expected " .. f1)
 
   -- ── header comment + body present in the written file ──────
   local lines1 = vim.fn.readfile(f1)
-  ok("written file starts with the canonical header",
-    lines1[1] and lines1[1]:match("^# ─── auto%-core%.todo schema v1") ~= nil,
-    "first line: " .. tostring(lines1[1]))
+  -- MD format: file opens with the `---` frontmatter delimiter; the
+  -- HTML-comment header lives inside the body.
+  ok("written file starts with the frontmatter delimiter",
+    lines1[1] == "---", "first line: " .. tostring(lines1[1]))
+  local raw1 = table.concat(lines1, "\n")
+  ok("written file body contains the canonical header HTML comment",
+    raw1:find("<!%-%- ─── auto%-core%.todo schema v1") ~= nil)
+  ok("written file body contains the H1 title",
+    raw1:find("\n# First task") ~= nil, raw1:sub(1, 200))
 
   -- ── add: explicit id + spec fields propagated ───────────────
   local id2 = todo.add({
@@ -6502,7 +6511,7 @@ print("\n[58] todo — add / get / list / update / remove")
   -- ── add: deferred status places file in deferred bucket ─────
   local id3 = todo.add({ id = "2026-05-25-deferred-foo", title = "Deferred",
     status = "deferred" })
-  local f3  = td .. "/deferred/" .. id3 .. ".yaml"
+  local f3  = td .. "/deferred/" .. id3 .. ".md"
   ok("add(status=deferred) places file in deferred/", vim.fn.filereadable(f3) == 1)
 
   -- ── get: unknown id ─────────────────────────────────────────
@@ -6535,12 +6544,20 @@ print("\n[58] todo — add / get / list / update / remove")
   ok("list(has_errors=true) returns [] (none yet)", #with_errors == 0)
 
   -- ── update: content fields succeed ──────────────────────────
+  -- (post-v0.1.36: `notes` field removed — free-form prose lives in
+  -- the markdown body, i.e. the `description` field.)
   local before = todo.get(id2)
-  local upd, upd_err = todo.update(id2, { notes = "added a note", priority = "low" })
+  local upd, upd_err = todo.update(id2, {
+    description = "updated description body",
+    priority    = "low",
+    due         = "2026-06-15",
+  })
   ok("update returns the new task table", type(upd) == "table" and upd.id == id2,
     upd_err)
-  ok("update wrote notes", upd and upd.notes == "added a note")
+  ok("update wrote description",
+    upd and upd.description == "updated description body")
   ok("update wrote priority", upd and upd.priority == "low")
+  ok("update wrote due", upd and upd.due == "2026-06-15")
   ok("update bumped `updated`",
     upd and before and upd.updated >= before.updated)
 
@@ -6559,7 +6576,7 @@ print("\n[58] todo — add / get / list / update / remove")
     e_un and e_un:find("not hand%-editable") ~= nil, e_un)
 
   -- ── update: unknown id ──────────────────────────────────────
-  local _, e_no = todo.update("never-existed", { notes = "x" })
+  local _, e_no = todo.update("never-existed", { description = "x" })
   ok("update returns err on unknown id",
     e_no and e_no:find("not found") ~= nil, e_no)
 
@@ -6567,7 +6584,7 @@ print("\n[58] todo — add / get / list / update / remove")
   local rok, rerr = todo.remove(id1)
   ok("remove returns true on success", rok, rerr)
   ok("remove actually unlinks the file",
-    vim.fn.filereadable(td .. "/open/" .. id1 .. ".yaml") == 0)
+    vim.fn.filereadable(td .. "/open/" .. id1 .. ".md") == 0)
   local rok2, _ = todo.remove(id1)
   ok("remove returns false on missing id", not rok2)
 
@@ -6614,8 +6631,8 @@ print("\n[59] todo.status / archive — transitions + lifecycle timestamps")
     r1 and r1.updated == r1.created)
   -- File should have moved.
   ok("file moved to completed/ bucket",
-    vim.fn.filereadable(td .. "/completed/" .. id1 .. ".yaml") == 1
-      and vim.fn.filereadable(td .. "/open/" .. id1 .. ".yaml") == 0)
+    vim.fn.filereadable(td .. "/completed/" .. id1 .. ".md") == 1
+      and vim.fn.filereadable(td .. "/open/" .. id1 .. ".md") == 0)
 
   -- ── completed → archived preserves completed_at ─────────────
   local prior_completed_at = r1.completed_at
@@ -6630,8 +6647,8 @@ print("\n[59] todo.status / archive — transitions + lifecycle timestamps")
   -- File moved to archived/YYYY/MM/.
   local y, m = r2.archived_at:match("^(%d%d%d%d)%-(%d%d)")
   ok("file moved to archived/YYYY/MM/",
-    vim.fn.filereadable(td .. "/archived/" .. y .. "/" .. m .. "/" .. id1 .. ".yaml") == 1
-      and vim.fn.filereadable(td .. "/completed/" .. id1 .. ".yaml") == 0)
+    vim.fn.filereadable(td .. "/archived/" .. y .. "/" .. m .. "/" .. id1 .. ".md") == 1
+      and vim.fn.filereadable(td .. "/completed/" .. id1 .. ".md") == 0)
 
   -- ── archived → open clears both lifecycle timestamps ────────
   local r3, _ = todo.status(id1, "open")
@@ -6640,8 +6657,8 @@ print("\n[59] todo.status / archive — transitions + lifecycle timestamps")
   ok("status(archived→open) clears archived_at",
     r3 and r3.archived_at == nil)
   ok("file moved back to open/",
-    vim.fn.filereadable(td .. "/open/" .. id1 .. ".yaml") == 1
-      and vim.fn.filereadable(td .. "/archived/" .. y .. "/" .. m .. "/" .. id1 .. ".yaml") == 0)
+    vim.fn.filereadable(td .. "/open/" .. id1 .. ".md") == 1
+      and vim.fn.filereadable(td .. "/archived/" .. y .. "/" .. m .. "/" .. id1 .. ".md") == 0)
 
   -- ── open → archived (direct, never went through completed) ──
   -- Per the rules, completed_at MUST be nil because we never completed.
@@ -6656,14 +6673,14 @@ print("\n[59] todo.status / archive — transitions + lifecycle timestamps")
   local id3 = todo.add({ id = "2026-05-25-defer-me", title = "Defer me" })
   local r5, _ = todo.status(id3, "deferred")
   ok("status(open→deferred) places file in deferred/",
-    vim.fn.filereadable(td .. "/deferred/" .. id3 .. ".yaml") == 1
-      and vim.fn.filereadable(td .. "/open/" .. id3 .. ".yaml") == 0)
+    vim.fn.filereadable(td .. "/deferred/" .. id3 .. ".md") == 1
+      and vim.fn.filereadable(td .. "/open/" .. id3 .. ".md") == 0)
   ok("status(→deferred) leaves both lifecycle timestamps nil",
     r5 and r5.completed_at == nil and r5.archived_at == nil)
   todo.status(id3, "open")
   ok("status(deferred→open) moves file back to open/",
-    vim.fn.filereadable(td .. "/open/" .. id3 .. ".yaml") == 1
-      and vim.fn.filereadable(td .. "/deferred/" .. id3 .. ".yaml") == 0)
+    vim.fn.filereadable(td .. "/open/" .. id3 .. ".md") == 1
+      and vim.fn.filereadable(td .. "/deferred/" .. id3 .. ".md") == 0)
 
   -- ── idempotent no-op ────────────────────────────────────────
   local before = todo.get(id3)
@@ -6671,7 +6688,7 @@ print("\n[59] todo.status / archive — transitions + lifecycle timestamps")
   ok("status(same status) is idempotent (no-op, returns task)", r6 ~= nil)
   -- File still in same place.
   ok("idempotent no-op didn't move the file",
-    vim.fn.filereadable(td .. "/open/" .. id3 .. ".yaml") == 1)
+    vim.fn.filereadable(td .. "/open/" .. id3 .. ".md") == 1)
   -- status_changed should be unchanged (we early-returned before
   -- bumping anything).
   ok("idempotent no-op didn't bump status_changed",
@@ -6693,7 +6710,7 @@ print("\n[59] todo.status / archive — transitions + lifecycle timestamps")
   ok("archive() shortcut sets status=archived", r7 and r7.status == "archived")
   local y4, m4 = r7.archived_at:match("^(%d%d%d%d)%-(%d%d)")
   ok("archive() shortcut moves file to archived/YYYY/MM/",
-    vim.fn.filereadable(td .. "/archived/" .. y4 .. "/" .. m4 .. "/" .. id4 .. ".yaml") == 1)
+    vim.fn.filereadable(td .. "/archived/" .. y4 .. "/" .. m4 .. "/" .. id4 .. ".md") == 1)
 
   -- ── core.todo.status:changed event fires ────────────────────
   local events = require("auto-core.events")
@@ -6734,21 +6751,28 @@ print("\n[60] todo.refresh — bucket reconciliation + auto-archive")
       and s_empty.archived == 0 and s_empty.skipped == 0)
 
   -- ── reconciliation: file in wrong bucket gets moved ─────────
-  -- Manually plant a task in open/ but with status=completed in its
-  -- YAML. Refresh should move it to completed/.
+  -- Plant a misplaced task directly: write a file with
+  -- status:completed into the open/ bucket. Refresh should detect
+  -- the mismatch and move it to completed/.
   local id1 = "2026-05-25-misplaced-completed"
-  todo.add({ id = id1, title = "Misplaced completed" })
-  -- Hand-edit the file: flip status to completed without using the API.
-  local src_file = td .. "/open/" .. id1 .. ".yaml"
-  local lines = vim.fn.readfile(src_file)
-  for i, line in ipairs(lines) do
-    if line:match("^status:") then
-      lines[i] = "status: completed"
-    end
-  end
-  -- Also add a completed_at so schema validation accepts it.
-  table.insert(lines, 'completed_at: "2026-05-20T10:00:00-07:00"')
-  vim.fn.writefile(lines, src_file)
+  local src_file = td .. "/open/" .. id1 .. ".md"
+  vim.fn.mkdir(td .. "/open", "p")
+  vim.fn.writefile({
+    "---",
+    'id: "' .. id1 .. '"',
+    "version: 1",
+    "status: completed",
+    "title: Misplaced completed",
+    'created: "2026-05-25T10:00:00-07:00"',
+    'updated: "2026-05-25T10:00:00-07:00"',
+    'status_changed: "2026-05-25T10:00:00-07:00"',
+    'completed_at: "2026-05-20T10:00:00-07:00"',
+    "---",
+    "",
+    "# Misplaced completed",
+    "",
+    "body",
+  }, src_file)
 
   local s1 = todo.refresh()
   ok("refresh detects misplaced file (scanned=1)", s1.scanned == 1,
@@ -6756,7 +6780,7 @@ print("\n[60] todo.refresh — bucket reconciliation + auto-archive")
   ok("refresh moved the misplaced file (moved=1)", s1.moved == 1,
     "summary=" .. vim.inspect(s1))
   ok("refresh: file is now in completed/",
-    fs_path.is_file(td .. "/completed/" .. id1 .. ".yaml")
+    fs_path.is_file(td .. "/completed/" .. id1 .. ".md")
       and not fs_path.is_file(src_file))
 
   -- ── 28-day auto-archive rule fires for old completed ────────
@@ -6769,21 +6793,21 @@ print("\n[60] todo.refresh — bucket reconciliation + auto-archive")
     completed_at = "2026-04-20T10:00:00-07:00",  -- ~35 days before today (2026-05-25)
   })
   ok("setup: aged task lives in completed/",
-    fs_path.is_file(td .. "/completed/" .. id2 .. ".yaml"))
+    fs_path.is_file(td .. "/completed/" .. id2 .. ".md"))
 
   local s2 = todo.refresh()
   ok("refresh archived the aged task (archived=1)",
     s2.archived == 1, "summary=" .. vim.inspect(s2))
   -- File should now be in archived/YYYY/MM/
   ok("refresh moved aged task out of completed/",
-    not fs_path.is_file(td .. "/completed/" .. id2 .. ".yaml"))
+    not fs_path.is_file(td .. "/completed/" .. id2 .. ".md"))
   -- Find it by glob to be timezone-tolerant.
   local found_in_archived = false
   local a_dir = td .. "/archived"
   if fs_path.is_dir(a_dir) then
     for _, y in ipairs(vim.fn.readdir(a_dir) or {}) do
       for _, m in ipairs(vim.fn.readdir(a_dir .. "/" .. y) or {}) do
-        if fs_path.is_file(a_dir .. "/" .. y .. "/" .. m .. "/" .. id2 .. ".yaml") then
+        if fs_path.is_file(a_dir .. "/" .. y .. "/" .. m .. "/" .. id2 .. ".md") then
           found_in_archived = true
           break
         end
@@ -6814,7 +6838,7 @@ print("\n[60] todo.refresh — bucket reconciliation + auto-archive")
   ok("refresh did NOT archive a recent completed task",
     s3.archived == 0, "summary=" .. vim.inspect(s3))
   ok("recent completed task is still in completed/",
-    fs_path.is_file(td .. "/completed/" .. id3 .. ".yaml"))
+    fs_path.is_file(td .. "/completed/" .. id3 .. ".md"))
 
   -- ── refresh is idempotent: running twice = no further moves ─
   local s4 = todo.refresh()
@@ -6834,7 +6858,7 @@ print("\n[60] todo.refresh — bucket reconciliation + auto-archive")
   -- ── malformed file is skipped, not crashed ──────────────────
   vim.fn.mkdir(td .. "/open", "p")
   vim.fn.writefile({ "not: ", "valid: yaml: shape", "missing required fields" },
-    td .. "/open/2026-05-25-broken.yaml")
+    td .. "/open/2026-05-25-broken.md")
   local s6 = todo.refresh()
   ok("refresh: malformed file counted as skipped",
     s6.skipped >= 1, "skipped=" .. tostring(s6.skipped))
@@ -6883,7 +6907,7 @@ print("\n[61] todo.refresh — reference validation + errors[] stability")
   ok("clean refs: errors field is omitted (nil), not []",
     t_clean and t_clean.errors == nil)
   -- Re-read the raw bytes to confirm the file doesn't contain `errors:`.
-  local raw_clean = table.concat(vim.fn.readfile(td .. "/open/" .. id_ok .. ".yaml"), "\n")
+  local raw_clean = table.concat(vim.fn.readfile(td .. "/open/" .. id_ok .. ".md"), "\n")
   ok("clean refs: 'errors:' literally absent from the file",
     not raw_clean:find("\nerrors:"), raw_clean)
 
@@ -6927,18 +6951,24 @@ print("\n[61] todo.refresh — reference validation + errors[] stability")
   local t_fixed = todo.get(id_badref)
   ok("fixed ref: errors field is omitted again",
     t_fixed and t_fixed.errors == nil)
-  local raw_fixed = table.concat(vim.fn.readfile(td .. "/open/" .. id_badref .. ".yaml"), "\n")
+  local raw_fixed = table.concat(vim.fn.readfile(td .. "/open/" .. id_badref .. ".md"), "\n")
   ok("fixed ref: 'errors:' literally absent from the file",
     not raw_fixed:find("\nerrors:"))
 
-  -- ── broken wip ────────────────────────────────────────────────
-  local id_wip = "2026-05-25-bad-wip"
-  todo.add({ id = id_wip, title = "Bad wip", wip = "/nonexistent/path/here" })
+  -- (post-v0.1.36: `wip` field removed; working-dir refs now live
+  -- in the markdown body where they're not validated. Coverage of
+  -- the remaining path-checked fields stays via adr / review /
+  -- blocked tests below.)
+
+  -- ── broken review ─────────────────────────────────────────────
+  local id_rev = "2026-05-25-bad-review"
+  todo.add({ id = id_rev, title = "Bad review",
+    review = "shared/reviews/does-not-exist.md" })
   todo.refresh()
-  local t_wip = todo.get(id_wip)
-  ok("broken wip: errors[].field is 'wip'",
-    t_wip and t_wip.errors and t_wip.errors[1].field == "wip",
-    t_wip and vim.inspect(t_wip.errors))
+  local t_rev = todo.get(id_rev)
+  ok("broken review: errors[].field is 'review'",
+    t_rev and t_rev.errors and t_rev.errors[1].field == "review",
+    t_rev and vim.inspect(t_rev.errors))
 
   -- ── broken blocked ────────────────────────────────────────────
   local id_blk = "2026-05-25-bad-blocked"
@@ -6953,23 +6983,15 @@ print("\n[61] todo.refresh — reference validation + errors[] stability")
     t_blk and t_blk.errors and t_blk.errors[1].field == "blocked[0]",
     t_blk and vim.inspect(t_blk.errors))
 
-  -- ── pr/links NOT validated (network-free policy) ────────────
-  local id_url = "2026-05-25-urls-skipped"
-  todo.add({
-    id    = id_url,
-    title = "URLs skipped",
-    pr    = { "https://example.com/never-fetched" },
-    links = { "https://example.com/also-skipped" },
-  })
-  todo.refresh()
-  local t_url = todo.get(id_url)
-  ok("pr/links NOT validated (network skipped)",
-    t_url and t_url.errors == nil)
+  -- (post-v0.1.36: `pr` / `links` fields removed. External URLs now
+  -- live as plain markdown links in the description body — they're
+  -- not part of the structured frontmatter and refresh has nothing
+  -- structured to validate. Test removed.)
 
   -- ── refresh produces zero-diff bytes when nothing's wrong ───
   -- (omit-empty + stable detected together) — clean file after first
   -- refresh should match clean file after second refresh byte-for-byte.
-  local clean_path = td .. "/open/" .. id_ok .. ".yaml"
+  local clean_path = td .. "/open/" .. id_ok .. ".md"
   local before_bytes = table.concat(vim.fn.readfile(clean_path), "\n")
   todo.refresh()
   local after_bytes = table.concat(vim.fn.readfile(clean_path), "\n")
@@ -6982,12 +7004,12 @@ print("\n[61] todo.refresh — reference validation + errors[] stability")
     id      = id_multi,
     title   = "Many errors",
     adr     = { "shared/adrs/A-missing.md", "shared/adrs/B-missing.md" },
+    review  = "shared/reviews/C-missing.md",
     blocked = { "missing-1", "missing-2" },
-    wip     = "/another/nonexistent",
   })
   todo.refresh()
   local t_multi = todo.get(id_multi)
-  ok("multi errors: each broken ref produces one entry",
+  ok("multi errors: each broken ref produces one entry (2 adr + 1 review + 2 blocked = 5)",
     t_multi and t_multi.errors and #t_multi.errors == 5,
     t_multi and ("got " .. #t_multi.errors .. " entries"))
 
@@ -7035,8 +7057,8 @@ print("\n[62] todo — dir override + known_dirs registry")
   -- A task added now lands in the override location.
   local id_under_override = todo.add({ id = "2026-05-25-overridden", title = "Override task" })
   ok("task written under override dir",
-    vim.fn.filereadable(override_dir .. "/open/" .. id_under_override .. ".yaml") == 1
-      and vim.fn.filereadable(tmp_root .. "/.todo-list/open/" .. id_under_override .. ".yaml") == 0)
+    vim.fn.filereadable(override_dir .. "/open/" .. id_under_override .. ".md") == 1
+      and vim.fn.filereadable(tmp_root .. "/.todo-list/open/" .. id_under_override .. ".md") == 0)
 
   -- ── clear the override (nil) → fall back to default ────────
   todo.set_todo_dir(nil)
@@ -7150,7 +7172,7 @@ print("\n[63] todo — user command + BufWritePost autocmd")
   -- Add a task so the dir exists, then write to a file UNDER the
   -- todo dir → autocmd should fire refresh.
   local id1 = todo.add({ id = "2026-05-25-autocmd-target", title = "Autocmd target" })
-  local todo_file = todo.get_todo_dir() .. "/open/" .. id1 .. ".yaml"
+  local todo_file = todo.get_todo_dir() .. "/open/" .. id1 .. ".md"
   fired = 0  -- reset counter (add doesn't fire refresh by itself)
   -- Open + save the buffer to simulate a hand-edit.
   vim.cmd.edit(todo_file)
@@ -7161,7 +7183,7 @@ print("\n[63] todo — user command + BufWritePost autocmd")
     "fired=" .. tostring(fired))
 
   -- Now write to a yaml file OUTSIDE the todo dir → no refresh.
-  local outside = tmp_root .. "/random.yaml"
+  local outside = tmp_root .. "/random.md"
   vim.fn.writefile({ "k: v" }, outside)
   fired = 0
   vim.cmd.edit(outside)
@@ -7251,13 +7273,20 @@ print("\n[64] todo.import — kb-todo-list / legacy-todos-md / asana-json")
   ok("imported task: tags include preserved `owner:shared` + `repo:auto-core`",
     task and vim.tbl_contains(task.tags, "owner:shared")
       and vim.tbl_contains(task.tags, "repo:auto-core"))
-  ok("imported task: description = first paragraph only",
-    task and task.description == "This is the first paragraph of body content.",
-    task and tostring(task.description))
-  ok("imported task: notes contains the full original source",
-    task and type(task.notes) == "string"
-      and task.notes:find("ORIGINAL CONTENT") ~= nil
-      and task.notes:find("- %[x%] Second item") ~= nil)
+  -- Post-v0.1.36: description body now carries BOTH the source's
+  -- first paragraph (as the lede) AND the full original markdown
+  -- (under a `## Original source` subheading) for losslessness.
+  -- The `notes:` field is gone — everything lives in description.
+  ok("imported task: description starts with the first paragraph (lede)",
+    task and task.description
+      and task.description:find("^This is the first paragraph of body content%.") ~= nil,
+    task and tostring(task.description and task.description:sub(1, 80)))
+  ok("imported task: description contains the `## Original source` subheading",
+    task and task.description
+      and task.description:find("## Original source") ~= nil)
+  ok("imported task: description contains the full original (incl. checked items)",
+    task and task.description
+      and task.description:find("%- %[x%] Second item") ~= nil)
 
   -- ── status mapping: blocked → deferred ──────────────────────
   local src_blocked = tmp_root .. "/blocked-todo.md"
@@ -7305,9 +7334,9 @@ print("\n[64] todo.import — kb-todo-list / legacy-todos-md / asana-json")
     dry_results[1].id == nil)
   -- And the workspace genuinely has NO file for this title's id.
   local default_dir = todo.get_todo_dir()
-  ok("dry_run: no .yaml lands on disk",
+  ok("dry_run: no .md lands on disk",
     vim.fn.filereadable(default_dir .. "/open/" .. os.date("!%Y-%m-%d") ..
-      "-dry-run-candidate.yaml") == 0)
+      "-dry-run-candidate.md") == 0)
 
   -- ── legacy-todos-md uses the same parser, different kind tag ─
   local src_legacy = tmp_root .. "/auto-core-todos.md"

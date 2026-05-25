@@ -513,7 +513,7 @@ do
   local group = vim.api.nvim_create_augroup("AutoCoreTodo", { clear = true })
   vim.api.nvim_create_autocmd("BufWritePost", {
     group   = group,
-    pattern = "*.yaml",
+    pattern = "*.md",
     callback = function(args)
       local ok_t, todo = pcall(require, "auto-core.todo")
       if not ok_t then return end

@@ -114,7 +114,7 @@ end
 
 ---Absolute filesystem path for a task file given the resolved
 ---`todo_dir`, the task's `status`, and (only when archived) its
----`archived_at` ISO string. Includes the `.yaml` extension.
+---`archived_at` ISO string. Includes the `.md` extension.
 ---@param todo_dir string
 ---@param id string
 ---@param status string
@@ -127,7 +127,7 @@ function M.task_file_path(todo_dir, id, status, archived_at)
   else
     parent = M.bucket_dir(todo_dir, status)
   end
-  return fs_path.normalize(fs_path.join(parent, id .. ".yaml"))
+  return fs_path.normalize(fs_path.join(parent, id .. ".md"))
 end
 
 ---Generate a stable task id from a creation timestamp + title slug,

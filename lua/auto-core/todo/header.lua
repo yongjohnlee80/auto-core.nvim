@@ -12,39 +12,43 @@
 
 local M = {}
 
----Returns the header-comment block as a multi-line string, **not**
----including a trailing blank line — callers concatenate the header
----in front of the YAML body and add their own separator.
+---Returns the header-comment block as a multi-line HTML comment,
+---suitable for embedding inside the markdown body between the
+---YAML frontmatter and the H1 title. **Not** including a trailing
+---blank line — callers concatenate the header into the body and
+---add their own separator.
 ---@return string
 function M.emit()
   return table.concat({
-    "# ─── auto-core.todo schema v1 — managed file ───",
-    "# HAND-EDIT FREELY: title, description, notes, priority, assignee, tags,",
-    "#                   adr, wip, pr, review, links, blocked, status.",
-    "#   • Direct `status` edits to a valid enum value are honored — refresh",
-    "#     reconciles the file's directory. BUT side effects (mailbox",
-    "#     notifications, assignee fan-out) only fire when status changes",
-    "#     go through the API (`todo.status` / `todo.assign`). Prefer the",
-    "#     API when other agents need to know.",
-    "# DO NOT HAND-EDIT: id, version, created, updated, status_changed,",
-    "#                   completed_at, archived_at, errors.",
-    "#   • id + created are frozen at creation.",
-    "#   • version / updated / lifecycle timestamps / errors are written by",
-    "#     refresh + API calls. Manual edits silently break archive timing",
-    "#     and cross-references.",
-    "# ───────────────────────────────────────────────",
+    "<!-- ─── auto-core.todo schema v1 — managed file ───",
+    "     HAND-EDIT FREELY in this body (the description) or the",
+    "       hand-editable frontmatter fields: title, status, due,",
+    "       priority, assignee, tags, adr, review, blocked.",
+    "       Direct `status` edits to a valid enum value are honored —",
+    "       refresh reconciles the file's directory. BUT side effects",
+    "       (mailbox notifications, assignee fan-out) only fire when",
+    "       status changes go through the API (`todo.status` /",
+    "       `todo.assign`). Prefer the API when other agents need",
+    "       to know.",
+    "     DO NOT HAND-EDIT frontmatter: id, version, created, updated,",
+    "       status_changed, completed_at, archived_at, errors.",
+    "         • id + created are frozen at creation.",
+    "         • version / updated / lifecycle timestamps / errors are",
+    "           written by refresh + API calls. Manual edits silently",
+    "           break archive timing and cross-references.",
+    "     ─────────────────────────────────────────────── -->",
   }, "\n")
 end
 
----True iff the supplied source string already starts with the
----canonical header (lenient match — only looks at the first line).
----Useful for refresh-driven rewrites that want to preserve a header
+---True iff the supplied body string already carries the canonical
+---HTML-comment header somewhere in its first few hundred bytes.
+---Useful for refresh-driven rewrites that want to detect a header
 ---written by an earlier version of the emitter.
----@param src string
+---@param body string  the markdown body (post-frontmatter)
 ---@return boolean
-function M.is_present(src)
-  if type(src) ~= "string" then return false end
-  return src:match("^# ─── auto%-core%.todo schema v1") ~= nil
+function M.is_present(body)
+  if type(body) ~= "string" then return false end
+  return body:find("<!%-%- ─── auto%-core%.todo schema v1", 1, false) ~= nil
 end
 
 return M

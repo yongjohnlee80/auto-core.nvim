@@ -5,16 +5,12 @@
 ---                          type:todo-list`. Reads the file as a SINGLE
 ---                          task, deriving title/status from the H1
 ---                          and inline status atom respectively. Full
----                          markdown lands in `notes:` so nothing is
----                          lost across the migration.
+---                          markdown lands in the description body so
+---                          nothing is lost across the migration.
 ---  • `legacy-todos-md`  — Compatibility subset of `kb-todo-list` for
 ---                          the superseded `*-todos.md` filename glob.
 ---                          Same parsing path; differentiated only by
 ---                          the `kind:` tag we attach.
----  • `asana-json`       — Sync target for the post-rewrite
----                          `/asana-sync` skill. Schema not finalised
----                          for v1; entry point stubbed so the API
----                          shape is stable.
 ---
 ---All importers return a list of `{spec, id?}` entries. With
 ---`dry_run = true`, `id` is nil and no writes happen. Otherwise each
@@ -165,28 +161,28 @@ local function parse_kb_todo(md, source, kind)
   if atoms.owner then tags[#tags + 1] = "owner:" .. atoms.owner end
   if atoms.repo  then tags[#tags + 1] = "repo:"  .. atoms.repo  end
 
-  -- Full source goes into notes for losslessness.
-  local notes = "Imported from `" .. source .. "` on "
-    .. os.date("!%Y-%m-%dT%H:%M:%SZ", os.time()) .. ".\n\n"
-    .. "--- ORIGINAL CONTENT ---\n" .. md
+  -- Description body. Per the v0.1.36 schema, there's no separate
+  -- `notes:` field — everything imported lives in the markdown
+  -- description body. We compose:
+  --   • the source's first paragraph (or title fallback) as the
+  --     visible lede, then
+  --   • a horizontal rule, then
+  --   • a provenance line citing the source path + import time, and
+  --   • the full original markdown for losslessness.
+  local lede = desc ~= "" and desc or title
+  local provenance = "Imported from `" .. source .. "` on "
+    .. os.date("!%Y-%m-%dT%H:%M:%SZ", os.time()) .. "."
+  local description = lede .. "\n\n---\n\n"
+    .. provenance .. "\n\n"
+    .. "## Original source\n\n"
+    .. md
 
   return {
     title       = title,
-    description = desc ~= "" and desc or title,
+    description = description,
     status      = status,
     tags        = tags,
-    notes       = notes,
   }
-end
-
--- ── asana-json stub ─────────────────────────────────────────
-
----@param _src string
----@param _opts table
----@return nil, string err
-local function parse_asana_json(_src, _opts)
-  return nil, "auto-core.todo.import: kind='asana-json' is not implemented in v1 "
-    .. "(awaits /asana-sync skill rewrite per ADR-0031 §6 Phase 5)"
 end
 
 -- ── public entry point ──────────────────────────────────────
@@ -194,19 +190,23 @@ end
 local VALID_KINDS = {
   ["kb-todo-list"]    = true,
   ["legacy-todos-md"] = true,
-  ["asana-json"]      = true,
+  -- `asana-json` was previously stubbed here. Removed because the
+  -- `/asana-sync` skill writes a single multi-task markdown file
+  -- directly into the KB (per the skill's existing convention),
+  -- not a per-task JSON dump. There is no per-task import path
+  -- from Asana; users curate the synced doc and create individual
+  -- tasks via `M.add()` or the auto-finder panel as needed.
 }
 
 ---Import an external todo source. `opts.source` may be passed via
 ---the first argument (file path) for convenience.
 ---
----  opts.kind     — 'kb-todo-list' | 'legacy-todos-md' | 'asana-json'
+---  opts.kind     — 'kb-todo-list' | 'legacy-todos-md'
 ---  opts.dry_run  — boolean; when true, return planned specs without
 ---                  writing anything to disk
 ---
 ---Returns a list of `{spec, id?}` entries. `id` is the result of
----`auto-core.todo.add(spec)` (nil for dry_run failures or when no
----add() is performed).
+---`auto-core.todo.add(spec)` (nil for dry_run or for failed adds).
 ---@param source string         path to the source file
 ---@param opts table?
 ---@return table[] results
@@ -216,7 +216,7 @@ function M.import(source, opts)
 
   if not VALID_KINDS[kind] then
     error("auto-core.todo.import: unknown kind '" .. tostring(kind)
-      .. "' (valid: kb-todo-list, legacy-todos-md, asana-json)")
+      .. "' (valid: kb-todo-list, legacy-todos-md)")
   end
 
   if type(source) ~= "string" or source == "" then
@@ -225,11 +225,6 @@ function M.import(source, opts)
 
   if not fs_path.exists(source) then
     error("auto-core.todo.import: source '" .. source .. "' does not exist")
-  end
-
-  if kind == "asana-json" then
-    local _, err = parse_asana_json(source, opts)
-    error(err)
   end
 
   local md, read_err = read_file(source)

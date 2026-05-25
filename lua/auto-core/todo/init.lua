@@ -15,10 +15,9 @@
 ---known_dirs / import — see ADR-0031 §3.2 for the full surface.
 ---@module 'auto-core.todo'
 
-local yaml   = require("auto-core.todo.yaml")
+local md     = require("auto-core.todo.md")
 local schema = require("auto-core.todo.schema")
 local paths  = require("auto-core.todo.paths")
-local header = require("auto-core.todo.header")
 local fs_path = require("auto-core.fs.path")
 
 local M = {}
@@ -31,22 +30,24 @@ local M = {}
 local HAND_EDITABLE = {
   title       = true,
   description = true,
-  notes       = true,
+  due         = true,
   priority    = true,
   assignee    = true,
   tags        = true,
   adr         = true,
-  wip         = true,
-  pr          = true,
   review      = true,
-  links       = true,
   blocked     = true,
   -- Note: `status` IS hand-editable per ADR §2 (direct edits honored,
   -- side effects API-gated). But status changes have lifecycle-
-  -- timestamp side effects (completed_at, archived_at) that are
-  -- owned by the upcoming `M.status()` function (task 5). So
-  -- `update()` rejects status patches and asks the caller to use
-  -- `M.status(id, new)` instead. Direct YAML edits remain free.
+  -- timestamp side effects (completed_at, archived_at) owned by
+  -- M.status(). So `update()` rejects status patches and asks the
+  -- caller to use M.status(id, new). Direct edits in the .md file
+  -- frontmatter remain free.
+  --
+  -- Removed in v0.1.36 (MD pivot): notes, wip, pr, links. These all
+  -- now live as free-form markdown in the body (the description
+  -- field) — natural placement and not required by auto-finder
+  -- (which consumes frontmatter only).
 }
 
 -- ─── time helpers ─────────────────────────────────────────────
@@ -213,8 +214,9 @@ end
 
 -- ─── render: validate + encode + header ───────────────────────
 
----Validate the task and emit the canonical YAML representation
----(header comment + body, terminated by a final newline).
+---Validate the task and emit the canonical MD+frontmatter
+---representation (frontmatter + HTML-comment header + H1 +
+---description body, terminated by a final newline).
 ---@param t table
 ---@return string text, string? err
 local function render_task(t)
@@ -222,8 +224,7 @@ local function render_task(t)
   if not v.ok then
     return "", "schema: " .. tostring(v.err)
   end
-  local body = yaml.encode(t)
-  return header.emit() .. "\n\n" .. body, nil
+  return md.encode(t), nil
 end
 
 -- ─── id resolution: walk buckets to find a task file ──────────
@@ -234,7 +235,7 @@ end
 ---@param id string
 ---@return string?
 local function find_task_path(td, id)
-  local fname = id .. ".yaml"
+  local fname = id .. ".md"
   -- Flat buckets first (cheap):
   for _, bucket in ipairs({ "open", "completed", "deferred" }) do
     local candidate = fs_path.join(td, bucket, fname)
@@ -346,8 +347,8 @@ function M.get(id)
   end
   local text, read_err = read_file(file)
   if not text then return nil, read_err end
-  local dec = yaml.decode(text)
-  if not dec.ok then return nil, "yaml.decode: " .. tostring(dec.err) end
+  local dec = md.decode(text)
+  if not dec.ok then return nil, "md.decode: " .. tostring(dec.err) end
   local v = schema.validate(dec.value)
   if not v.ok then return nil, "schema: " .. tostring(v.err) end
   return dec.value
@@ -378,7 +379,7 @@ function M.list(opts)
   local function load_and_filter(file_path)
     local text = read_file(file_path)
     if not text then return nil end
-    local dec = yaml.decode(text)
+    local dec = md.decode(text)
     if not dec.ok then return nil end
     local task = dec.value
     if type(task) ~= "table" then return nil end
@@ -410,7 +411,7 @@ function M.list(opts)
     local files = vim.fn.readdir(b_dir) or {}
     table.sort(files)
     for _, f in ipairs(files) do
-      if f:match("%.yaml$") then
+      if f:match("%.md$") then
         local t = load_and_filter(fs_path.join(b_dir, f))
         if t then out[#out + 1] = t end
       end
@@ -432,7 +433,7 @@ function M.list(opts)
           local files = vim.fn.readdir(m_dir) or {}
           table.sort(files)
           for _, f in ipairs(files) do
-            if f:match("%.yaml$") then
+            if f:match("%.md$") then
               local t = load_and_filter(fs_path.join(m_dir, f))
               if t then out[#out + 1] = t end
             end
@@ -494,8 +495,8 @@ function M.update(id, patch)
 
   local text, read_err = read_file(file)
   if not text then return nil, read_err end
-  local dec = yaml.decode(text)
-  if not dec.ok then return nil, "yaml.decode: " .. tostring(dec.err) end
+  local dec = md.decode(text)
+  if not dec.ok then return nil, "md.decode: " .. tostring(dec.err) end
   local task = dec.value
   if type(task) ~= "table" then
     return nil, "task '" .. id .. "' decoded to non-table"
@@ -555,7 +556,7 @@ local function walk_task_files(td)
     local files = vim.fn.readdir(dir) or {}
     table.sort(files)
     for _, f in ipairs(files) do
-      if f:match("%.yaml$") then
+      if f:match("%.md$") then
         out[#out + 1] = fs_path.join(dir, f)
       end
     end
@@ -776,7 +777,7 @@ function M.refresh()
     if not text then
       summary.skipped = summary.skipped + 1
     else
-      local dec = yaml.decode(text)
+      local dec = md.decode(text)
       if not dec.ok or type(dec.value) ~= "table" then
         summary.skipped = summary.skipped + 1
       else
@@ -982,8 +983,8 @@ function M.status(id, new)
 
   local text, read_err = read_file(file)
   if not text then return nil, read_err end
-  local dec = yaml.decode(text)
-  if not dec.ok then return nil, "yaml.decode: " .. tostring(dec.err) end
+  local dec = md.decode(text)
+  if not dec.ok then return nil, "md.decode: " .. tostring(dec.err) end
   local task = dec.value
   if type(task) ~= "table" then
     return nil, "task '" .. id .. "' decoded to non-table"
