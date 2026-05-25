@@ -536,6 +536,131 @@ local function move_task(from_path, to_path, text)
   return true
 end
 
+-- ─── reference validation (task 7) ────────────────────────────
+
+---Resolve the KB root for KB-relative reference paths. Source order:
+---  1. `$AUTO_AGENTS_KB_WRITE` (write target — see auto-agents KB config)
+---  2. `$AUTO_AGENTS_KB_READ` first colon-separated entry (read root)
+---  3. `$AUTO_AGENTS_KB_ROOT` (legacy single-root env)
+---Returns nil when none are set — in which case KB-relative refs
+---are not validated (we can't check what we can't find).
+---@return string?
+local function kb_root()
+  local w = vim.env.AUTO_AGENTS_KB_WRITE
+  if w and w ~= "" then return fs_path.normalize(w) end
+  local r = vim.env.AUTO_AGENTS_KB_READ
+  if r and r ~= "" then
+    local first = r:match("^([^:]+)")
+    if first and first ~= "" then return fs_path.normalize(first) end
+  end
+  local legacy = vim.env.AUTO_AGENTS_KB_ROOT
+  if legacy and legacy ~= "" then return fs_path.normalize(legacy) end
+  return nil
+end
+
+---Build the canonical {field, code} lookup key for stable `detected`
+---preservation across refreshes.
+---@param field string
+---@param code string
+---@return string
+local function err_key(field, code) return field .. "|" .. code end
+
+---Index a task's existing `errors:` list by {field, code} key so a
+---refresh can preserve `detected` for errors that persist.
+---@param task table
+---@return table<string, table>
+local function index_existing_errors(task)
+  local out = {}
+  if type(task.errors) == "table" then
+    for _, e in ipairs(task.errors) do
+      if type(e) == "table" and type(e.field) == "string"
+        and type(e.code) == "string"
+      then
+        out[err_key(e.field, e.code)] = e
+      end
+    end
+  end
+  return out
+end
+
+---Run the v1 reference-validation pass on `task` and return the new
+---errors list. Validates:
+---  • adr[i]     — KB-relative path must exist
+---  • wip        — local filepath/directory must exist
+---  • review     — KB-relative path must exist
+---  • blocked[i] — task id must resolve in any bucket of `td`
+---`pr` and `links` are NOT network-checked.
+---
+---For each detected error, look up its {field, code} in the existing
+---list and preserve `detected` if found; otherwise stamp with `now`.
+---@param task table
+---@param td string
+---@param now string
+---@return table[]  new_errors (may be empty)
+local function compute_errors(task, td, now)
+  local prior = index_existing_errors(task)
+  local out = {}
+  local kb = kb_root()
+
+  ---@param field string
+  ---@param code string
+  ---@param message string
+  local function add(field, code, message)
+    local existing = prior[err_key(field, code)]
+    out[#out + 1] = {
+      field    = field,
+      code     = code,
+      message  = message,
+      detected = (existing and existing.detected) or now,
+    }
+  end
+
+  -- adr[i] — KB-relative.
+  if kb and type(task.adr) == "table" then
+    for i, p in ipairs(task.adr) do
+      if type(p) == "string" and p ~= "" then
+        local abs = fs_path.join(kb, p)
+        if not fs_path.exists(abs) then
+          add("adr[" .. (i - 1) .. "]", "not-found",
+            "KB-relative path '" .. p .. "' does not exist under " .. kb)
+        end
+      end
+    end
+  end
+
+  -- wip — local path.
+  if type(task.wip) == "string" and task.wip ~= "" then
+    local expanded = vim.fn.expand(task.wip)
+    if not fs_path.exists(expanded) then
+      add("wip", "not-found",
+        "working-dir/filepath '" .. task.wip .. "' does not exist")
+    end
+  end
+
+  -- review — KB-relative.
+  if kb and type(task.review) == "string" and task.review ~= "" then
+    local abs = fs_path.join(kb, task.review)
+    if not fs_path.exists(abs) then
+      add("review", "not-found",
+        "KB-relative path '" .. task.review .. "' does not exist under " .. kb)
+    end
+  end
+
+  -- blocked[i] — task id, must resolve in current todo dir.
+  if type(task.blocked) == "table" then
+    for i, ref_id in ipairs(task.blocked) do
+      if type(ref_id) == "string" and ref_id ~= "" then
+        if not find_task_path(td, ref_id) then
+          add("blocked[" .. (i - 1) .. "]", "not-found",
+            "Task '" .. ref_id .. "' does not exist in this workspace")
+        end
+      end
+    end
+  end
+
+  return out
+end
+
 -- ─── public: refresh ─────────────────────────────────────────
 
 ---Reconcile the todo directory: every readable task file is checked
@@ -548,19 +673,27 @@ end
 ---
 ---Returns a summary table:
 ---  {
----    scanned   = <int>,    -- total YAML files walked
----    moved     = <int>,    -- files relocated to a different bucket
----    archived  = <int>,    -- completed→archived via the 28-day rule
----    skipped   = <int>,    -- files that couldn't be parsed/validated
+---    scanned    = <int>,   -- total YAML files walked
+---    moved      = <int>,   -- files relocated to a different bucket
+---    archived   = <int>,   -- completed→archived via the 28-day rule
+---    skipped    = <int>,   -- files that couldn't be parsed/validated
+---    errors_set = <int>,   -- files now carrying ≥1 errors[] entry
+---    rewritten  = <int>,   -- files re-rendered in place to update
+---                          --   errors[] without moving buckets
 ---  }
----
----NOTE: reference validation + errors:[] maintenance lands in task 7.
 ---@return table summary
 function M.refresh()
   local td  = M._todo_dir()
   local now = M._now_iso()
 
-  local summary = { scanned = 0, moved = 0, archived = 0, skipped = 0 }
+  local summary = {
+    scanned    = 0,
+    moved      = 0,
+    archived   = 0,
+    skipped    = 0,
+    errors_set = 0,
+    rewritten  = 0,
+  }
 
   if not fs_path.is_dir(td) then return summary end
 
@@ -597,7 +730,49 @@ function M.refresh()
             summary.archived = summary.archived + 1
           end
 
-          -- 2. Compute the bucket the file SHOULD be in now.
+          -- 2. Reference validation — compute the new errors[] and
+          --    decide whether the file needs a write. Stable
+          --    `detected` per {field, code}; omit the field entirely
+          --    when empty so refresh produces zero diff noise when
+          --    nothing's wrong.
+          local new_errors = compute_errors(task, td, now)
+          local had_any  = type(task.errors) == "table" and #task.errors > 0
+          local have_any = #new_errors > 0
+
+          local errors_differ = false
+          if have_any ~= had_any then
+            errors_differ = true
+          elseif have_any then
+            -- Compare set + each entry. Lists are sorted by field
+            -- order (compute_errors emits in the order it checks),
+            -- which is stable across refreshes for a given input.
+            if #new_errors ~= #task.errors then
+              errors_differ = true
+            else
+              for i, e in ipairs(new_errors) do
+                local p = task.errors[i]
+                if p.field ~= e.field or p.code ~= e.code
+                  or p.message ~= e.message or p.detected ~= e.detected
+                then
+                  errors_differ = true; break
+                end
+              end
+            end
+          end
+
+          if errors_differ then
+            if have_any then
+              task.errors = new_errors
+            else
+              task.errors = nil
+            end
+            needs_write = true
+            if have_any then
+              summary.errors_set = summary.errors_set + 1
+            end
+          end
+
+          -- 3. Compute the bucket the file SHOULD be in now.
           local target_path
           if task.status == "archived" then
             target_path = paths.task_file_path(td, task.id, "archived", task.archived_at)
@@ -617,8 +792,12 @@ function M.refresh()
                 summary.skipped = summary.skipped + 1
               else
                 local mok, _merr = move_task(file, target_path, rendered)
-                if mok and target_path ~= file then
-                  summary.moved = summary.moved + 1
+                if mok then
+                  if target_path ~= file then
+                    summary.moved = summary.moved + 1
+                  elseif needs_write then
+                    summary.rewritten = summary.rewritten + 1
+                  end
                 end
               end
             end

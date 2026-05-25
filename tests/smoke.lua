@@ -6843,6 +6843,158 @@ print("\n[60] todo.refresh — bucket reconciliation + auto-archive")
   cleanup()
 end)()
 
+-- ─────────────────────── 61. todo.refresh — reference validation + errors[] (§3) ─
+print("\n[61] todo.refresh — reference validation + errors[] stability")
+;(function()
+  local ok_req, todo = pcall(require, "auto-core.todo")
+  if not ok_req then return end
+  local fs_path = require("auto-core.fs.path")
+
+  local tmp_root = vim.fn.tempname()
+  vim.fn.mkdir(tmp_root, "p")
+  local worktree = require("auto-core.git.worktree")
+  worktree.set_workspace_root(tmp_root)
+  local td = todo._todo_dir()
+
+  -- Set up a fake KB so we can test adr/review path validation.
+  local kb_dir = vim.fn.tempname()
+  vim.fn.mkdir(kb_dir, "p")
+  vim.fn.mkdir(kb_dir .. "/shared/adrs", "p")
+  vim.fn.writefile({ "# real adr" }, kb_dir .. "/shared/adrs/0099-real.md")
+  local saved_kb_write = vim.env.AUTO_AGENTS_KB_WRITE
+  vim.env.AUTO_AGENTS_KB_WRITE = kb_dir
+
+  local function cleanup()
+    vim.env.AUTO_AGENTS_KB_WRITE = saved_kb_write
+    vim.fn.delete(tmp_root, "rf")
+    vim.fn.delete(kb_dir, "rf")
+  end
+
+  -- ── happy path: valid refs → no errors emitted ──────────────
+  local id_ok = "2026-05-25-clean-refs"
+  todo.add({
+    id    = id_ok,
+    title = "Clean refs",
+    adr   = { "shared/adrs/0099-real.md" },
+    wip   = tmp_root,  -- exists
+  })
+  todo.refresh()
+  local t_clean = todo.get(id_ok)
+  ok("clean refs: errors field is omitted (nil), not []",
+    t_clean and t_clean.errors == nil)
+  -- Re-read the raw bytes to confirm the file doesn't contain `errors:`.
+  local raw_clean = table.concat(vim.fn.readfile(td .. "/open/" .. id_ok .. ".yaml"), "\n")
+  ok("clean refs: 'errors:' literally absent from the file",
+    not raw_clean:find("\nerrors:"), raw_clean)
+
+  -- ── broken adr path → errors[] populated ─────────────────────
+  local id_badref = "2026-05-25-broken-adr"
+  todo.add({
+    id    = id_badref,
+    title = "Broken adr",
+    adr   = { "shared/adrs/0999-does-not-exist.md" },
+  })
+  local s_br = todo.refresh()
+  ok("broken adr: refresh detects + counts errors_set",
+    s_br.errors_set >= 1, "summary=" .. vim.inspect(s_br))
+  local t_br = todo.get(id_badref)
+  ok("broken adr: task carries one errors[] entry",
+    t_br and type(t_br.errors) == "table" and #t_br.errors == 1,
+    t_br and vim.inspect(t_br.errors))
+  ok("broken adr: errors[].field is adr[0]",
+    t_br and t_br.errors[1].field == "adr[0]")
+  ok("broken adr: errors[].code is 'not-found'",
+    t_br and t_br.errors[1].code == "not-found")
+  ok("broken adr: errors[].detected is set",
+    t_br and type(t_br.errors[1].detected) == "string")
+  local first_detected = t_br.errors[1].detected
+
+  -- ── stable detected: re-running refresh doesn't change it ───
+  -- Sleep briefly so any newly-stamped detected would differ.
+  vim.wait(20, function() return false end)
+  todo.refresh()
+  local t_br2 = todo.get(id_badref)
+  ok("stable detected: same {field,code} keeps original detected",
+    t_br2 and t_br2.errors[1].detected == first_detected,
+    "first=" .. first_detected .. " now=" .. (t_br2 and t_br2.errors[1].detected or "<nil>"))
+
+  -- ── error cleared when ref fixed → errors omitted again ─────
+  -- Make the broken adr exist now.
+  vim.fn.writefile({ "# now real" }, kb_dir .. "/shared/adrs/0999-does-not-exist.md")
+  local s_fix = todo.refresh()
+  ok("fixed ref: refresh re-validates and clears errors",
+    s_fix.scanned >= 2)
+  local t_fixed = todo.get(id_badref)
+  ok("fixed ref: errors field is omitted again",
+    t_fixed and t_fixed.errors == nil)
+  local raw_fixed = table.concat(vim.fn.readfile(td .. "/open/" .. id_badref .. ".yaml"), "\n")
+  ok("fixed ref: 'errors:' literally absent from the file",
+    not raw_fixed:find("\nerrors:"))
+
+  -- ── broken wip ────────────────────────────────────────────────
+  local id_wip = "2026-05-25-bad-wip"
+  todo.add({ id = id_wip, title = "Bad wip", wip = "/nonexistent/path/here" })
+  todo.refresh()
+  local t_wip = todo.get(id_wip)
+  ok("broken wip: errors[].field is 'wip'",
+    t_wip and t_wip.errors and t_wip.errors[1].field == "wip",
+    t_wip and vim.inspect(t_wip.errors))
+
+  -- ── broken blocked ────────────────────────────────────────────
+  local id_blk = "2026-05-25-bad-blocked"
+  todo.add({
+    id      = id_blk,
+    title   = "Bad blocked",
+    blocked = { "2026-01-01-does-not-exist" },
+  })
+  todo.refresh()
+  local t_blk = todo.get(id_blk)
+  ok("broken blocked: errors[].field is 'blocked[0]'",
+    t_blk and t_blk.errors and t_blk.errors[1].field == "blocked[0]",
+    t_blk and vim.inspect(t_blk.errors))
+
+  -- ── pr/links NOT validated (network-free policy) ────────────
+  local id_url = "2026-05-25-urls-skipped"
+  todo.add({
+    id    = id_url,
+    title = "URLs skipped",
+    pr    = { "https://example.com/never-fetched" },
+    links = { "https://example.com/also-skipped" },
+  })
+  todo.refresh()
+  local t_url = todo.get(id_url)
+  ok("pr/links NOT validated (network skipped)",
+    t_url and t_url.errors == nil)
+
+  -- ── refresh produces zero-diff bytes when nothing's wrong ───
+  -- (omit-empty + stable detected together) — clean file after first
+  -- refresh should match clean file after second refresh byte-for-byte.
+  local clean_path = td .. "/open/" .. id_ok .. ".yaml"
+  local before_bytes = table.concat(vim.fn.readfile(clean_path), "\n")
+  todo.refresh()
+  local after_bytes = table.concat(vim.fn.readfile(clean_path), "\n")
+  ok("zero diff: clean file is byte-identical across refreshes",
+    before_bytes == after_bytes)
+
+  -- ── multiple errors stay sorted in detection order ──────────
+  local id_multi = "2026-05-25-many-errors"
+  todo.add({
+    id      = id_multi,
+    title   = "Many errors",
+    adr     = { "shared/adrs/A-missing.md", "shared/adrs/B-missing.md" },
+    blocked = { "missing-1", "missing-2" },
+    wip     = "/another/nonexistent",
+  })
+  todo.refresh()
+  local t_multi = todo.get(id_multi)
+  ok("multi errors: each broken ref produces one entry",
+    t_multi and t_multi.errors and #t_multi.errors == 5,
+    t_multi and ("got " .. #t_multi.errors .. " entries"))
+
+  cleanup()
+  worktree.set_workspace_root(nil)
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
