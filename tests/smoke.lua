@@ -7352,11 +7352,15 @@ print("\n[64] todo.import — kb-todo-list / legacy-todos-md / asana-json")
   ok("legacy-todos-md: tags include `kind:legacy-todos-md`",
     task_l and vim.tbl_contains(task_l.tags, "kind:legacy-todos-md"))
 
-  -- ── asana-json is stubbed ────────────────────────────────────
+  -- ── asana-json kind is rejected (removed in v0.1.36) ───────
+  -- The /asana-sync skill writes a single multi-task markdown doc
+  -- to the KB, not a per-task JSON dump — there is no per-task
+  -- import path from Asana. The kind is unknown to import().
   local src_asana = tmp_root .. "/asana.json"
   vim.fn.writefile({ "{}" }, src_asana)
   local asana_ok = pcall(todo.import, src_asana, { kind = "asana-json" })
-  ok("asana-json raises 'not implemented'", not asana_ok)
+  ok("asana-json kind is rejected (no per-task path from Asana)",
+    not asana_ok)
 
   -- ── invalid kind / missing source rejected ───────────────────
   ok("import refuses unknown kind",

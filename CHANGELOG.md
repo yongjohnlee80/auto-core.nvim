@@ -88,7 +88,7 @@ Events:
 Vendored:
 - `lua/auto-core/vendor/tinyyaml.lua` — `peposso/lua-tinyyaml@master` (MIT), with one local patch disabling native YAML 1.1 timestamp coercion (keeps date-shaped task ids round-trip-stable). License preserved at `vendor/LICENSE-tinyyaml`. Used for frontmatter parsing.
 
-Tests: 11 sections `[54]`–`[64]` in `tests/smoke.lua` covering every layer end-to-end.
+Tests: 11 sections `[54]`–`[64]` in `tests/smoke.lua`, 224 assertions covering every layer end-to-end. Full headless run: 1007 passed, 4 failed (the 4 are pre-existing in `mailbox.prune` / `fs.watch` / `git.fan_out` and predate this branch).
 
 ## [v0.1.30] — 2026-05-23 — revert v0.1.29 `WinNew` guard (no real-world vector demonstrated)
 
