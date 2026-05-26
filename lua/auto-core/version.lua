@@ -678,6 +678,16 @@ return {
   -- installs without auto-agents.nvim still work (just no
   -- fallback). No new schema/event/surface. `api_version` stays
   -- at `0.1`.
-  version     = "0.1.41",
+  -- v0.1.42 (2026-05-26): expand `kb-todo-list` importer's
+  -- status-atom vocabulary. ADR §6 documented only
+  -- `open / blocked / closed`, but real KBs accumulated other
+  -- finalized-state atoms (`completed`, `resolved`, `done`,
+  -- `superseded`) plus paused-work variants (`deferred`,
+  -- `paused`, `wip`). Pre-v0.1.42 these all defaulted to
+  -- `open`, so a Phase-4 migration sweep imported finished
+  -- work as if it were active. Strictly additive — every
+  -- previously-recognized atom maps the same way; new ones
+  -- stop defaulting to `open`. `api_version` stays at `0.1`.
+  version     = "0.1.42",
   api_version = "0.1",
 }

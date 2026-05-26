@@ -126,17 +126,37 @@ local function extract_inline_tags(md)
 end
 
 ---Map an inline `status:<x>` atom from a KB todo doc to the
----corresponding YAML schema status. Per the ADR §6 conversion table:
----  open    → open
----  blocked → deferred
----  closed  → completed
+---corresponding YAML schema status. The mapping covers the
+---vocabulary that real-world KBs use, not just the ADR's
+---canonical set:
+---  open                      → open
+---  blocked                   → deferred
+---  closed | completed | done | resolved | superseded
+---                            → completed
+---  deferred | paused | wip   → deferred
 ---Anything else (including absent) → open.
+---
+---Background (v0.1.42): the ADR §6 table only documented
+---`open / blocked / closed`. Real KBs accumulated other status
+---atoms over time (`completed`, `resolved`, `done`, etc.) —
+---these all SHOULD have mapped to `completed` (the YAML schema
+---name), but the original `kb_status_to_schema` defaulted them
+---to `open` and the corresponding docs migrated into the wrong
+---bucket. The expanded vocabulary fixes that without breaking
+---existing classifications (`closed` still maps to completed).
 ---@param atom string?
 ---@return string status
 local function kb_status_to_schema(atom)
-  if atom == "open"    then return "open"      end
-  if atom == "blocked" then return "deferred"  end
-  if atom == "closed"  then return "completed" end
+  if atom == "open"       then return "open"      end
+  if atom == "closed"     then return "completed" end
+  if atom == "completed"  then return "completed" end
+  if atom == "done"       then return "completed" end
+  if atom == "resolved"   then return "completed" end
+  if atom == "superseded" then return "completed" end
+  if atom == "blocked"    then return "deferred"  end
+  if atom == "deferred"   then return "deferred"  end
+  if atom == "paused"     then return "deferred"  end
+  if atom == "wip"        then return "deferred"  end
   return "open"
 end
 
