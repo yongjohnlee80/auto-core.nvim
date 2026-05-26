@@ -1244,6 +1244,93 @@ function M.archive(id)
   return M.status(id, "archived")
 end
 
+-- ─── public: assign (ADR-0031 §5) ─────────────────────────────
+
+---Assign a task to a peer agent / user. Updates the `assignee:`
+---field on the task file AND emits
+---`core.todo.assignee:changed` so subscribers (e.g. auto-agents'
+---mailbox router) can fire a side-effect notification to the
+---recipient's inbox.
+---
+---Per ADR §5 + lector S1, ONLY this API path emits the event.
+---Direct YAML `assignee:` edits are metadata-only — no mailbox
+---traffic, by design. Use this when you want the recipient to
+---be notified; edit the file directly if you just want to
+---record an assignment without pinging anyone.
+---
+---Idempotent: assigning a task to its current assignee is a
+---no-op (no rewrite, no event).
+---
+---@param id string              task id
+---@param assignee string?       agent name or `nil` to clear
+---@param reason string?         optional one-line context
+---@return table? updated_task, string? err
+function M.assign(id, assignee, reason)
+  if type(id) ~= "string" or id == "" then
+    return nil, "auto-core.todo.assign: id must be a non-empty string"
+  end
+  if assignee ~= nil and (type(assignee) ~= "string" or assignee == "") then
+    return nil, "auto-core.todo.assign: assignee must be a non-empty string or nil"
+  end
+  if reason ~= nil and type(reason) ~= "string" then
+    return nil, "auto-core.todo.assign: reason must be a string when provided"
+  end
+
+  local td   = M._todo_dir()
+  local file = find_task_path(td, id)
+  if not file then return nil, "task '" .. id .. "' not found in " .. td end
+
+  local text, read_err = read_file(file)
+  if not text then return nil, read_err end
+  local dec = md.decode(text)
+  if not dec.ok then return nil, "md.decode: " .. tostring(dec.err) end
+  local task = dec.value
+  if type(task) ~= "table" then
+    return nil, "task '" .. id .. "' decoded to non-table"
+  end
+
+  local old = task.assignee
+
+  -- Idempotent no-op when the assignee is already what's requested.
+  -- nil-vs-"" both count as "unassigned" for this comparison.
+  local same =
+        (old == assignee)
+     or (old == nil and assignee == nil)
+     or (old == ""  and assignee == nil)
+     or (old == nil and assignee == "")
+  if same then return task end
+
+  local now = M._now_iso()
+  task.assignee = assignee  -- nil clears the field
+  task.updated  = now
+
+  local v = schema.validate(task)
+  if not v.ok then return nil, "schema: " .. tostring(v.err) end
+
+  local rendered, render_err = render_task(task)
+  if render_err then return nil, render_err end
+  local ok, err = atomic_write(file, rendered)
+  if not ok then return nil, "write: " .. tostring(err) end
+
+  -- Best-effort event publish so consumers (mailbox router, panel)
+  -- can react. Carry enough context for a one-shot notification
+  -- without forcing the consumer to re-read the file.
+  local ok_ev, events = pcall(require, "auto-core.events")
+  if ok_ev and events and type(events.publish) == "function" then
+    pcall(events.publish, "core.todo.assignee:changed", {
+      id        = id,
+      title     = task.title,
+      file_path = file,
+      from      = old,
+      to        = assignee,
+      reason    = reason,
+      at        = now,
+    })
+  end
+
+  return task
+end
+
 -- ─── public: import (ADR-0031 §3.4) ──────────────────────────
 
 ---Delegate to `auto-core.todo.import.import`. See ADR-0031 §3.4 for

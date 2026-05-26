@@ -7842,6 +7842,72 @@ print("\n[66] todo.refresh — $VAR substitution + unresolved-variable error")
   package.loaded["auto-core.todo.vars"] = nil
 end)()
 
+-- ─────────────────────── 67. todo.assign — assignee API + event (v0.1.43) ──
+print("\n[67] todo.assign — sets assignee + fires core.todo.assignee:changed")
+;(function()
+  local ok_t, todo = pcall(require, "auto-core.todo")
+  if not ok_t then return end
+
+  local tmp_root = vim.fn.tempname()
+  vim.fn.mkdir(tmp_root, "p")
+  local worktree = require("auto-core.git.worktree")
+  worktree.set_workspace_root(tmp_root)
+  local function cleanup() worktree.set_workspace_root(nil); vim.fn.delete(tmp_root, "rf") end
+
+  local id = todo.add({ title = "to assign" })
+
+  -- Subscribe to capture the event payload.
+  local events = require("auto-core.events")
+  local captured = nil
+  local handle = events.subscribe("core.todo.assignee:changed", function(payload)
+    captured = payload
+  end)
+
+  -- Assign.
+  local _, err = todo.assign(id, "agent:lector", "needs technical review")
+  ok("assign returns no error", err == nil, "got: " .. tostring(err))
+
+  -- Re-read the task and confirm the field landed.
+  local t = todo.get(id)
+  ok("assignee field written to disk",
+    t and t.assignee == "agent:lector",
+    "got: " .. tostring(t and t.assignee))
+
+  -- Event fired with the right payload shape.
+  vim.wait(50, function() return false end)
+  ok("event fired", captured ~= nil)
+  ok("event carries id",        captured and captured.id == id)
+  ok("event carries from=nil",  captured and captured.from == nil)
+  ok("event carries to",        captured and captured.to == "agent:lector")
+  ok("event carries reason",    captured and captured.reason == "needs technical review")
+  ok("event carries file_path", captured and type(captured.file_path) == "string" and captured.file_path ~= "")
+  ok("event carries title",     captured and captured.title == "to assign")
+  ok("event carries timestamp", captured and type(captured.at) == "string" and captured.at ~= "")
+
+  -- Idempotent: same assignee again → no rewrite, no event
+  captured = nil
+  todo.assign(id, "agent:lector", "duplicate request")
+  vim.wait(30, function() return false end)
+  ok("idempotent: re-assign to same agent does NOT fire event", captured == nil)
+
+  -- Clear assignee
+  todo.assign(id, nil)
+  vim.wait(50, function() return false end)
+  local t2 = todo.get(id)
+  ok("clear assignee with nil writes back",
+    t2 and t2.assignee == nil,
+    "got: " .. tostring(t2 and t2.assignee))
+  ok("clear fires event with to=nil",
+    captured ~= nil and captured.to == nil and captured.from == "agent:lector")
+
+  -- Bad args
+  ok("rejects empty id",       select(2, todo.assign("",         "agent:x")) ~= nil)
+  ok("rejects empty assignee", select(2, todo.assign(id,         ""))       ~= nil)
+
+  events.unsubscribe(handle)
+  cleanup()
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

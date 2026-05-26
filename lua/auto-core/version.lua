@@ -688,6 +688,14 @@ return {
   -- work as if it were active. Strictly additive — every
   -- previously-recognized atom maps the same way; new ones
   -- stop defaulting to `open`. `api_version` stays at `0.1`.
-  version     = "0.1.42",
+  -- v0.1.43 (2026-05-26): `auto-core.todo.assign(id, assignee,
+  -- reason?)` + new event topic `core.todo.assignee:changed`.
+  -- Per ADR §5 + lector S1, ONLY the assign API path emits the
+  -- event; direct YAML `assignee:` edits stay metadata-only.
+  -- Event payload: `{id, title, file_path, from, to, reason,
+  -- at}` — auto-agents v0.2.37 subscribes to deliver a one-shot
+  -- mailbox message to the recipient's inbox. Strictly
+  -- additive; `api_version` stays at `0.1`.
+  version     = "0.1.43",
   api_version = "0.1",
 }
