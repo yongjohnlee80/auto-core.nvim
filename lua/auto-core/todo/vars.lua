@@ -62,8 +62,10 @@ local M = {}
 M.BUILTINS = {
   {
     name = "KB_ROOT",
-    doc  = "Auto-agents knowledge-base root. Resolved from env: "
-      .. "AUTO_AGENTS_KB_ROOT > AUTO_AGENTS_KB_READ[0] > AUTO_AGENTS_KB_WRITE.",
+    doc  = "Auto-agents knowledge-base root. Resolved (in order): "
+      .. "env AUTO_AGENTS_KB_ROOT > env AUTO_AGENTS_KB_READ[0] > env "
+      .. "AUTO_AGENTS_KB_WRITE > require('auto-agents.kb').root() "
+      .. "(Lua-API fallback for the parent nvim).",
     resolver = function()
       local r = vim.env.AUTO_AGENTS_KB_ROOT
       if r and r ~= "" then return fs_path.normalize(r) end
@@ -74,6 +76,19 @@ M.BUILTINS = {
       end
       local w = vim.env.AUTO_AGENTS_KB_WRITE
       if w and w ~= "" then return fs_path.normalize(w) end
+      -- v0.1.41: when the panel runs in the parent nvim (not an
+      -- agent), the AUTO_AGENTS_KB_* env vars aren't set on the
+      -- nvim process — they only land in spawned agent processes.
+      -- auto-agents.kb.root() reads from the active TOML config
+      -- (global vs. project-local) and returns the same path the
+      -- spawn step would inject. Soft dependency via pcall.
+      local ok, kb = pcall(require, "auto-agents.kb")
+      if ok and kb and type(kb.root) == "function" then
+        local ok_r, root = pcall(kb.root)
+        if ok_r and type(root) == "string" and root ~= "" then
+          return fs_path.normalize(root)
+        end
+      end
       return nil
     end,
   },

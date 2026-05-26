@@ -668,6 +668,16 @@ return {
   -- resolution, user-var CRUD, env-var fallback, `${VAR}` brace
   -- form, and unresolved-variable error emission.
   -- `api_version` stays at `0.1`.
-  version     = "0.1.40",
+  -- v0.1.41 (2026-05-26): `$KB_ROOT` resolver gains a Lua-API
+  -- fallback: when the AUTO_AGENTS_KB_* env vars are unset on the
+  -- nvim process (the common case in the PARENT nvim — env vars
+  -- are only injected into spawned agent processes), try
+  -- `require('auto-agents.kb').root()` via pcall. That function
+  -- reads from auto-agents.nvim's TOML config and returns the
+  -- same path the spawn step would inject. Soft dependency —
+  -- installs without auto-agents.nvim still work (just no
+  -- fallback). No new schema/event/surface. `api_version` stays
+  -- at `0.1`.
+  version     = "0.1.41",
   api_version = "0.1",
 }

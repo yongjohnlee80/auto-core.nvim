@@ -10,6 +10,35 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.41] — 2026-05-26 — `$KB_ROOT` Lua-API fallback for the parent nvim
+
+**Bug**: in the panel's Vars section, `$KB_ROOT` rendered as
+`(unset)` in the parent nvim even though auto-agents.nvim was
+loaded and the KB was configured.
+
+**Root cause**: the v0.1.40 resolver only consulted
+`AUTO_AGENTS_KB_ROOT` / `AUTO_AGENTS_KB_READ` / `AUTO_AGENTS_KB_WRITE`
+env vars. Those env vars are only set on **spawned agent
+processes** (via `auto-agents.kb.scope.env_for`) — not on the
+parent nvim itself. The user opens the todos panel in the parent,
+so the resolver never finds them.
+
+**Fix**: added a 4th resolver step that pcalls into
+`require('auto-agents.kb').root()`. That function reads from
+auto-agents.nvim's active TOML config (`root_override` →
+`cfg.kb.path` → branched on `config_source`: global =
+`<stdpath('config')>/.auto-agents-config/kb`, project-local =
+`<session_project_root>/.auto-agents/kb`). Same value the spawn
+step would inject, so the parent nvim now resolves `$KB_ROOT`
+identically to a spawned agent.
+
+Soft dependency — pcall'd, so installs without auto-agents.nvim
+still work (just no fallback). No schema change.
+
+Cascades into pair-fix auto-finder v0.2.40 which addresses the
+"opens a buffer named `$KB_ROOT/...`" symptom downstream — once
+$KB_ROOT resolves, that path opens the actual file.
+
 ## [v0.1.40] — 2026-05-26 — `auto-core.todo.vars` — `$VAR/...` path substitution
 
 Closes the portability gap that left `.todo-list/` shareable via
