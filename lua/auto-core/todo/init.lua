@@ -835,14 +835,31 @@ local function compute_errors(task, td, now)
     }
   end
 
-  -- adr[i] — KB-relative.
-  if kb and type(task.adr) == "table" then
+  -- adr[i] — `$VAR/...` substitution (v0.1.40), absolute path,
+  -- or KB-relative.
+  if type(task.adr) == "table" then
+    local vars = require("auto-core.todo.vars")
     for i, p in ipairs(task.adr) do
       if type(p) == "string" and p ~= "" then
-        local abs = fs_path.join(kb, p)
-        if not fs_path.exists(abs) then
-          add("adr[" .. (i - 1) .. "]", "not-found",
-            "KB-relative path '" .. p .. "' does not exist under " .. kb)
+        local r = vars.resolve_path(p)
+        if r.unresolved then
+          add("adr[" .. (i - 1) .. "]", "unresolved-variable",
+            "variable '$" .. tostring(r.var_name) .. "' is not defined "
+              .. "on this machine — set it in the Vars section or as an "
+              .. "environment variable")
+        else
+          local abs
+          if r.path:sub(1, 1) == "/" then
+            -- $VAR substitution or absolute path
+            abs = r.path
+          elseif kb then
+            -- legacy KB-relative path
+            abs = fs_path.join(kb, p)
+          end
+          if abs and not fs_path.exists(abs) then
+            add("adr[" .. (i - 1) .. "]", "not-found",
+              "path '" .. p .. "' does not exist (resolved: " .. abs .. ")")
+          end
         end
       end
     end
@@ -857,12 +874,27 @@ local function compute_errors(task, td, now)
     end
   end
 
-  -- review — KB-relative.
-  if kb and type(task.review) == "string" and task.review ~= "" then
-    local abs = fs_path.join(kb, task.review)
-    if not fs_path.exists(abs) then
-      add("review", "not-found",
-        "KB-relative path '" .. task.review .. "' does not exist under " .. kb)
+  -- review — `$VAR/...` substitution (v0.1.40), absolute path, or
+  -- KB-relative.
+  if type(task.review) == "string" and task.review ~= "" then
+    local vars = require("auto-core.todo.vars")
+    local r = vars.resolve_path(task.review)
+    if r.unresolved then
+      add("review", "unresolved-variable",
+        "variable '$" .. tostring(r.var_name) .. "' is not defined "
+          .. "on this machine — set it in the Vars section or as an "
+          .. "environment variable")
+    else
+      local abs
+      if r.path:sub(1, 1) == "/" then
+        abs = r.path
+      elseif kb then
+        abs = fs_path.join(kb, task.review)
+      end
+      if abs and not fs_path.exists(abs) then
+        add("review", "not-found",
+          "path '" .. task.review .. "' does not exist (resolved: " .. abs .. ")")
+      end
     end
   end
 
@@ -1249,5 +1281,21 @@ function M.remove(id)
   end
   return true
 end
+
+-- ─── public: vars submodule (v0.1.40) ─────────────────────────
+
+---Per-machine variable store + `$VAR/...` path resolver for
+---portable `.todo-list/` directories. See `auto-core.todo.vars`
+---for the full surface.
+---
+---Re-exposed here as `todo.vars` so consumers don't have to know
+---about the submodule split. Lazy `require` so loading the main
+---`auto-core.todo` module doesn't transitively pull `vars.lua`
+---into memory when callers don't use it.
+M.vars = setmetatable({}, {
+  __index = function(_, k)
+    return require("auto-core.todo.vars")[k]
+  end,
+})
 
 return M

@@ -28,7 +28,8 @@ M.VALID_PRIORITY = {
 
 ---@type table<string, true>
 M.VALID_ERROR_CODE = {
-  ["not-found"] = true,
+  ["not-found"]            = true,
+  ["unresolved-variable"]  = true,  -- v0.1.40: `$VAR/...` ref whose VAR has no resolver
 }
 
 -- Field-shape catalog. Drives both presence-checks and unknown-key

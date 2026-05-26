@@ -10,6 +10,74 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.40] — 2026-05-26 — `auto-core.todo.vars` — `$VAR/...` path substitution
+
+Closes the portability gap that left `.todo-list/` shareable via
+git in name only. Hard-coding `/Users/alice/.../kb/shared/adrs/0031-foo.md`
+breaks on every other machine; hard-coding the KB-relative
+`shared/adrs/0031-foo.md` requires identical env-var setup on
+each machine.
+
+Tasks now reference docs by their **portable symbolic form**:
+
+```yaml
+adr:
+  - $KB_ROOT/shared/adrs/0031-foo.md
+```
+
+Variable NAMES (`KB_ROOT`) live in the file — committed to git.
+Variable VALUES live in `auto-core.state.namespace('todo.vars',
+{persist='json'})` — per-machine, never reach git.
+
+**Built-ins** (auto-resolved, read-only):
+- `$KB_ROOT` — `AUTO_AGENTS_KB_ROOT` > `AUTO_AGENTS_KB_READ[0]` > `AUTO_AGENTS_KB_WRITE`
+- `$WORKSPACE` — `auto-core.git.worktree`'s workspace_root
+- `$HOME` — `vim.fn.expand("~")`
+- `$CWD` — `vim.fn.getcwd()`
+
+**User-defined** — CRUD via the panel (auto-finder v0.2.39) or
+programmatically:
+
+```lua
+local vars = require("auto-core.todo").vars
+vars.set("PROJECT_DOCS", "/opt/my-project/docs")
+vars.resolve_path("$PROJECT_DOCS/setup.md")
+                                -- { ok = true,
+                                --   path = "/opt/my-project/docs/setup.md",
+                                --   var_name = "PROJECT_DOCS",
+                                --   unresolved = false }
+```
+
+Lookup chain: built-in → state → `vim.env`. Both `$VAR/...` and
+`${VAR}/...` shell-style brace form are supported.
+
+**`refresh()` integration**: every `adr[]` and `review` entry
+flows through `vars.resolve_path` before existence-checking.
+Unresolved variables emit a new error code:
+
+```
+errors:
+  - field:    adr[0]
+    code:     unresolved-variable
+    message:  variable '$UNDEFINED' is not defined on this machine —
+              set it in the Vars section or as an environment variable
+    detected: 2026-05-26T...
+```
+
+Absolute paths (substituted OR typed) take precedence; legacy
+KB-relative paths (`shared/...`) continue to work unchanged.
+
+**New event topic** `core.todo.vars:changed` — payload
+`{ kind = "set"|"remove", name }`. auto-finder subscribes.
+
+**Tests**: smoke `[65]` adds 18 assertions (built-ins, user
+CRUD, identifier validation, env fallback, `${VAR}` brace form,
+resolve_path branches). `[66]` adds 5 assertions wiring it
+through `refresh()`.
+
+Strictly additive — schema v1 unchanged. `VALID_ERROR_CODE`
+grew to `{not-found, unresolved-variable}`.
+
 ## [v0.1.39] — 2026-05-26 — `auto-core.todo` tolerant scalar→list coercion
 
 A human writing **one** ADR reference naturally types

@@ -619,6 +619,55 @@ return {
   -- additive — schema v1 unchanged, file format unchanged,
   -- existing list-form files round-trip byte-identical.
   -- `api_version` stays at `0.1`.
-  version     = "0.1.39",
+  -- v0.1.40 (2026-05-26): `auto-core.todo.vars` submodule —
+  -- per-machine variable store + `$VAR/...` path resolver.
+  -- Closes the portability gap that left `.todo-list/` shareable
+  -- via git in name only: an absolute path encoded in a task
+  -- file (`adr: /Users/alice/.../kb/shared/adrs/...`) breaks on
+  -- every other machine, and a KB-relative path (`adr:
+  -- shared/...`) requires identical env-var setup on every
+  -- machine that opens the file.
+  --
+  -- Wire format: a task references docs as
+  --     adr:
+  --       - $KB_ROOT/shared/adrs/0031-foo.md
+  -- The variable NAME (KB_ROOT) is committed to git; its VALUE
+  -- is local-machine state (`auto-core.state.namespace('todo.vars',
+  -- {persist='json'})`, never enters git).
+  --
+  -- Surface:
+  --   - `vars.BUILTINS`           — { KB_ROOT, WORKSPACE, HOME, CWD }
+  --     auto-resolved, read-only.
+  --   - `vars.get(name)`          — built-in → state → vim.env,
+  --     first non-nil wins.
+  --   - `vars.set(name, value)`   — user-defined only; rejects
+  --     built-in names; rejects names that aren't valid shell
+  --     identifiers (`[A-Za-z_][A-Za-z0-9_]*`).
+  --   - `vars.remove(name)`       — user-defined only.
+  --   - `vars.list()`             — built-ins first, then user
+  --     vars lexicographically.
+  --   - `vars.resolve_path(input)` — primary path-resolution API.
+  --     Detects `$VAR/...` and `${VAR}/...` prefixes. Returns
+  --     `{ ok, path, var_name, unresolved }`.
+  --   - Re-exposed at `todo.vars` via a lazy-loading proxy.
+  --
+  -- Refresh integration: the `adr` + `review` reference-
+  -- validation passes now route every entry through
+  -- `vars.resolve_path` BEFORE existence-checking. Unresolved
+  -- variables surface as `errors[]` with the new code
+  -- `unresolved-variable`. Schema's `VALID_ERROR_CODE` extended
+  -- to `{not-found, unresolved-variable}`.
+  --
+  -- New event topic: `core.todo.vars:changed` payload `{ kind =
+  -- 'set'|'remove', name }`. auto-finder v0.2.39 subscribes.
+  --
+  -- Strictly additive — `VALID_ERROR_CODE` was already a closed
+  -- set rejecting unknown codes, so existing files (only
+  -- `not-found` from prior validators) continue to validate.
+  -- Smoke section [65] adds assertions covering built-in
+  -- resolution, user-var CRUD, env-var fallback, `${VAR}` brace
+  -- form, and unresolved-variable error emission.
+  -- `api_version` stays at `0.1`.
+  version     = "0.1.40",
   api_version = "0.1",
 }

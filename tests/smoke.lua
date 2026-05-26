@@ -7664,6 +7664,184 @@ print("\n[64] todo.import — kb-todo-list / legacy-todos-md / asana-json")
   cleanup()
 end)()
 
+-- ─────────────────────── 65. todo.vars — variable store + $VAR resolver (v0.1.40) ──
+print("\n[65] todo.vars — variable store + $VAR resolver")
+;(function()
+  local ok_v, vars = pcall(require, "auto-core.todo.vars")
+  ok("auto-core.todo.vars loads", ok_v, tostring(vars))
+  if not ok_v then return end
+
+  -- Built-ins ----------------------------------------------------
+  local builtin_names = {}
+  for _, b in ipairs(vars.BUILTINS) do builtin_names[#builtin_names + 1] = b.name end
+  ok("built-ins include KB_ROOT, WORKSPACE, HOME, CWD in order",
+    table.concat(builtin_names, ",") == "KB_ROOT,WORKSPACE,HOME,CWD")
+  ok("is_builtin('KB_ROOT') is true", vars.is_builtin("KB_ROOT"))
+  ok("is_builtin('MY_VAR') is false", not vars.is_builtin("MY_VAR"))
+
+  -- HOME built-in is unconditional (vim.fn.expand('~') always
+  -- returns something). Use it to verify the resolver chain.
+  local home = vars.get("HOME")
+  ok("HOME built-in resolves to a non-empty string",
+    type(home) == "string" and home ~= "")
+  ok("CWD built-in resolves to a non-empty string",
+    type(vars.get("CWD")) == "string" and vars.get("CWD") ~= "")
+
+  -- KB_ROOT pinned via env so the test doesn't depend on the
+  -- user's actual KB setup.
+  local saved_root  = vim.env.AUTO_AGENTS_KB_ROOT
+  local saved_read  = vim.env.AUTO_AGENTS_KB_READ
+  local saved_write = vim.env.AUTO_AGENTS_KB_WRITE
+  vim.env.AUTO_AGENTS_KB_ROOT  = "/tmp/fake-kb-root"
+  vim.env.AUTO_AGENTS_KB_READ  = nil
+  vim.env.AUTO_AGENTS_KB_WRITE = nil
+  ok("KB_ROOT built-in resolves via AUTO_AGENTS_KB_ROOT",
+    vars.get("KB_ROOT") == "/tmp/fake-kb-root",
+    "got " .. tostring(vars.get("KB_ROOT")))
+
+  -- Set / list / remove ----------------------------------------
+  local state_tmp = vim.fn.tempname()
+  vim.fn.mkdir(state_tmp, "p")
+  require("auto-core.state").configure({ persist_dir = state_tmp })
+  -- Reset the cached vars-state handle so it picks up the new persist_dir
+  package.loaded["auto-core.todo.vars"] = nil
+  local _, vars2 = pcall(require, "auto-core.todo.vars")
+  vars = vars2
+  -- Re-restore env-vars (the reload re-read them; KB_ROOT still set).
+  ok("set MY_VAR succeeds", select(1, vars.set("MY_VAR", "/abs/value")))
+  ok("set returns false on built-in name",
+    not select(1, vars.set("KB_ROOT", "/whatever")))
+  ok("set returns false on invalid identifier",
+    not select(1, vars.set("1bad", "/x")))
+  ok("set returns false on identifier with hyphen",
+    not select(1, vars.set("bad-name", "/x")))
+  ok("get('MY_VAR') returns the set value",
+    vars.get("MY_VAR") == "/abs/value")
+  ok("list() includes both built-ins and user vars",
+    (function()
+      local list = vars.list()
+      local saw_kb, saw_my = false, false
+      for _, e in ipairs(list) do
+        if e.name == "KB_ROOT" and e.builtin then saw_kb = true end
+        if e.name == "MY_VAR"  and not e.builtin and e.value == "/abs/value" then saw_my = true end
+      end
+      return saw_kb and saw_my
+    end)())
+
+  -- env-var fallback for un-set user var
+  vim.env.MY_FALLBACK = "/from/env"
+  ok("env fallback: unset user var resolves from vim.env",
+    vars.get("MY_FALLBACK") == "/from/env")
+
+  -- remove
+  ok("remove(MY_VAR) succeeds", select(1, vars.remove("MY_VAR")))
+  ok("after remove, get('MY_VAR') is nil",
+    vars.get("MY_VAR") == nil)
+  ok("remove returns false on built-in",
+    not select(1, vars.remove("KB_ROOT")))
+
+  -- resolve_path ------------------------------------------------
+  ok("set TARGET succeeds", select(1, vars.set("TARGET", "/usr/local/bin")))
+  local r = vars.resolve_path("$TARGET/nvim")
+  ok("resolve_path: $VAR/rest substitutes correctly",
+    r.ok and r.path == "/usr/local/bin/nvim" and r.var_name == "TARGET",
+    "got path=" .. tostring(r and r.path))
+  local r2 = vars.resolve_path("${TARGET}/nvim")
+  ok("resolve_path: brace form ${VAR}/rest works",
+    r2.ok and r2.path == "/usr/local/bin/nvim" and r2.var_name == "TARGET")
+  local r3 = vars.resolve_path("$TARGET")
+  ok("resolve_path: bare $VAR (no rest) returns the var value",
+    r3.ok and r3.path == "/usr/local/bin")
+  local r4 = vars.resolve_path("$UNDEFINED/foo")
+  ok("resolve_path: unknown var returns unresolved=true",
+    not r4.ok and r4.unresolved
+      and r4.var_name == "UNDEFINED"
+      and r4.path == "$UNDEFINED/foo")  -- literal preserved
+  local r5 = vars.resolve_path("/abs/path")
+  ok("resolve_path: absolute path passes through expanded",
+    r5.ok and r5.path == "/abs/path" and not r5.unresolved)
+  local r6 = vars.resolve_path("relative/path")
+  ok("resolve_path: plain relative passes through unchanged",
+    r6.ok and r6.path == "relative/path" and not r6.unresolved)
+
+  -- Cleanup env-vars
+  vim.env.AUTO_AGENTS_KB_ROOT  = saved_root
+  vim.env.AUTO_AGENTS_KB_READ  = saved_read
+  vim.env.AUTO_AGENTS_KB_WRITE = saved_write
+  vim.env.MY_FALLBACK          = nil
+  require("auto-core.state").configure({ persist_dir = nil })
+  vim.fn.delete(state_tmp, "rf")
+  package.loaded["auto-core.todo.vars"] = nil
+end)()
+
+-- ─────────────────────── 66. todo.refresh — $VAR ref + unresolved-variable error (v0.1.40) ──
+print("\n[66] todo.refresh — $VAR substitution + unresolved-variable error")
+;(function()
+  local ok_t, todo = pcall(require, "auto-core.todo")
+  if not ok_t then return end
+
+  local tmp_root = vim.fn.tempname()
+  vim.fn.mkdir(tmp_root, "p")
+  local worktree = require("auto-core.git.worktree")
+  worktree.set_workspace_root(tmp_root)
+  local state_tmp = vim.fn.tempname()
+  vim.fn.mkdir(state_tmp, "p")
+  require("auto-core.state").configure({ persist_dir = state_tmp })
+  package.loaded["auto-core.todo.vars"] = nil
+
+  -- Set up a fake KB and a $MY_DOCS var pointing into it.
+  local fake_kb = vim.fn.tempname()
+  vim.fn.mkdir(fake_kb .. "/shared/adrs", "p")
+  local good_path = fake_kb .. "/shared/adrs/0099-good.md"
+  local fh = io.open(good_path, "w") fh:write("# good\n") fh:close()
+  vim.env.AUTO_AGENTS_KB_ROOT  = fake_kb
+  vim.env.AUTO_AGENTS_KB_READ  = nil
+  vim.env.AUTO_AGENTS_KB_WRITE = nil
+
+  local vars = require("auto-core.todo.vars")
+  vars.set("MY_DOCS", fake_kb)
+
+  -- Task #1: uses $KB_ROOT — should resolve, ref exists.
+  local id1 = todo.add({ title = "kb-ref via builtin", adr = { "$KB_ROOT/shared/adrs/0099-good.md" } })
+  -- Task #2: uses $MY_DOCS — should resolve, ref exists.
+  local id2 = todo.add({ title = "user-var ref",       adr = { "$MY_DOCS/shared/adrs/0099-good.md" } })
+  -- Task #3: uses $UNDEFINED — should flag unresolved-variable.
+  local id3 = todo.add({ title = "unresolved",         adr = { "$UNDEFINED/foo.md" } })
+  -- Task #4: legacy KB-relative — should still work.
+  local id4 = todo.add({ title = "legacy kb-rel",      adr = { "shared/adrs/0099-good.md" } })
+
+  todo.refresh()
+
+  local t1, t2, t3, t4 = todo.get(id1), todo.get(id2), todo.get(id3), todo.get(id4)
+
+  ok("$KB_ROOT-prefixed adr passes validation (no errors[])",
+    not t1.errors or #t1.errors == 0,
+    "got errors: " .. vim.inspect(t1.errors))
+  ok("$MY_DOCS user-var adr passes validation",
+    not t2.errors or #t2.errors == 0,
+    "got errors: " .. vim.inspect(t2.errors))
+  ok("$UNDEFINED adr emits unresolved-variable error",
+    t3.errors and #t3.errors == 1
+      and t3.errors[1].code == "unresolved-variable"
+      and t3.errors[1].field == "adr[0]",
+    "got: " .. vim.inspect(t3.errors))
+  ok("unresolved-variable error message mentions Vars section",
+    t3.errors and t3.errors[1].message:find("Vars section", 1, true) ~= nil,
+    "got: " .. tostring(t3.errors and t3.errors[1].message))
+  ok("legacy KB-relative adr still resolves (back-compat)",
+    not t4.errors or #t4.errors == 0,
+    "got errors: " .. vim.inspect(t4.errors))
+
+  -- Cleanup
+  vim.env.AUTO_AGENTS_KB_ROOT  = nil
+  worktree.set_workspace_root(nil)
+  require("auto-core.state").configure({ persist_dir = nil })
+  vim.fn.delete(tmp_root,  "rf")
+  vim.fn.delete(state_tmp, "rf")
+  vim.fn.delete(fake_kb,   "rf")
+  package.loaded["auto-core.todo.vars"] = nil
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
