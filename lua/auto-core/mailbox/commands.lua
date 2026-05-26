@@ -53,8 +53,21 @@ local function valid_name(name)
   if type(name) ~= "string" or #name == 0 then
     return false, "command name must be a non-empty string"
   end
-  if not name:match("^[A-Za-z_][A-Za-z0-9_-]*$") then
-    return false, "command name must match [A-Za-z_][A-Za-z0-9_-]* (got " .. name .. ")"
+  -- v0.1.44: permit `.` as a namespace separator (e.g.
+  -- `todos.list`, `todos.assign`, `auth.login`). The leading
+  -- char must still be a letter or underscore (not a digit or
+  -- separator), but the tail may include `.` alongside the
+  -- existing `-` / `_` / digits / letters. Two adjacent dots
+  -- or a trailing dot are rejected — the namespace must be a
+  -- non-empty identifier followed by at least one verb segment.
+  if not name:match("^[A-Za-z_][A-Za-z0-9_%-%.]*$") then
+    return false,
+      "command name must match [A-Za-z_][A-Za-z0-9_.-]* (got " .. name .. ")"
+  end
+  if name:find("%.%.") or name:sub(-1) == "." then
+    return false,
+      "command name must not contain consecutive dots or end with a dot (got "
+        .. name .. ")"
   end
   return true
 end

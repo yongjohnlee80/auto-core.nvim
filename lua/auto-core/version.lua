@@ -696,6 +696,14 @@ return {
   -- at}` — auto-agents v0.2.37 subscribes to deliver a one-shot
   -- mailbox message to the recipient's inbox. Strictly
   -- additive; `api_version` stays at `0.1`.
-  version     = "0.1.43",
+  -- v0.1.44 (2026-05-26): permit `.` as a namespace separator
+  -- in mailbox command names. Pre-v0.1.44 validator pattern
+  -- `[A-Za-z_][A-Za-z0-9_-]*` rejected `todos.list`, etc.,
+  -- which blocked auto-agents v0.2.37's todos.* surface.
+  -- New pattern: `[A-Za-z_][A-Za-z0-9_.-]*` + safety checks
+  -- (no consecutive dots, no trailing dot). Strictly additive
+  -- — every previously-valid name is still valid.
+  -- `api_version` stays at `0.1`.
+  version     = "0.1.44",
   api_version = "0.1",
 }
