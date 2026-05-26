@@ -562,6 +562,23 @@ return {
   -- not-found. Flipped to ROOT > READ[0] > WRITE; tests/[61]
   -- locks the new order against a realistic env shape (ROOT +
   -- WRITE both set, WRITE under ROOT). No API surface change.
-  version     = "0.1.37",
+  -- v0.1.38 (2026-05-26): adds `auto-core.todo.scan()`. Where
+  -- `M.list()` (and `M.refresh()`'s scanner) silently skips
+  -- files whose YAML frontmatter fails to parse or whose
+  -- decoded body fails schema validation — correct behavior for
+  -- consumers that just want validated data — that silence is
+  -- exactly wrong for a panel UI: a single broken save makes
+  -- the task disappear from the panel with no indicator, no
+  -- error toast, no clue that anything is amiss. `scan()` walks
+  -- the same bucket tree (open/deferred/completed/archived) but
+  -- partitions: `{ tasks = <validated[]>, malformed = [{
+  -- file_path, bucket, filename, err }, ...] }`. Consumers
+  -- (auto-finder v0.2.38+) render the malformed rows so the
+  -- user can navigate to the file and fix it. M.list() is left
+  -- byte-identical for back-compat. Section [58b] smoke adds
+  -- 17 assertions covering: bucket assignment, entry shape,
+  -- list/scan divergence, missing-dir safety. Strictly additive;
+  -- `api_version` stays at `0.1`.
+  version     = "0.1.38",
   api_version = "0.1",
 }

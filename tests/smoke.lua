@@ -6602,6 +6602,90 @@ print("\n[58] todo — add / get / list / update / remove")
   cleanup()
 end)()
 
+-- ─────────────────────── 58b. todo.scan — malformed surfacing ──────────────
+print("\n[58b] todo.scan — partition tasks vs malformed files")
+;(function()
+  local ok_req, todo = pcall(require, "auto-core.todo")
+  if not ok_req then return end
+
+  local tmp_root = vim.fn.tempname()
+  vim.fn.mkdir(tmp_root, "p")
+  local worktree = require("auto-core.git.worktree")
+  worktree.set_workspace_root(tmp_root)
+  local function cleanup() vim.fn.delete(tmp_root, "rf") end
+
+  -- one good task
+  local good_id = todo.add({ title = "Scan good task" })
+  local td = todo._todo_dir()
+
+  -- one malformed: bad YAML frontmatter
+  local bad_path = td .. "/open/2026-05-26-broken-yaml.md"
+  local fh = io.open(bad_path, "w")
+  fh:write("---\nstatus: open\ntitle: [unclosed list\n---\n\nbody\n")
+  fh:close()
+
+  -- one malformed: missing required fields (decode OK but schema fails)
+  local missing_path = td .. "/open/2026-05-26-missing-fields.md"
+  local fh2 = io.open(missing_path, "w")
+  fh2:write("---\ntitle: No status or id\n---\n\nbody\n")
+  fh2:close()
+
+  -- one malformed under archived/YYYY/MM/ tree
+  vim.fn.mkdir(td .. "/archived/2026/05", "p")
+  local arch_path = td .. "/archived/2026/05/2026-05-01-bad-archived.md"
+  local fh3 = io.open(arch_path, "w")
+  fh3:write("not a frontmatter file at all\n")
+  fh3:close()
+
+  local result = todo.scan()
+  ok("scan returns table with tasks + malformed keys",
+    type(result) == "table"
+      and type(result.tasks) == "table"
+      and type(result.malformed) == "table")
+  ok("scan: tasks contains the good entry (and only valid ones)",
+    #result.tasks == 1 and result.tasks[1].id == good_id,
+    "got " .. tostring(#result.tasks) .. " tasks")
+  ok("scan: malformed contains all three broken files",
+    #result.malformed == 3,
+    "got " .. tostring(#result.malformed))
+
+  -- entry shape: file_path, bucket, filename, err
+  local saw_open, saw_archived = 0, 0
+  for _, m in ipairs(result.malformed) do
+    ok("malformed entry has file_path",
+      type(m.file_path) == "string" and m.file_path ~= "")
+    ok("malformed entry has bucket",
+      type(m.bucket) == "string" and m.bucket ~= "")
+    ok("malformed entry has filename",
+      type(m.filename) == "string" and m.filename:match("%.md$") ~= nil)
+    ok("malformed entry has err",
+      type(m.err) == "string" and m.err ~= "")
+    if m.bucket == "open" then saw_open = saw_open + 1 end
+    if m.bucket == "archived" then saw_archived = saw_archived + 1 end
+  end
+  ok("scan: open bucket malformed counted", saw_open == 2,
+    "got " .. saw_open)
+  ok("scan: archived bucket malformed counted", saw_archived == 1,
+    "got " .. saw_archived)
+
+  -- M.list() unaffected: must still skip malformed silently (back-compat)
+  local listed = todo.list()
+  ok("list() unchanged: still skips malformed silently",
+    #listed == 1 and listed[1].id == good_id,
+    "got " .. tostring(#listed))
+
+  -- scan with empty/non-existent todo dir
+  vim.fn.delete(td, "rf")
+  local empty = todo.scan()
+  ok("scan on missing todo_dir returns empty {tasks, malformed}",
+    type(empty) == "table"
+      and #empty.tasks == 0
+      and #empty.malformed == 0)
+
+  worktree.set_workspace_root(nil)
+  cleanup()
+end)()
+
 -- ─────────────────────── 59. todo.status / archive — lifecycle (ADR §3.2) ─
 print("\n[59] todo.status / archive — transitions + lifecycle timestamps")
 ;(function()

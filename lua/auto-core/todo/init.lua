@@ -460,6 +460,138 @@ function M.list(opts)
   return out
 end
 
+-- ─── public: scan ─────────────────────────────────────────────
+
+---Walk every `.md` file under the resolved todo dir and partition
+---into validated tasks + malformed entries. Where `M.list()` quietly
+---skips files that fail decode or schema validation (correct
+---behavior for consumers that just want "the data"), `M.scan()`
+---surfaces those files so a UI can RENDER them with an error
+---indicator — otherwise the task silently disappears from the
+---panel and the user has no way to know it's broken.
+---
+---Return shape:
+---
+---  {
+---    tasks     = <table[]>,      -- same shape as M.list() result
+---    malformed = <table[]>,      -- one entry per file that didn't
+---                                 -- parse / validate
+---  }
+---
+---Each malformed entry:
+---
+---  {
+---    file_path = "/abs/path/.../<id>.md",
+---    bucket    = "open" | "deferred" | "completed" | "archived",
+---    filename  = "<id>.md",   -- basename, for UI display when the
+---                              -- file's own id field is unreliable
+---    err       = "<short error string>",  -- whichever stage failed
+---  }
+---
+---Ordering: tasks come back in the same canonical order as M.list();
+---malformed entries are returned in the order encountered during
+---the directory walk (bucket-prioritised + lexicographic by
+---filename within each bucket).
+---@return { tasks: table[], malformed: table[] }
+function M.scan()
+  local td  = M._todo_dir()
+  local tasks_out     = {}
+  local malformed_out = {}
+
+  if not fs_path.is_dir(td) then
+    return { tasks = tasks_out, malformed = malformed_out }
+  end
+
+  ---@param file_path string
+  ---@param bucket string
+  local function load(file_path, bucket)
+    local text, read_err = read_file(file_path)
+    if not text then
+      malformed_out[#malformed_out + 1] = {
+        file_path = file_path,
+        bucket    = bucket,
+        filename  = fs_path.basename(file_path),
+        err       = "read: " .. tostring(read_err or "(unknown)"),
+      }
+      return
+    end
+    local dec = md.decode(text)
+    if not dec.ok then
+      malformed_out[#malformed_out + 1] = {
+        file_path = file_path,
+        bucket    = bucket,
+        filename  = fs_path.basename(file_path),
+        err       = tostring(dec.err or "md.decode failed"),
+      }
+      return
+    end
+    local task = dec.value
+    if type(task) ~= "table" then
+      malformed_out[#malformed_out + 1] = {
+        file_path = file_path,
+        bucket    = bucket,
+        filename  = fs_path.basename(file_path),
+        err       = "md.decode returned non-table value",
+      }
+      return
+    end
+    local v = schema.validate(task)
+    if not v.ok then
+      malformed_out[#malformed_out + 1] = {
+        file_path = file_path,
+        bucket    = bucket,
+        filename  = fs_path.basename(file_path),
+        err       = "schema: " .. tostring(v.err or "(unknown)"),
+      }
+      return
+    end
+    tasks_out[#tasks_out + 1] = task
+  end
+
+  local function scan_flat(bucket)
+    local b_dir = fs_path.join(td, bucket)
+    if not fs_path.is_dir(b_dir) then return end
+    local files = vim.fn.readdir(b_dir) or {}
+    table.sort(files)
+    for _, f in ipairs(files) do
+      if f:match("%.md$") then
+        load(fs_path.join(b_dir, f), bucket)
+      end
+    end
+  end
+
+  local function scan_archived()
+    local a_dir = fs_path.join(td, "archived")
+    if not fs_path.is_dir(a_dir) then return end
+    local years = vim.fn.readdir(a_dir) or {}
+    table.sort(years)
+    for _, y in ipairs(years) do
+      local y_dir = fs_path.join(a_dir, y)
+      if fs_path.is_dir(y_dir) then
+        local months = vim.fn.readdir(y_dir) or {}
+        table.sort(months)
+        for _, m in ipairs(months) do
+          local m_dir = fs_path.join(y_dir, m)
+          local files = vim.fn.readdir(m_dir) or {}
+          table.sort(files)
+          for _, f in ipairs(files) do
+            if f:match("%.md$") then
+              load(fs_path.join(m_dir, f), "archived")
+            end
+          end
+        end
+      end
+    end
+  end
+
+  scan_flat("open")
+  scan_flat("deferred")
+  scan_flat("completed")
+  scan_archived()
+
+  return { tasks = tasks_out, malformed = malformed_out }
+end
+
 -- ─── public: update ───────────────────────────────────────────
 
 ---Update one or more content fields on an existing task. `patch` may

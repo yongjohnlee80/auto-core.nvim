@@ -10,6 +10,46 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.38] — 2026-05-26 — `auto-core.todo.scan()` — surface malformed files
+
+Adds a second read API to the `auto-core.todo` subsystem that
+partitions the bucket tree into validated tasks AND files that
+fail to parse or validate.
+
+**Motivating bug**: a single broken save (corrupt YAML
+frontmatter, missing required field, accidentally truncated
+file) makes the task DISAPPEAR from a consuming panel UI with
+no indicator. `M.list()` and the `M.refresh()` scanner both
+silently skip such files — which is correct for "give me the
+validated dataset", but exactly wrong for a panel-style view
+where the user needs to know the file exists and is broken so
+they can navigate to fix it.
+
+**Surface added**:
+
+```lua
+local r = require("auto-core.todo").scan()
+-- r.tasks     : table[]  -- same shape as list() result
+-- r.malformed : table[]  -- one per file that failed
+--   each entry: { file_path, bucket, filename, err }
+```
+
+`M.list()` is **byte-identical** to v0.1.37 — back-compat
+preserved. Consumers that want the silent-skip semantics
+(refresh's reference-validation pass, anything that "just
+wants the data") keep calling `list()`. Consumers that need to
+surface broken files in a UI call `scan()`. First downstream
+adopter is auto-finder v0.2.38's todos panel.
+
+**Tests**: smoke section [58b] adds 17 assertions covering
+malformed YAML, schema-failing payloads, malformed files under
+the `archived/YYYY/MM/` tree, bucket attribution on entries,
+entry shape, list/scan divergence, and missing-dir safety.
+
+Strictly additive; `api_version` stays at `0.1`. Consumers
+pinning `version = "^0.1.0"` pick up `scan()` on
+`:Lazy update`.
+
 ## [v0.1.37] — 2026-05-26 — `auto-core.todo` refresh: fix KB-root resolver
 
 Bugfix in the reference-validation pass that ships with the
