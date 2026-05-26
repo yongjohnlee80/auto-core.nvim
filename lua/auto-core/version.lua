@@ -579,6 +579,46 @@ return {
   -- 17 assertions covering: bucket assignment, entry shape,
   -- list/scan divergence, missing-dir safety. Strictly additive;
   -- `api_version` stays at `0.1`.
-  version     = "0.1.38",
+  -- v0.1.39 (2026-05-26): tolerant-reader scalar→list coercion for
+  -- the three list-of-string frontmatter fields (`tags`, `adr`,
+  -- `blocked`) PLUS educational error messages for genuine
+  -- type mismatches.
+  --
+  -- Motivating frustration: a human writing ONE ADR reference
+  -- naturally types
+  --     adr: shared/adrs/0031-foo.md
+  -- not
+  --     adr:
+  --       - shared/adrs/0031-foo.md
+  -- Pre-v0.1.39 this caused the validator to iterate the scalar
+  -- character-by-character (since string is sequence-able in Lua),
+  -- producing bogus `errors[]: not-found` rows, or — post-v0.1.38 —
+  -- routed the task into the panel's malformed section with the
+  -- terse `expected list of strings, got string` message. Neither
+  -- told the user how to repair the file.
+  --
+  -- Two layered changes:
+  --   1. `lua/auto-core/todo/md.lua` — after YAML decode but
+  --      before the schema sees the table, any NON-EMPTY scalar
+  --      string in `tags` / `adr` / `blocked` is wrapped into a
+  --      1-element list. The next M.encode normalizes it to the
+  --      canonical list form on disk. Empty strings are NOT
+  --      coerced (`adr: ''` doesn't silently create a `{ "" }`
+  --      bogus entry). Numbers, booleans, mappings flow through
+  --      and hit step 2.
+  --   2. `lua/auto-core/todo/schema.lua` `is_string_list` — the
+  --      three failure-mode messages (wrong outer type, mapping
+  --      not sequence, non-string item) now each include a
+  --      multi-line YAML list-form hint so a genuinely-broken
+  --      value tells the user EXACTLY how to repair the file
+  --      (with copy-pasteable indented `- entry` snippet).
+  --
+  -- Section [58a] adds 7 assertions for coercion + round-trip +
+  -- the empty-string non-coercion invariant; [58c] adds 8
+  -- assertions for the educational error messages. Strictly
+  -- additive — schema v1 unchanged, file format unchanged,
+  -- existing list-form files round-trip byte-identical.
+  -- `api_version` stays at `0.1`.
+  version     = "0.1.39",
   api_version = "0.1",
 }

@@ -6602,6 +6602,127 @@ print("\n[58] todo — add / get / list / update / remove")
   cleanup()
 end)()
 
+-- ─────────────────────── 58a. todo.md — tolerant scalar→list coercion ─────
+print("\n[58a] todo.md — scalar→list coercion for list-of-string fields")
+;(function()
+  local ok_md, md = pcall(require, "auto-core.todo.md")
+  if not ok_md then return end
+
+  local src_adr = table.concat({
+    "---",
+    "id: 2026-05-26-coerce-adr",
+    "version: 1",
+    "status: open",
+    "title: Coerce scalar adr",
+    "description: ''",
+    "created: 2026-05-26T00:00:00Z",
+    "updated: 2026-05-26T00:00:00Z",
+    "status_changed: 2026-05-26T00:00:00Z",
+    "adr: shared/adrs/0031-foo.md",
+    "---",
+    "",
+    "# Coerce scalar adr",
+    "",
+  }, "\n")
+  local r = md.decode(src_adr)
+  ok("md.decode accepts scalar adr without error", r.ok, tostring(r.err))
+  ok("scalar adr coerced into list",
+    r.value and type(r.value.adr) == "table",
+    "got type " .. type(r.value and r.value.adr))
+  ok("coerced adr has length 1",
+    r.value and #r.value.adr == 1,
+    "got " .. tostring(r.value and #r.value.adr))
+  ok("coerced adr[1] preserves the original string value",
+    r.value and r.value.adr[1] == "shared/adrs/0031-foo.md",
+    "got " .. tostring(r.value and r.value.adr[1]))
+
+  local src_blocked = src_adr
+    :gsub("adr: shared/adrs/0031%-foo%.md", "blocked: 2026-01-01-other")
+  local r2 = md.decode(src_blocked)
+  ok("scalar blocked coerced into 1-element list",
+    r2.ok and type(r2.value.blocked) == "table" and #r2.value.blocked == 1
+      and r2.value.blocked[1] == "2026-01-01-other")
+
+  local src_tags = src_adr
+    :gsub("adr: shared/adrs/0031%-foo%.md", "tags: imported")
+  local r3 = md.decode(src_tags)
+  ok("scalar tags coerced into 1-element list",
+    r3.ok and type(r3.value.tags) == "table" and #r3.value.tags == 1
+      and r3.value.tags[1] == "imported")
+
+  local src_list = table.concat({
+    "---",
+    "id: 2026-05-26-already-list",
+    "version: 1",
+    "status: open",
+    "title: Already a list",
+    "description: ''",
+    "created: 2026-05-26T00:00:00Z",
+    "updated: 2026-05-26T00:00:00Z",
+    "status_changed: 2026-05-26T00:00:00Z",
+    "adr:",
+    "  - shared/adrs/0031-foo.md",
+    "  - shared/adrs/0032-bar.md",
+    "---",
+    "",
+  }, "\n")
+  local r4 = md.decode(src_list)
+  ok("list form still passes through unchanged",
+    r4.ok and #r4.value.adr == 2
+      and r4.value.adr[1] == "shared/adrs/0031-foo.md"
+      and r4.value.adr[2] == "shared/adrs/0032-bar.md")
+
+  -- Empty-string scalar must NOT coerce into { "" }.
+  local src_empty = src_adr:gsub("adr: shared/adrs/0031%-foo%.md", "adr: ''")
+  local r5 = md.decode(src_empty)
+  ok("empty-string scalar is not coerced into {\"\"}",
+    r5.ok and (r5.value.adr == nil
+      or r5.value.adr == ""
+      or (type(r5.value.adr) == "table" and #r5.value.adr == 0)))
+end)()
+
+-- ─────────────────────── 58c. todo.schema — educational list error ─────────
+print("\n[58c] todo.schema — educational error messages for list fields")
+;(function()
+  local ok_schema, schema = pcall(require, "auto-core.todo.schema")
+  if not ok_schema then return end
+
+  local task_num = schema.blank({
+    id    = "2026-05-26-bad",
+    title = "bad",
+    adr   = 42,
+  })
+  local v = schema.validate(task_num)
+  ok("number in list slot is rejected", not v.ok)
+  ok("error field names the offending key", v.field == "adr",
+    "got " .. tostring(v.field))
+  ok("error mentions the YAML list form as a hint",
+    v.err and v.err:find("YAML list form", 1, true) ~= nil,
+    "got: " .. tostring(v.err))
+
+  local task_map = schema.blank({
+    id      = "2026-05-26-bad2",
+    title   = "bad2",
+    blocked = { not_a_seq = "x" },
+  })
+  local v2 = schema.validate(task_map)
+  ok("mapping in list slot is rejected", not v2.ok)
+  ok("mapping-error message also includes the list-form hint",
+    v2.err and v2.err:find("YAML list form", 1, true) ~= nil,
+    "got: " .. tostring(v2.err))
+
+  local task_mixed = schema.blank({
+    id    = "2026-05-26-bad3",
+    title = "bad3",
+    tags  = { "ok", 99 },
+  })
+  local v3 = schema.validate(task_mixed)
+  ok("list with non-string item is rejected", not v3.ok)
+  ok("item-error message also includes the list-form hint",
+    v3.err and v3.err:find("YAML list form", 1, true) ~= nil,
+    "got: " .. tostring(v3.err))
+end)()
+
 -- ─────────────────────── 58b. todo.scan — malformed surfacing ──────────────
 print("\n[58b] todo.scan — partition tasks vs malformed files")
 ;(function()

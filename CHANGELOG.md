@@ -10,6 +10,56 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.39] — 2026-05-26 — `auto-core.todo` tolerant scalar→list coercion
+
+A human writing **one** ADR reference naturally types
+
+```yaml
+adr: shared/adrs/0031-foo.md
+```
+
+…not
+
+```yaml
+adr:
+  - shared/adrs/0031-foo.md
+```
+
+Pre-v0.1.39, that scalar form triggered:
+
+- **Before v0.1.38**: the validator iterated the scalar string
+  character-by-character (Lua sequences are string-indexable),
+  so the task rendered with bogus `errors[]: not-found` per
+  character.
+- **v0.1.38**: routed the task into the panel's new Malformed
+  section with the terse `expected list of strings, got string`
+  message. Better — but still no hint on how to repair.
+
+This release fixes both ends:
+
+**1. `lua/auto-core/todo/md.lua` decode pass** — after YAML
+frontmatter decode, any **non-empty scalar string** in `tags`,
+`adr`, or `blocked` is wrapped into a 1-element table. The
+next `M.encode` normalizes it to the canonical list form on
+disk. Empty strings are NOT coerced (`adr: ''` does not
+silently create a `{ "" }` bogus entry). Numbers, booleans,
+mappings — intentionally not coerced; intent can't be guessed.
+
+**2. `lua/auto-core/todo/schema.lua` `is_string_list`** — the
+three failure-mode messages (wrong outer type, mapping not
+sequence, non-string item) now each include a multi-line YAML
+list-form hint with a copy-pasteable indented snippet so a
+genuinely-broken value tells the user EXACTLY how to repair
+the file.
+
+**Tests**: smoke `[58a]` adds 7 assertions covering coercion,
+list round-trip, and the empty-string non-coercion invariant.
+`[58c]` adds 8 assertions verifying the educational error
+messages.
+
+Strictly additive — schema v1 unchanged, file format unchanged,
+existing list-form files round-trip byte-identical.
+
 ## [v0.1.38] — 2026-05-26 — `auto-core.todo.scan()` — surface malformed files
 
 Adds a second read API to the `auto-core.todo` subsystem that

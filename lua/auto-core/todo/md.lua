@@ -149,6 +149,30 @@ function M.decode(src)
   -- description is required but may be empty).
   task.description = clean_body(body or "")
 
+  -- v0.1.39: tolerant-reader coercion for list-of-string fields.
+  -- The schema requires `tags`, `adr`, and `blocked` to be YAML
+  -- sequences (`- item`), but a human writing one entry naturally
+  -- types it as a scalar:
+  --
+  --     adr: shared/adrs/0031-foo.md
+  --
+  -- Pre-v0.1.39 this caused the task to render with `errors[]: not-
+  -- found` (validator iterated the string character by character) or
+  -- — post-v0.1.38 — disappear into the panel's malformed section
+  -- with a cryptic message. Neither tells the user "wrap it in `-`".
+  -- We bridge the gap on read: any non-empty scalar string in one of
+  -- these slots is wrapped into a 1-element list. The next write
+  -- (via M.encode) will normalize it to the canonical list form.
+  -- Genuinely-broken values (numbers, booleans, mappings) flow
+  -- through unchanged and hit the schema's improved error message.
+  local LIST_FIELDS = { "tags", "adr", "blocked" }
+  for _, k in ipairs(LIST_FIELDS) do
+    local v = task[k]
+    if type(v) == "string" and v ~= "" then
+      task[k] = { v }
+    end
+  end
+
   return { ok = true, value = task }
 end
 

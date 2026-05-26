@@ -152,22 +152,47 @@ end
 
 ---Sequence of strings. Empty table is allowed (but the writer omits
 ---empty list-fields entirely; this validator accepts either form).
+---
+---Educational error messages (v0.1.39): tolerant-reader coercion in
+---md.lua already wraps a scalar STRING into a 1-element list, so a
+---bare string never reaches this validator. The remaining failure
+---modes are numbers, booleans, or mappings — none of which can be
+---auto-coerced without guessing intent. The error string includes
+---the canonical YAML list form as a hint so the user knows how to
+---repair the file.
 ---@param v any
 ---@return boolean ok, string? err
 local function is_string_list(v)
   if v == nil then return true end
+
+  local LIST_HINT =
+    " — use the YAML list form, one entry per line:\n"
+    .. "    field:\n"
+    .. "      - first-entry\n"
+    .. "      - second-entry\n"
+    .. "  (a single entry is fine — just one `- ` line)"
+
   if type(v) ~= "table" then
-    return false, "expected list of strings, got " .. type(v)
+    return false,
+      "expected list of strings, got " .. type(v) .. " (`"
+        .. tostring(v) .. "`)" .. LIST_HINT
   end
+
   -- Reject mappings (non-integer keys) up front.
   for k in pairs(v) do
     if type(k) ~= "number" then
-      return false, "expected list (integer-keyed), got mapping (key " .. tostring(k) .. ")"
+      return false,
+        "expected list (integer-keyed sequence), got mapping with key '"
+          .. tostring(k) .. "'" .. LIST_HINT
     end
   end
+
   for i, item in ipairs(v) do
     if type(item) ~= "string" then
-      return false, "list item [" .. i .. "] is " .. type(item) .. ", expected string"
+      return false,
+        "list item [" .. i .. "] is " .. type(item)
+          .. " (`" .. tostring(item) .. "`), expected string"
+          .. LIST_HINT
     end
   end
   return true
