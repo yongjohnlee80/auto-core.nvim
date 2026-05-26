@@ -6881,14 +6881,26 @@ print("\n[61] todo.refresh — reference validation + errors[] stability")
   local td = todo._todo_dir()
 
   -- Set up a fake KB so we can test adr/review path validation.
+  -- v0.1.37: also save+restore AUTO_AGENTS_KB_ROOT — the user's
+  -- ambient session may have it set (per the auto-agents KB
+  -- convention) and the post-v0.1.37 resolver prefers ROOT over
+  -- WRITE. Without saving + nulling ROOT here, the ambient real
+  -- KB root would win and the test fixture's tempdir would be
+  -- ignored.
   local kb_dir = vim.fn.tempname()
   vim.fn.mkdir(kb_dir, "p")
   vim.fn.mkdir(kb_dir .. "/shared/adrs", "p")
   vim.fn.writefile({ "# real adr" }, kb_dir .. "/shared/adrs/0099-real.md")
+  local saved_kb_root  = vim.env.AUTO_AGENTS_KB_ROOT
+  local saved_kb_read  = vim.env.AUTO_AGENTS_KB_READ
   local saved_kb_write = vim.env.AUTO_AGENTS_KB_WRITE
-  vim.env.AUTO_AGENTS_KB_WRITE = kb_dir
+  vim.env.AUTO_AGENTS_KB_ROOT  = kb_dir
+  vim.env.AUTO_AGENTS_KB_READ  = nil
+  vim.env.AUTO_AGENTS_KB_WRITE = nil
 
   local function cleanup()
+    vim.env.AUTO_AGENTS_KB_ROOT  = saved_kb_root
+    vim.env.AUTO_AGENTS_KB_READ  = saved_kb_read
     vim.env.AUTO_AGENTS_KB_WRITE = saved_kb_write
     vim.fn.delete(tmp_root, "rf")
     vim.fn.delete(kb_dir, "rf")
@@ -7012,6 +7024,70 @@ print("\n[61] todo.refresh — reference validation + errors[] stability")
   ok("multi errors: each broken ref produces one entry (2 adr + 1 review + 2 blocked = 5)",
     t_multi and t_multi.errors and #t_multi.errors == 5,
     t_multi and ("got " .. #t_multi.errors .. " entries"))
+
+  -- ── v0.1.37: KB-root resolver prefers AUTO_AGENTS_KB_ROOT ────
+  -- The original resolver order was WRITE > READ > ROOT, which
+  -- broke real-world env shapes where ROOT is the KB root and
+  -- WRITE points at a sub-directory (e.g. `<kb>/shared/`). Joining
+  -- a `shared/...`-rooted adr path onto KB_WRITE produced
+  -- `<kb>/shared/shared/...` (duplicated segment) and reported
+  -- not-found. Lock the new order:
+  --   1. AUTO_AGENTS_KB_ROOT  2. AUTO_AGENTS_KB_READ[0]  3. AUTO_AGENTS_KB_WRITE
+  do
+    local saved_root  = vim.env.AUTO_AGENTS_KB_ROOT
+    local saved_read  = vim.env.AUTO_AGENTS_KB_READ
+    local saved_write = vim.env.AUTO_AGENTS_KB_WRITE
+
+    -- Realistic shape: ROOT is the kb dir, WRITE is `<kb>/shared`,
+    -- READ is colon-separated (we'll only use the WRITE entry for
+    -- the test, but include READ in the env to verify ROOT still
+    -- wins).
+    vim.env.AUTO_AGENTS_KB_ROOT  = kb_dir
+    vim.env.AUTO_AGENTS_KB_WRITE = kb_dir .. "/shared"
+    vim.env.AUTO_AGENTS_KB_READ  = kb_dir .. "/shared:" .. kb_dir .. "/agents"
+
+    local id_root = "2026-05-25-kb-root-resolver"
+    todo.add({
+      id    = id_root,
+      title = "KB-root resolver test",
+      adr   = { "shared/adrs/0099-real.md" },
+    })
+    todo.refresh()
+    local t_root = todo.get(id_root)
+    ok("KB-root resolver: ROOT preferred over WRITE — adr resolves cleanly",
+      t_root and (t_root.errors == nil or #t_root.errors == 0),
+      t_root and vim.inspect(t_root.errors))
+
+    -- Now unset ROOT and confirm the fallback chain: READ wins.
+    -- (kb_dir .. "/shared" is the first READ entry; `shared/adrs/...`
+    -- joined to `<kb>/shared` again produces the duplicated artifact
+    -- — so we EXPECT a not-found error this time, proving READ is
+    -- the fallback path and that the bug pattern is well-defined.)
+    vim.env.AUTO_AGENTS_KB_ROOT  = nil
+    todo.update(id_root, { adr = { "shared/adrs/0099-real.md" } })
+    -- update() doesn't run refresh; trigger explicitly.
+    todo.refresh()
+    local t_fallback = todo.get(id_root)
+    ok("KB-root resolver: with ROOT unset, READ[0] is the next fallback",
+      t_fallback and type(t_fallback.errors) == "table" and #t_fallback.errors == 1,
+      t_fallback and vim.inspect(t_fallback.errors))
+
+    -- Finally: only WRITE set (legacy / minimal shape) — should
+    -- still work as a last-resort fallback.
+    vim.env.AUTO_AGENTS_KB_READ  = nil
+    -- Point WRITE at the actual kb root for this test so the adr
+    -- path resolves cleanly via the last-resort branch.
+    vim.env.AUTO_AGENTS_KB_WRITE = kb_dir
+    todo.refresh()
+    local t_write = todo.get(id_root)
+    ok("KB-root resolver: WRITE-only setup still works as last-resort fallback",
+      t_write and (t_write.errors == nil or #t_write.errors == 0),
+      t_write and vim.inspect(t_write.errors))
+
+    vim.env.AUTO_AGENTS_KB_ROOT  = saved_root
+    vim.env.AUTO_AGENTS_KB_READ  = saved_read
+    vim.env.AUTO_AGENTS_KB_WRITE = saved_write
+  end
 
   cleanup()
   worktree.set_workspace_root(nil)

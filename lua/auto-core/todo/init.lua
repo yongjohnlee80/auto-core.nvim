@@ -619,15 +619,30 @@ end
 ---are not validated (we can't check what we can't find).
 ---@return string?
 local function kb_root()
-  local w = vim.env.AUTO_AGENTS_KB_WRITE
-  if w and w ~= "" then return fs_path.normalize(w) end
+  -- v0.1.37: AUTO_AGENTS_KB_ROOT is the KB-ROOT env var per the
+  -- auto-agents KB convention; AUTO_AGENTS_KB_READ + KB_WRITE are
+  -- scoped sub-directories (e.g. KB_WRITE may point at
+  -- `<kb>/shared/` or `<kb>/agents/<name>/`). The original order
+  -- preferred KB_WRITE first, which broke validation of
+  -- `shared/...`-rooted adr / review paths in real sessions: the
+  -- join would produce `<kb>/shared/shared/...` (duplicated
+  -- segment) and report not-found. Resolution order is now:
+  --   1. AUTO_AGENTS_KB_ROOT     — authoritative root, when set
+  --   2. AUTO_AGENTS_KB_READ[0]  — first colon-separated entry
+  --                                 (conventionally the KB root)
+  --   3. AUTO_AGENTS_KB_WRITE    — last-resort fallback for
+  --                                 setups that only set WRITE
+  -- Smoke section [61] now exercises the realistic env shape
+  -- (ROOT + WRITE both set, WRITE under ROOT) to lock the order.
+  local root = vim.env.AUTO_AGENTS_KB_ROOT
+  if root and root ~= "" then return fs_path.normalize(root) end
   local r = vim.env.AUTO_AGENTS_KB_READ
   if r and r ~= "" then
     local first = r:match("^([^:]+)")
     if first and first ~= "" then return fs_path.normalize(first) end
   end
-  local legacy = vim.env.AUTO_AGENTS_KB_ROOT
-  if legacy and legacy ~= "" then return fs_path.normalize(legacy) end
+  local w = vim.env.AUTO_AGENTS_KB_WRITE
+  if w and w ~= "" then return fs_path.normalize(w) end
   return nil
 end
 

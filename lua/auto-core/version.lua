@@ -549,6 +549,19 @@ return {
   -- `auto-core.todo`, new state namespace `todo`, two new event
   -- topics; nothing in events/state/ui/fs/git/tasks/log/health
   -- changes shape).
-  version     = "0.1.36",
+  -- v0.1.37 (2026-05-26): fix KB-root resolver for the
+  -- auto-core.todo reference-validation pass. The resolver in
+  -- `lua/auto-core/todo/init.lua` previously preferred
+  -- `AUTO_AGENTS_KB_WRITE` over `AUTO_AGENTS_KB_ROOT`, which broke
+  -- validation of `shared/...`-rooted `adr:` / `review:` paths
+  -- whenever KB_WRITE pointed at a sub-directory of the KB (per
+  -- the auto-agents KB convention: WRITE is conventionally
+  -- `<kb>/shared/` or `<kb>/agents/<name>/`, never the root
+  -- itself). The join produced `<kb>/shared/shared/...`
+  -- (duplicated segment) and reported every adr ref as
+  -- not-found. Flipped to ROOT > READ[0] > WRITE; tests/[61]
+  -- locks the new order against a realistic env shape (ROOT +
+  -- WRITE both set, WRITE under ROOT). No API surface change.
+  version     = "0.1.37",
   api_version = "0.1",
 }

@@ -10,6 +10,56 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.37] — 2026-05-26 — `auto-core.todo` refresh: fix KB-root resolver
+
+Bugfix in the reference-validation pass that ships with the
+v0.1.36 `auto-core.todo` subsystem.
+
+**Symptom**: in real-world auto-agents sessions where the KB env
+vars follow the canonical shape:
+
+```
+AUTO_AGENTS_KB_ROOT  = /Users/.../kb            ← the actual KB root
+AUTO_AGENTS_KB_WRITE = /Users/.../kb/shared     ← a sub-directory
+```
+
+…the validator would flag every `adr:` / `review:` ref that
+starts with `shared/...` as `not-found`. The error message gave
+it away: *"does not exist under `/Users/.../kb/shared`"* — the
+resolver was returning the WRITE sub-directory as the KB root,
+then joining `shared/adrs/0099-foo.md` onto it to produce
+`<kb>/shared/shared/adrs/0099-foo.md` (duplicated `shared/`
+segment), which obviously didn't exist.
+
+**Root cause**: `lua/auto-core/todo/init.lua`'s `kb_root()`
+preferred `AUTO_AGENTS_KB_WRITE` first in its resolution chain.
+That's the wrong env var to pull the root from — per the KB
+convention, WRITE is a sub-directory under the root (typically
+`<kb>/shared/` for the shared write target or `<kb>/agents/<name>/`
+for per-agent scratch).
+
+**Fix**: flipped the resolution order to:
+
+1. `AUTO_AGENTS_KB_ROOT`   — authoritative root, when set
+2. `AUTO_AGENTS_KB_READ[0]` — first colon-separated entry
+                              (conventionally includes the KB root)
+3. `AUTO_AGENTS_KB_WRITE`  — last-resort fallback for setups
+                              that only set WRITE
+
+**Why this slipped through v0.1.36's smoke**: section `[61]`'s
+KB fixture only set `AUTO_AGENTS_KB_WRITE` (to a tempdir laid out
+as if it were a kb root). The bug only manifested when ROOT and
+WRITE were both set and WRITE pointed at a subdir of ROOT — the
+realistic env shape that v0.1.37 now tests against in section
+`[61]`'s new "KB-root resolver" sub-block.
+
+No API surface change. `api_version` stays at `0.1`. Consumers
+pinning `^0.1.0` pick this up automatically; no consumer code
+changes are needed. Existing `errors[]` entries on tasks affected
+by the bug will clear automatically on the next `refresh()` run
+once the fix is loaded (the stable-detected-per-{field,code}
+logic correctly drops the error since it no longer reproduces).
+
 ## [v0.1.36] — 2026-05-26 — `auto-core.todo`: per-project task store (ADR-0031)
 
 **Adds `auto-core.todo`** — a per-project task store that lands the
