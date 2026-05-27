@@ -378,4 +378,75 @@ function M.resolve_path(input)
   return { ok = true, path = input, unresolved = false }
 end
 
+-- ─── public: symbolize_path (inverse of resolve_path) ──────────
+
+local fs_path = require("auto-core.fs.path")
+
+---Candidate symbolic roots for `symbolize_path`, in semantic
+---preference order (ties broken by this order; longest-prefix
+---still wins for absolute inputs). `$CWD` is deliberately
+---excluded — it's volatile (changes per session), so storing or
+---displaying a `$CWD/...` ref would be a portability footgun.
+---@return { name: string, value: string }[]
+local function symbolic_root_candidates()
+  local out = {}
+  local function add(name, value)
+    if type(value) == "string" and value ~= "" then
+      out[#out + 1] = { name = name, value = (value:gsub("/+$", "")) }
+    end
+  end
+  add("KB_ROOT",   M.get("KB_ROOT"))
+  add("WORKSPACE", M.get("WORKSPACE"))
+  for _, e in ipairs(M.list()) do
+    if not e.builtin then add(e.name, e.value) end
+  end
+  add("HOME", M.get("HOME"))
+  return out
+end
+
+---Inverse of `resolve_path`: rewrite an absolute (or bare KB-/WS-
+---relative) path to the portable `$VAR/...` symbolic form. Used
+---by writers that want to STORE a portable ref (todo `adr` /
+---`review` normalization) AND by UIs that want to DISPLAY a
+---short, portable path (the auto-agents diff panel winbar).
+---
+---Rules:
+---  * already-`$VAR` input → returned unchanged.
+---  * absolute / `~` → rewritten to the symbolic root with the
+---    LONGEST matching prefix (most specific wins, e.g.
+---    `$WORKSPACE` beats `$HOME` when the workspace is under
+---    home). Kept absolute only when NO known root contains it.
+---  * bare relative → attached to the first root (semantic order)
+---    whose join exists on disk; left as-is otherwise.
+---@param path string
+---@return string  symbolic form, or the input unchanged
+function M.symbolize_path(path)
+  if type(path) ~= "string" or path == "" then return path end
+  if path:sub(1, 1) == "$" then return path end
+
+  local candidates = symbolic_root_candidates()
+
+  if path:sub(1, 1) == "/" or path:sub(1, 1) == "~" then
+    local abs = vim.fn.expand(path)
+    local best
+    for _, c in ipairs(candidates) do
+      if abs == c.value or abs:sub(1, #c.value + 1) == c.value .. "/" then
+        if not best or #c.value > #best.value then best = c end
+      end
+    end
+    if best then
+      if abs == best.value then return "$" .. best.name end
+      return "$" .. best.name .. abs:sub(#best.value + 1)
+    end
+    return path
+  end
+
+  for _, c in ipairs(candidates) do
+    if fs_path.exists(fs_path.join(c.value, path)) then
+      return "$" .. c.name .. "/" .. path:gsub("^/+", "")
+    end
+  end
+  return path
+end
+
 return M

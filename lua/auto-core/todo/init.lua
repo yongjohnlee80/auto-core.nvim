@@ -261,79 +261,16 @@ end
 
 -- ─── public: add ──────────────────────────────────────────────
 
--- v0.1.46: normalize `adr` / `review` document references to the
--- portable `$VAR/...` symbolic form on write (cross-machine-symbolic
--- -refs convention). Agents (and humans) naturally type a bare
--- relative or an absolute path; either is non-portable and the
--- panel can't resolve a bare relative reliably. We rewrite to:
---   * `$KB_ROOT/<rel>`     when the path lives under the KB root
---   * `$WORKSPACE/<rel>`   when it lives under the workspace root
--- Preference order: KB first (most refs are KB docs), then
--- workspace. Already-symbolic (`$VAR/...`) refs are left untouched.
--- Absolute paths outside every known root are left absolute (last
--- resort — "avoid absolute unless no other choice"). Bare relatives
--- that don't resolve under any root are left as-is so the existing
--- not-found error path still flags them.
----Candidate symbolic roots for ref normalization, in semantic
----preference order (used to break ties + order the bare-relative
----search). `$CWD` is deliberately excluded — it's volatile
----(changes per session) so storing a `$CWD/...` ref would be a
----portability footgun. `$KB_ROOT` and `$WORKSPACE` lead because
----most refs are KB docs or workspace files; user-defined vars
----come next (the user opted into them precisely to make their
----own dirs portable); `$HOME` is the broad catch-all so a doc in
----`~/Documents/...` still beats a bare absolute path.
----@return { name: string, value: string }[]
-local function symbolic_root_candidates()
-  local vars = require("auto-core.todo.vars")
-  local out = {}
-  local function add(name, value)
-    if type(value) == "string" and value ~= "" then
-      out[#out + 1] = { name = name, value = (value:gsub("/+$", "")) }
-    end
-  end
-  add("KB_ROOT",   vars.get("KB_ROOT"))
-  add("WORKSPACE", vars.get("WORKSPACE"))
-  for _, e in ipairs(vars.list()) do
-    if not e.builtin then add(e.name, e.value) end
-  end
-  add("HOME", vars.get("HOME"))
-  return out
-end
-
+-- normalize `adr` / `review` document references to the portable
+-- `$VAR/...` symbolic form on write (cross-machine-symbolic-refs
+-- convention). The symbolization logic itself lives in
+-- `auto-core.todo.vars.symbolize_path` (v0.1.47) so the same rules
+-- back both this writer-side normalization AND display consumers
+-- (the auto-agents diff panel winbar). See that function for the
+-- full rule set: KB_ROOT → WORKSPACE → user vars → HOME, longest
+-- prefix wins; absolute kept only when no known root contains it.
 local function symbolize_ref(p)
-  if type(p) ~= "string" or p == "" then return p end
-  if p:sub(1, 1) == "$" then return p end  -- already symbolic
-
-  local candidates = symbolic_root_candidates()
-
-  if p:sub(1, 1) == "/" or p:sub(1, 1) == "~" then
-    -- Absolute (or ~) — rewrite to the symbolic root with the
-    -- LONGEST matching prefix (most specific wins, e.g. $WORKSPACE
-    -- beats $HOME when the workspace is under home). Keep the path
-    -- absolute only when NO known root contains it.
-    local abs = vim.fn.expand(p)
-    local best
-    for _, c in ipairs(candidates) do
-      if abs == c.value or abs:sub(1, #c.value + 1) == c.value .. "/" then
-        if not best or #c.value > #best.value then best = c end
-      end
-    end
-    if best then
-      if abs == best.value then return "$" .. best.name end
-      return "$" .. best.name .. abs:sub(#best.value + 1)
-    end
-    return p  -- no portable root → absolute is the last resort
-  end
-
-  -- Bare relative — attach the first root (in semantic order) whose
-  -- join actually exists on disk.
-  for _, c in ipairs(candidates) do
-    if fs_path.exists(fs_path.join(c.value, p)) then
-      return "$" .. c.name .. "/" .. p:gsub("^/+", "")
-    end
-  end
-  return p
+  return require("auto-core.todo.vars").symbolize_path(p)
 end
 
 ---Rewrite a task's `adr[]` + `review` reference fields in place to

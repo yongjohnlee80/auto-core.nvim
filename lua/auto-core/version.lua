@@ -740,6 +740,16 @@ return {
   -- normalization that produces schema-valid output (symbolic
   -- refs already validated since v0.1.40). `api_version` stays
   -- at `0.1`.
-  version     = "0.1.46",
+  -- v0.1.47 (2026-05-26): expose `auto-core.todo.vars.symbolize_path`
+  -- — the inverse of `resolve_path`. It rewrites an absolute (or
+  -- bare KB-/WS-relative) path to the portable `$VAR/...` form
+  -- (KB_ROOT → WORKSPACE → user vars → HOME, longest-prefix wins;
+  -- $CWD excluded; absolute kept only when no root matches). The
+  -- v0.1.46 todo `adr`/`review` normalization was a local copy of
+  -- this logic; it now delegates to the shared API so writers
+  -- (todo normalization) and display consumers (auto-agents diff
+  -- panel winbar, v0.2.44+) share one implementation. Strictly
+  -- additive. `api_version` stays at `0.1`.
+  version     = "0.1.47",
   api_version = "0.1",
 }

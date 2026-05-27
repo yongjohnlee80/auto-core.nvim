@@ -7872,6 +7872,22 @@ print("\n[65] todo.vars — variable store + $VAR resolver")
   ok("resolve_path: plain relative passes through unchanged",
     r6.ok and r6.path == "relative/path" and not r6.unresolved)
 
+  -- ── symbolize_path: inverse of resolve_path (v0.1.47) ────────
+  -- KB_ROOT pinned to /tmp/fake-kb-root earlier in this section.
+  ok("symbolize_path: absolute under $KB_ROOT → $KB_ROOT/...",
+    vars.symbolize_path("/tmp/fake-kb-root/shared/adrs/x.md")
+      == "$KB_ROOT/shared/adrs/x.md")
+  ok("symbolize_path: exact root → bare $VAR",
+    vars.symbolize_path("/tmp/fake-kb-root") == "$KB_ROOT")
+  ok("symbolize_path: already-$VAR passes through",
+    vars.symbolize_path("$KB_ROOT/a.md") == "$KB_ROOT/a.md")
+  ok("symbolize_path: path outside all roots kept absolute",
+    vars.symbolize_path("/opt/nowhere/a.md") == "/opt/nowhere/a.md")
+  -- longest-prefix: TARGET=/usr/local/bin set earlier; a deeper
+  -- user var would win, but here just confirm user vars are tried.
+  ok("symbolize_path: absolute under a user var → $VAR/...",
+    vars.symbolize_path("/usr/local/bin/nvim") == "$TARGET/nvim")
+
   -- Cleanup env-vars
   vim.env.AUTO_AGENTS_KB_ROOT  = saved_root
   vim.env.AUTO_AGENTS_KB_READ  = saved_read
