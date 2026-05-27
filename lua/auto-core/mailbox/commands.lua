@@ -123,16 +123,30 @@ function M.get(name)
   return _registry[name]
 end
 
----List all registered command names + owners. The returned table
----is a fresh copy; mutating it does NOT affect the registry.
----@return { name: string, owner: string, description: string? }[]
+---List all registered command names + owners + arg schemas. The
+---returned table is a fresh copy; mutating it does NOT affect the
+---registry. The per-entry `schema` (v0.1.45) makes the command
+---surface self-describing — discovery consumers (`commands_list`)
+---can show callers exactly which args each verb takes, so agents
+---stop guessing and hitting `bad_args`. `schema` is the same
+---shape the verb declared at register time (a `{field = type}`
+---table) or nil when the verb declared none.
+---@return { name: string, owner: string, description: string?, schema: table? }[]
 function M.list()
   local out = {}
   for name, spec in pairs(_registry) do
+    -- Shallow-copy the schema so callers can't mutate the registry's
+    -- copy through the returned table.
+    local schema_copy = nil
+    if type(spec.schema) == "table" then
+      schema_copy = {}
+      for k, v in pairs(spec.schema) do schema_copy[k] = v end
+    end
     out[#out + 1] = {
       name        = name,
       owner       = spec.owner,
       description = spec.description,
+      schema      = schema_copy,
     }
   end
   table.sort(out, function(a, b) return a.name < b.name end)

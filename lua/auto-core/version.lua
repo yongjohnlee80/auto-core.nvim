@@ -704,6 +704,16 @@ return {
   -- (no consecutive dots, no trailing dot). Strictly additive
   -- — every previously-valid name is still valid.
   -- `api_version` stays at `0.1`.
-  version     = "0.1.44",
+  -- v0.1.45 (2026-05-26): `mailbox.commands.list()` now includes
+  -- each command's `schema` (the `{field = type}` arg-shape hint
+  -- declared at register time). Pre-v0.1.45 it returned only
+  -- name/owner/description, so discovery consumers (`commands_list`)
+  -- couldn't tell agents which args a verb takes — agents guessed
+  -- and hit `bad_args`. The schema makes the command surface
+  -- self-describing. Shallow-copied per entry so callers can't
+  -- mutate the registry. Strictly additive — existing consumers
+  -- that read only name/owner/description are unaffected.
+  -- `api_version` stays at `0.1`.
+  version     = "0.1.45",
   api_version = "0.1",
 }
