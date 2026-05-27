@@ -287,9 +287,11 @@ local function normalize_ref_paths(task)
       if np ~= p then task.adr[i] = np; changed = true end
     end
   end
-  if type(task.review) == "string" and task.review ~= "" then
-    local nr = symbolize_ref(task.review)
-    if nr ~= task.review then task.review = nr; changed = true end
+  if type(task.review) == "table" then
+    for i, p in ipairs(task.review) do
+      local np = symbolize_ref(p)
+      if np ~= p then task.review[i] = np; changed = true end
+    end
   end
   return changed
 end
@@ -929,26 +931,31 @@ local function compute_errors(task, td, now)
     end
   end
 
-  -- review — `$VAR/...` substitution (v0.1.40), absolute path, or
-  -- KB-relative.
-  if type(task.review) == "string" and task.review ~= "" then
+  -- review[i] — `$VAR/...` substitution (v0.1.40), absolute path, or
+  -- KB-relative. List-valued since v0.2.x (multi-repo / multi-agent
+  -- tasks carry more than one review doc).
+  if type(task.review) == "table" then
     local vars = require("auto-core.todo.vars")
-    local r = vars.resolve_path(task.review)
-    if r.unresolved then
-      add("review", "unresolved-variable",
-        "variable '$" .. tostring(r.var_name) .. "' is not defined "
-          .. "on this machine — set it in the Vars section or as an "
-          .. "environment variable")
-    else
-      local abs
-      if r.path:sub(1, 1) == "/" then
-        abs = r.path
-      elseif kb then
-        abs = fs_path.join(kb, task.review)
-      end
-      if abs and not fs_path.exists(abs) then
-        add("review", "not-found",
-          "path '" .. task.review .. "' does not exist (resolved: " .. abs .. ")")
+    for i, p in ipairs(task.review) do
+      if type(p) == "string" and p ~= "" then
+        local r = vars.resolve_path(p)
+        if r.unresolved then
+          add("review[" .. (i - 1) .. "]", "unresolved-variable",
+            "variable '$" .. tostring(r.var_name) .. "' is not defined "
+              .. "on this machine — set it in the Vars section or as an "
+              .. "environment variable")
+        else
+          local abs
+          if r.path:sub(1, 1) == "/" then
+            abs = r.path
+          elseif kb then
+            abs = fs_path.join(kb, p)
+          end
+          if abs and not fs_path.exists(abs) then
+            add("review[" .. (i - 1) .. "]", "not-found",
+              "path '" .. p .. "' does not exist (resolved: " .. abs .. ")")
+          end
+        end
       end
     end
   end

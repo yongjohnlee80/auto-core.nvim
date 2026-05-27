@@ -6166,9 +6166,24 @@ print("\n[55] todo.schema — v1 schema validation")
     priority    = "high",
     tags        = { "auto-core", "workflow" },
     adr         = { "shared/adrs/0031-auto-core-per-project-todo-task-system.md" },
+    review      = {
+      "$KB_ROOT/shared/reviews/repo-a.md",
+      "$KB_ROOT/shared/reviews/repo-b.md",
+    },
     blocked     = { "2026-05-20-prereq" },
   })
   ok("validate(full happy task) succeeds", schema.validate(full).ok)
+
+  -- ── review is a string_list (multi-repo / multi-agent reviews) ──
+  ok("validate accepts multi-entry review list",
+    schema.validate(schema.blank({
+      title  = "two reviews",
+      review = { "a.md", "b.md" },
+    })).ok)
+  local bad_review = schema.blank({ title = "bad review", review = { "ok", 7 } })
+  local r_rv = schema.validate(bad_review)
+  ok("validate rejects non-string in review list",
+    (not r_rv.ok) and r_rv.field == "review", r_rv.err)
 
   -- ── required-field absence ───────────────────────────────────
   local missing_id = schema.blank()
@@ -6653,12 +6668,13 @@ print("\n[58d] todo — adr/review refs normalized to $VAR symbolic form on writ
     t1.adr[1] == "$KB_ROOT/shared/adrs/0031-foo.md",
     "got " .. tostring(t1.adr and t1.adr[1]))
 
-  -- 2. Absolute path under workspace → $WORKSPACE/...
-  local id2 = todo.add({ title = "abs ws", review = ws_doc })
+  -- 2. Absolute path under workspace → $WORKSPACE/... (review is a
+  --    string_list since v0.2.x — symbolized per-entry like adr).
+  local id2 = todo.add({ title = "abs ws", review = { ws_doc } })
   local t2 = todo.get(id2)
-  ok("absolute workspace path symbolized to $WORKSPACE/...",
-    t2.review == "$WORKSPACE/docs/spec.md",
-    "got " .. tostring(t2.review))
+  ok("absolute workspace path symbolized to $WORKSPACE/... (review[1])",
+    t2.review[1] == "$WORKSPACE/docs/spec.md",
+    "got " .. tostring(t2.review and t2.review[1]))
 
   -- 3. Bare KB-relative that exists under KB → $KB_ROOT/...
   local id3 = todo.add({ title = "bare rel", adr = { "shared/adrs/0031-foo.md" } })
@@ -6757,6 +6773,16 @@ print("\n[58a] todo.md — scalar→list coercion for list-of-string fields")
   ok("scalar tags coerced into 1-element list",
     r3.ok and type(r3.value.tags) == "table" and #r3.value.tags == 1
       and r3.value.tags[1] == "imported")
+
+  -- review went list-valued in v0.2.x; a legacy scalar `review:` must
+  -- still read as a 1-element list (back-compat with pre-list files).
+  local src_review = src_adr
+    :gsub("adr: shared/adrs/0031%-foo%.md", "review: shared/reviews/x.md")
+  local r_rv = md.decode(src_review)
+  ok("scalar review coerced into 1-element list",
+    r_rv.ok and type(r_rv.value.review) == "table" and #r_rv.value.review == 1
+      and r_rv.value.review[1] == "shared/reviews/x.md",
+    tostring(r_rv.err))
 
   local src_list = table.concat({
     "---",
@@ -7288,11 +7314,11 @@ print("\n[61] todo.refresh — reference validation + errors[] stability")
   -- ── broken review ─────────────────────────────────────────────
   local id_rev = "2026-05-25-bad-review"
   todo.add({ id = id_rev, title = "Bad review",
-    review = "shared/reviews/does-not-exist.md" })
+    review = { "shared/reviews/does-not-exist.md" } })
   todo.refresh()
   local t_rev = todo.get(id_rev)
-  ok("broken review: errors[].field is 'review'",
-    t_rev and t_rev.errors and t_rev.errors[1].field == "review",
+  ok("broken review: errors[].field is 'review[0]'",
+    t_rev and t_rev.errors and t_rev.errors[1].field == "review[0]",
     t_rev and vim.inspect(t_rev.errors))
 
   -- ── broken blocked ────────────────────────────────────────────
@@ -7329,7 +7355,7 @@ print("\n[61] todo.refresh — reference validation + errors[] stability")
     id      = id_multi,
     title   = "Many errors",
     adr     = { "shared/adrs/A-missing.md", "shared/adrs/B-missing.md" },
-    review  = "shared/reviews/C-missing.md",
+    review  = { "shared/reviews/C-missing.md" },
     blocked = { "missing-1", "missing-2" },
   })
   todo.refresh()

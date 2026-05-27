@@ -10,6 +10,34 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.48] — 2026-05-27 — todo `review` frontmatter accepts a list
+
+**Need**: multi-repo / multi-agent tasks routinely carry more than one
+review document, but the todo schema only accepted a single string for
+`review` (whereas `adr` was already a list). This blocked the workflow
+where a big task has one review per repo or per agent.
+
+**Change**: `review` is now a `string_list`, matching `adr`.
+
+- `todo/schema.lua`: `review` kind `string_or_null` → `string_list`.
+- `todo/md.lua`: `review` added to the tolerant-reader `LIST_FIELDS` —
+  a legacy scalar `review: <path>` coerces to a 1-element list on read,
+  and the writer emits the canonical block-list form on next write.
+- `todo/init.lua`: `normalize_ref_paths` and the refresh existence-check
+  iterate `review[]` per-entry (portable `$VAR/...` rewrite + per-entry
+  `review[i]` `not-found` / `unresolved-variable` errors), mirroring the
+  existing `adr[]` handling.
+
+**Back-compat**: existing `review: <string>` files read as 1-element
+lists and are rewritten to list form on the next write. Only a
+*downgrade* (older auto-core reading a list-form `review`) would flag a
+type error. The field-kind widens with read-coercion rather than
+break-shaping existing data, so `api_version` stays at `0.1`.
+
+The consumer-side panel render (list display) ships in auto-finder
+v0.2.47. Smoke `[55]`/`[58a]`/`[58d]` extended; suite green at
+1110 passed, 0 failed.
+
 ## [v0.1.41] — 2026-05-26 — `$KB_ROOT` Lua-API fallback for the parent nvim
 
 **Bug**: in the panel's Vars section, `$KB_ROOT` rendered as

@@ -150,7 +150,7 @@ function M.decode(src)
   task.description = clean_body(body or "")
 
   -- v0.1.39: tolerant-reader coercion for list-of-string fields.
-  -- The schema requires `tags`, `adr`, and `blocked` to be YAML
+  -- The schema requires `tags`, `adr`, `review`, and `blocked` to be YAML
   -- sequences (`- item`), but a human writing one entry naturally
   -- types it as a scalar:
   --
@@ -165,7 +165,7 @@ function M.decode(src)
   -- (via M.encode) will normalize it to the canonical list form.
   -- Genuinely-broken values (numbers, booleans, mappings) flow
   -- through unchanged and hit the schema's improved error message.
-  local LIST_FIELDS = { "tags", "adr", "blocked" }
+  local LIST_FIELDS = { "tags", "adr", "review", "blocked" }
   for _, k in ipairs(LIST_FIELDS) do
     local v = task[k]
     if type(v) == "string" and v ~= "" then

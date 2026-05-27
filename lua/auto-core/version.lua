@@ -750,6 +750,28 @@ return {
   -- (todo normalization) and display consumers (auto-agents diff
   -- panel winbar, v0.2.44+) share one implementation. Strictly
   -- additive. `api_version` stays at `0.1`.
-  version     = "0.1.47",
+  -- v0.1.48 (2026-05-27): todo `review` frontmatter widened from a
+  -- single string to a list (string_list), matching `adr`. Motivating
+  -- need: multi-repo / multi-agent tasks carry more than one review
+  -- doc, but the schema only accepted one. Four changes in the todo
+  -- subsystem:
+  --   - schema.lua: `review` kind `string_or_null` → `string_list`.
+  --   - md.lua: `review` added to the tolerant-reader LIST_FIELDS, so
+  --     a legacy scalar `review: <path>` coerces to a 1-element list on
+  --     read (back-compat) and the writer emits canonical list form on
+  --     next write. yaml.encode already block-emits table values.
+  --   - todo/init.lua: `normalize_ref_paths` + the refresh existence-
+  --     check iterate `review[]` per-entry (portable `$VAR/...`
+  --     rewrite + `review[i]` not-found / unresolved-variable errors),
+  --     mirroring the `adr[]` handling.
+  -- Back-compat: existing `review: <string>` files read as 1-element
+  -- lists; only a DOWNGRADE reading list-form `review` would flag
+  -- errors. Smoke [55]/[58a]/[58d] extended (review list happy/reject,
+  -- scalar→list coercion, per-entry path normalization); suite green
+  -- at 1110 passed, 0 failed. The consumer-side render lands in
+  -- auto-finder v0.2.47. The schema field-kind widens with read
+  -- coercion rather than break-shaping existing data; `api_version`
+  -- stays at `0.1` consistent with the v0.1.x todo additions.
+  version     = "0.1.48",
   api_version = "0.1",
 }

@@ -59,7 +59,7 @@ local FIELDS = {
 
   -- Hand-editable references (paths checked by refresh)
   adr            = { required = false, kind = "string_list" },
-  review         = { required = false, kind = "string_or_null" },
+  review         = { required = false, kind = "string_list" },
   blocked        = { required = false, kind = "string_list" },
 
   -- Auto-managed
