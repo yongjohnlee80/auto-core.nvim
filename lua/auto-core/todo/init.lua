@@ -327,6 +327,18 @@ function M.add(spec)
   if not ok then error("auto-core.todo.add: write failed: " .. tostring(err)) end
 
   pcall(M._upsert_known, td, now)
+
+  -- v0.1.46: announce the mutation so UI consumers re-render. add /
+  -- update / remove previously fired nothing — only status / assign /
+  -- refresh did — so a task created via the API (or the `todos.add`
+  -- mailbox verb) never reached the auto-finder panel until some
+  -- other event triggered a render. `core.todo:changed` closes that
+  -- gap. Payload `{ kind, id }` lets subscribers filter if they care.
+  local ok_ev, events = pcall(require, "auto-core.events")
+  if ok_ev and events and type(events.publish) == "function" then
+    pcall(events.publish, "core.todo:changed", { kind = "add", id = id })
+  end
+
   return id
 end
 
@@ -644,6 +656,13 @@ function M.update(id, patch)
   if render_err then return nil, render_err end
   local ok, err = atomic_write(file, rendered)
   if not ok then return nil, "write: " .. tostring(err) end
+
+  -- v0.1.46: announce the mutation (see M.add for rationale).
+  local ok_ev, events = pcall(require, "auto-core.events")
+  if ok_ev and events and type(events.publish) == "function" then
+    pcall(events.publish, "core.todo:changed", { kind = "update", id = id })
+  end
+
   return task
 end
 
@@ -1366,6 +1385,13 @@ function M.remove(id)
   if ok_log and log and type(log.info) == "function" then
     pcall(log.info, string.format("[auto-core.todo] removed task '%s' (was at %s)", id, file))
   end
+
+  -- v0.1.46: announce the mutation (see M.add for rationale).
+  local ok_ev, events = pcall(require, "auto-core.events")
+  if ok_ev and events and type(events.publish) == "function" then
+    pcall(events.publish, "core.todo:changed", { kind = "remove", id = id })
+  end
+
   return true
 end
 

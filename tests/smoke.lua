@@ -6597,6 +6597,25 @@ print("\n[58] todo — add / get / list / update / remove")
   end
   ok("atomic_write: no .tmp- residue in open/", not tmp_lingering)
 
+  -- ── v0.1.46: add / update / remove publish core.todo:changed ──
+  local events = require("auto-core.events")
+  events._reset_for_tests()
+  local changed = {}
+  events.subscribe("core.todo:changed", function(p) table.insert(changed, p) end)
+
+  local cid = todo.add({ title = "changed-event probe" })
+  ok("add publishes core.todo:changed kind=add",
+    #changed == 1 and changed[1].kind == "add" and changed[1].id == cid,
+    "got: " .. vim.inspect(changed))
+
+  todo.update(cid, { priority = "high" })
+  ok("update publishes core.todo:changed kind=update",
+    #changed == 2 and changed[2].kind == "update" and changed[2].id == cid)
+
+  todo.remove(cid)
+  ok("remove publishes core.todo:changed kind=remove",
+    #changed == 3 and changed[3].kind == "remove" and changed[3].id == cid)
+
   -- ── teardown ────────────────────────────────────────────────
   worktree.set_workspace_root(nil)
   cleanup()
