@@ -714,6 +714,32 @@ return {
   -- mutate the registry. Strictly additive — existing consumers
   -- that read only name/owner/description are unaffected.
   -- `api_version` stays at `0.1`.
-  version     = "0.1.45",
+  -- v0.1.46 (2026-05-26): two todo-handling follow-up fixes,
+  -- bundled.
+  --
+  -- (a) `add` / `update` / `remove` now publish a new
+  --     `core.todo:changed` event (payload `{ kind, id }`).
+  --     Pre-v0.1.46 only `status` / `assign` / `refresh` fired,
+  --     so a task created via the API or the `todos.add` mailbox
+  --     verb never reached the auto-finder panel until some other
+  --     event triggered a render (follow-up #4).
+  --
+  -- (b) `adr` / `review` document references are normalized to
+  --     the portable `$VAR/...` symbolic form on write (add /
+  --     update, and self-healing on refresh). Agents reliably
+  --     know the ABSOLUTE path but guess the wrong `$KB_ROOT`
+  --     prefix; now they can supply an absolute (or bare KB-rel)
+  --     path and the host rewrites it. Resolution order:
+  --     $KB_ROOT → $WORKSPACE → user-defined vars → $HOME,
+  --     longest-prefix wins; absolute kept only when NO known
+  --     root contains the path. $CWD excluded (volatile). Closes
+  --     the "agent adds adr without basepath → panel can't open
+  --     it" report.
+  --
+  -- Strictly additive — new event topic + a write-time
+  -- normalization that produces schema-valid output (symbolic
+  -- refs already validated since v0.1.40). `api_version` stays
+  -- at `0.1`.
+  version     = "0.1.46",
   api_version = "0.1",
 }
