@@ -6621,6 +6621,95 @@ print("\n[58] todo — add / get / list / update / remove")
   cleanup()
 end)()
 
+-- ─────────────────── 58d. todo — adr/review path normalization (v0.1.46) ──
+print("\n[58d] todo — adr/review refs normalized to $VAR symbolic form on write")
+;(function()
+  local ok_req, todo = pcall(require, "auto-core.todo")
+  if not ok_req then return end
+
+  local tmp_root = vim.fn.tempname()
+  vim.fn.mkdir(tmp_root, "p")
+  local worktree = require("auto-core.git.worktree")
+  worktree.set_workspace_root(tmp_root)
+  -- Pin a fake KB root via env so $KB_ROOT resolves deterministically.
+  local saved_kb = vim.env.AUTO_AGENTS_KB_ROOT
+  local fake_kb = vim.fn.tempname()
+  vim.fn.mkdir(fake_kb .. "/shared/adrs", "p")
+  vim.env.AUTO_AGENTS_KB_ROOT = fake_kb
+  package.loaded["auto-core.todo.vars"] = nil  -- re-resolve KB_ROOT
+
+  -- Seed real files so the bare-relative + absolute branches can
+  -- confirm existence.
+  local kb_doc = fake_kb .. "/shared/adrs/0031-foo.md"
+  vim.fn.writefile({ "# adr" }, kb_doc)
+  vim.fn.mkdir(tmp_root .. "/docs", "p")
+  local ws_doc = tmp_root .. "/docs/spec.md"
+  vim.fn.writefile({ "# spec" }, ws_doc)
+
+  -- 1. Absolute path under KB → $KB_ROOT/...
+  local id1 = todo.add({ title = "abs kb", adr = { kb_doc } })
+  local t1 = todo.get(id1)
+  ok("absolute KB path symbolized to $KB_ROOT/...",
+    t1.adr[1] == "$KB_ROOT/shared/adrs/0031-foo.md",
+    "got " .. tostring(t1.adr and t1.adr[1]))
+
+  -- 2. Absolute path under workspace → $WORKSPACE/...
+  local id2 = todo.add({ title = "abs ws", review = ws_doc })
+  local t2 = todo.get(id2)
+  ok("absolute workspace path symbolized to $WORKSPACE/...",
+    t2.review == "$WORKSPACE/docs/spec.md",
+    "got " .. tostring(t2.review))
+
+  -- 3. Bare KB-relative that exists under KB → $KB_ROOT/...
+  local id3 = todo.add({ title = "bare rel", adr = { "shared/adrs/0031-foo.md" } })
+  local t3 = todo.get(id3)
+  ok("bare KB-relative path symbolized to $KB_ROOT/...",
+    t3.adr[1] == "$KB_ROOT/shared/adrs/0031-foo.md",
+    "got " .. tostring(t3.adr and t3.adr[1]))
+
+  -- 4. Already-symbolic passes through untouched.
+  local id4 = todo.add({ title = "already symbolic", adr = { "$KB_ROOT/shared/adrs/0031-foo.md" } })
+  local t4 = todo.get(id4)
+  ok("already-$VAR ref left untouched",
+    t4.adr[1] == "$KB_ROOT/shared/adrs/0031-foo.md")
+
+  -- 5. Absolute path outside every known root → kept absolute.
+  local outside = vim.fn.tempname() .. "-outside.md"
+  vim.fn.writefile({ "# x" }, outside)
+  local id5 = todo.add({ title = "outside", adr = { outside } })
+  local t5 = todo.get(id5)
+  ok("absolute path outside all roots kept absolute (last resort)",
+    t5.adr[1] == outside,
+    "got " .. tostring(t5.adr and t5.adr[1]))
+
+  -- 6. update() also normalizes.
+  local id6 = todo.add({ title = "update normalize" })
+  todo.update(id6, { adr = { kb_doc } })
+  local t6 = todo.get(id6)
+  ok("update() symbolizes adr refs too",
+    t6.adr[1] == "$KB_ROOT/shared/adrs/0031-foo.md")
+
+  -- 7. refresh() self-heals a hand-planted bare-relative ref.
+  local id7 = todo.add({ title = "refresh heal" })
+  -- Hand-write a bare-relative adr directly into the file (bypass
+  -- the API's write-time normalization) to simulate a legacy task.
+  local f7 = todo.get_todo_dir() .. "/open/" .. id7 .. ".md"
+  local raw = table.concat(vim.fn.readfile(f7), "\n")
+  raw = raw:gsub("\n%-%-%-\n", "\nadr:\n  - shared/adrs/0031-foo.md\n---\n", 1)
+  vim.fn.writefile(vim.split(raw, "\n"), f7)
+  todo.refresh()
+  local t7 = todo.get(id7)
+  ok("refresh() self-heals bare-relative adr → $KB_ROOT/...",
+    t7.adr and t7.adr[1] == "$KB_ROOT/shared/adrs/0031-foo.md",
+    "got " .. tostring(t7.adr and t7.adr[1]))
+
+  vim.env.AUTO_AGENTS_KB_ROOT = saved_kb
+  package.loaded["auto-core.todo.vars"] = nil
+  worktree.set_workspace_root(nil)
+  vim.fn.delete(tmp_root, "rf")
+  vim.fn.delete(fake_kb, "rf")
+end)()
+
 -- ─────────────────────── 58a. todo.md — tolerant scalar→list coercion ─────
 print("\n[58a] todo.md — scalar→list coercion for list-of-string fields")
 ;(function()

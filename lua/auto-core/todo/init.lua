@@ -261,6 +261,102 @@ end
 
 -- ─── public: add ──────────────────────────────────────────────
 
+-- v0.1.46: normalize `adr` / `review` document references to the
+-- portable `$VAR/...` symbolic form on write (cross-machine-symbolic
+-- -refs convention). Agents (and humans) naturally type a bare
+-- relative or an absolute path; either is non-portable and the
+-- panel can't resolve a bare relative reliably. We rewrite to:
+--   * `$KB_ROOT/<rel>`     when the path lives under the KB root
+--   * `$WORKSPACE/<rel>`   when it lives under the workspace root
+-- Preference order: KB first (most refs are KB docs), then
+-- workspace. Already-symbolic (`$VAR/...`) refs are left untouched.
+-- Absolute paths outside every known root are left absolute (last
+-- resort — "avoid absolute unless no other choice"). Bare relatives
+-- that don't resolve under any root are left as-is so the existing
+-- not-found error path still flags them.
+---Candidate symbolic roots for ref normalization, in semantic
+---preference order (used to break ties + order the bare-relative
+---search). `$CWD` is deliberately excluded — it's volatile
+---(changes per session) so storing a `$CWD/...` ref would be a
+---portability footgun. `$KB_ROOT` and `$WORKSPACE` lead because
+---most refs are KB docs or workspace files; user-defined vars
+---come next (the user opted into them precisely to make their
+---own dirs portable); `$HOME` is the broad catch-all so a doc in
+---`~/Documents/...` still beats a bare absolute path.
+---@return { name: string, value: string }[]
+local function symbolic_root_candidates()
+  local vars = require("auto-core.todo.vars")
+  local out = {}
+  local function add(name, value)
+    if type(value) == "string" and value ~= "" then
+      out[#out + 1] = { name = name, value = (value:gsub("/+$", "")) }
+    end
+  end
+  add("KB_ROOT",   vars.get("KB_ROOT"))
+  add("WORKSPACE", vars.get("WORKSPACE"))
+  for _, e in ipairs(vars.list()) do
+    if not e.builtin then add(e.name, e.value) end
+  end
+  add("HOME", vars.get("HOME"))
+  return out
+end
+
+local function symbolize_ref(p)
+  if type(p) ~= "string" or p == "" then return p end
+  if p:sub(1, 1) == "$" then return p end  -- already symbolic
+
+  local candidates = symbolic_root_candidates()
+
+  if p:sub(1, 1) == "/" or p:sub(1, 1) == "~" then
+    -- Absolute (or ~) — rewrite to the symbolic root with the
+    -- LONGEST matching prefix (most specific wins, e.g. $WORKSPACE
+    -- beats $HOME when the workspace is under home). Keep the path
+    -- absolute only when NO known root contains it.
+    local abs = vim.fn.expand(p)
+    local best
+    for _, c in ipairs(candidates) do
+      if abs == c.value or abs:sub(1, #c.value + 1) == c.value .. "/" then
+        if not best or #c.value > #best.value then best = c end
+      end
+    end
+    if best then
+      if abs == best.value then return "$" .. best.name end
+      return "$" .. best.name .. abs:sub(#best.value + 1)
+    end
+    return p  -- no portable root → absolute is the last resort
+  end
+
+  -- Bare relative — attach the first root (in semantic order) whose
+  -- join actually exists on disk.
+  for _, c in ipairs(candidates) do
+    if fs_path.exists(fs_path.join(c.value, p)) then
+      return "$" .. c.name .. "/" .. p:gsub("^/+", "")
+    end
+  end
+  return p
+end
+
+---Rewrite a task's `adr[]` + `review` reference fields in place to
+---the portable symbolic form. Idempotent — symbolic refs pass
+---through untouched. Returns true iff any field was changed (so
+---refresh can decide whether the file needs a rewrite).
+---@param task table
+---@return boolean changed
+local function normalize_ref_paths(task)
+  local changed = false
+  if type(task.adr) == "table" then
+    for i, p in ipairs(task.adr) do
+      local np = symbolize_ref(p)
+      if np ~= p then task.adr[i] = np; changed = true end
+    end
+  end
+  if type(task.review) == "string" and task.review ~= "" then
+    local nr = symbolize_ref(task.review)
+    if nr ~= task.review then task.review = nr; changed = true end
+  end
+  return changed
+end
+
 ---Create a new task. `spec` is a partial that must at minimum
 ---provide `title`; everything else takes sensible defaults.
 ---
@@ -319,6 +415,8 @@ function M.add(spec)
   if stray then
     error("auto-core.todo.add: task '" .. id .. "' already exists at " .. stray)
   end
+
+  normalize_ref_paths(task)
 
   local text, render_err = render_task(task)
   if render_err then error("auto-core.todo.add: " .. render_err) end
@@ -647,6 +745,7 @@ function M.update(id, patch)
   end
 
   for k, v in pairs(patch) do task[k] = v end
+  normalize_ref_paths(task)
   task.updated = M._now_iso()
 
   local v = schema.validate(task)
@@ -984,6 +1083,16 @@ function M.refresh()
           summary.skipped = summary.skipped + 1
         else
           local needs_write = false
+
+          -- 0. Self-heal legacy/bare ref paths to the portable
+          --    `$VAR/...` symbolic form (v0.1.46). A task authored
+          --    before the convention — or by an agent that supplied
+          --    an absolute / bare-relative adr — gets rewritten on
+          --    the next refresh. Runs BEFORE compute_errors so the
+          --    reference validation sees the symbolic form.
+          if normalize_ref_paths(task) then
+            needs_write = true
+          end
 
           -- 1. Auto-archive rule: completed → archived if completed_at
           --    is older than 28 days. The rule fires regardless of
