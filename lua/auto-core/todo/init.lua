@@ -978,6 +978,30 @@ local function compute_errors(task, td, now)
     end
   end
 
+  -- ADR-0035 Phase 3: automation surface validation. For automated
+  -- templates, run the same content validator the auto-finder
+  -- buffer-attach (Phase 3) uses, then merge its entries here so
+  -- refresh-side / headless callers see the same `errors[]` shape.
+  -- Stable `detected` per (field, code) by re-stamping against
+  -- `prior` exactly like the local `add` helper does — keeps
+  -- refresh idempotent when nothing actually changed about the
+  -- file's content.
+  if task.status == "automated" then
+    local ok_auto, automation = pcall(require, "auto-core.todo.automation")
+    if ok_auto and automation and type(automation.validate) == "function" then
+      local auto_entries = automation.validate(task) or {}
+      for _, e in ipairs(auto_entries) do
+        local existing = prior[err_key(e.field, e.code)]
+        out[#out + 1] = {
+          field    = e.field,
+          code     = e.code,
+          message  = e.message,
+          detected = (existing and existing.detected) or e.detected or now,
+        }
+      end
+    end
+  end
+
   return out
 end
 
