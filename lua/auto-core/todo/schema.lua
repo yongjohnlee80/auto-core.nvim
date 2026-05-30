@@ -12,11 +12,21 @@ local M = {}
 M.VERSION = 1
 
 ---@type table<string, true>
+---
+---ADR-0035 extends this enum from the original four (ADR-0031) to six:
+---  - `in-progress` — task is being actively worked on. Auto-engaged
+---    by `M.assign()` on `open → in-progress` when an open task gets
+---    a non-nil assignee (atomic same-write-path).
+---  - `automated` — template task; never transitions on its own.
+---    Lives in `.todo-list/automated/`; consumed by the automation
+---    engine (Phase 2) which clones it on each condition match.
 M.VALID_STATUS = {
-  open      = true,
-  completed = true,
-  deferred  = true,
-  archived  = true,
+  open            = true,
+  ["in-progress"] = true,   -- ADR-0035 Phase 1
+  automated       = true,   -- ADR-0035 Phase 1 (engine in Phase 2)
+  completed       = true,
+  deferred        = true,
+  archived        = true,
 }
 
 ---@type table<string, true>
@@ -28,8 +38,12 @@ M.VALID_PRIORITY = {
 
 ---@type table<string, true>
 M.VALID_ERROR_CODE = {
-  ["not-found"]            = true,
-  ["unresolved-variable"]  = true,  -- v0.1.40: `$VAR/...` ref whose VAR has no resolver
+  ["not-found"]                    = true,
+  ["unresolved-variable"]          = true,  -- v0.1.40: `$VAR/...` ref whose VAR has no resolver
+  ["automation-template-assignee"] = true,  -- ADR-0035 §3: automated templates must not carry a top-level assignee
+  ["automation-origin-not-found"]  = true,  -- ADR-0035 §5.5: clone's `origin:` doesn't resolve to a live automated template
+  ["automation-condition-malformed"] = true, -- ADR-0035 §12: cron-or-event parse failure (Phase 2 populates; Phase 1 reserves)
+  ["automation-execute-malformed"] = true,  -- ADR-0035 §8: execute DSL parse failure (Phase 2 populates; Phase 1 reserves)
 }
 
 -- Field-shape catalog. Drives both presence-checks and unknown-key
@@ -61,6 +75,27 @@ local FIELDS = {
   adr            = { required = false, kind = "string_list" },
   review         = { required = false, kind = "string_list" },
   blocked        = { required = false, kind = "string_list" },
+
+  -- ADR-0035 §5.5: automation fields. Hand-editable on templates;
+  -- shape-validated here (Phase 1). Deep content validation (cron
+  -- syntax, execute-DSL prefix match) lands in Phase 2 via
+  -- `auto-core.todo.automation.validate(task)` and gets surfaced as
+  -- `errors[]` entries by `refresh()`. Required-when invariants
+  -- (must be present iff `status == automated`) enforced in
+  -- `lifecycle_consistency()`.
+  condition      = { required = false, kind = "string_list" },
+  execute        = { required = false, kind = "string_list" },
+
+  -- ADR-0035 §5.5: managed automation fields.
+  --   `origin`         — clone backref to the automated template id.
+  --                      Resolution check (must point at a live
+  --                      automated template in the same `.todo-list/`)
+  --                      runs in `refresh()`; schema only validates
+  --                      shape here.
+  --   `last_fired_at`  — template-only timestamp of the most recent
+  --                      clone-fire. Datetime.
+  origin         = { required = false, kind = "string_or_null" },
+  last_fired_at  = { required = false, kind = "datetime_or_null" },
 
   -- Auto-managed
   errors         = { required = false, kind = "error_list" },
@@ -140,7 +175,7 @@ end
 ---@return boolean ok, string? err
 local function is_status(v)
   if type(v) == "string" and M.VALID_STATUS[v] then return true end
-  return false, "expected status ∈ {open,completed,deferred,archived}, got " .. tostring(v)
+  return false, "expected status ∈ {open,in-progress,automated,completed,deferred,archived}, got " .. tostring(v)
 end
 
 ---@param v any
@@ -255,24 +290,66 @@ local KIND_VALIDATORS = {
 
 -- ── cross-field invariants ────────────────────────────────────
 
----Lifecycle-timestamp rules per ADR-0031 §2:
----  • status == 'open'      → completed_at must be nil, archived_at must be nil
----  • status == 'deferred'  → completed_at must be nil, archived_at must be nil
----  • status == 'completed' → completed_at must be set, archived_at must be nil
----  • status == 'archived'  → archived_at must be set; completed_at MAY be set
+---Lifecycle-timestamp rules per ADR-0031 §2 + ADR-0035 §1:
+---  • status == 'open'         → completed_at must be nil, archived_at must be nil
+---  • status == 'in-progress'  → completed_at must be nil, archived_at must be nil
+---  • status == 'automated'    → completed_at must be nil, archived_at must be nil;
+---                               last_fired_at MAY be set; `assignee` MUST be nil
+---                               (templates are inert — see ADR-0035 §3); when
+---                               `assignee` is set, schema rejects with the
+---                               `automation-template-assignee` error code shape
+---                               so `refresh()` can surface it via `errors[]`.
+---  • status == 'deferred'     → completed_at must be nil, archived_at must be nil
+---  • status == 'completed'    → completed_at must be set, archived_at must be nil
+---  • status == 'archived'     → archived_at must be set; completed_at MAY be set
 ---    (preserved from a prior completed→archived transition so the
 ---    "when was this done vs. archived" history isn't lost)
+---
+---Cross-field invariants for automation fields (ADR-0035 §5.5):
+---  • status == 'automated'    → `condition[]` and `execute[]` SHOULD be present
+---                               (an empty/missing template can't fire, but the
+---                                schema permits it so users can stub a template
+---                                before filling it in; the automation engine
+---                                ignores empty templates).
+---  • status != 'automated'    → `condition[]` and `execute[]` MUST be nil (those
+---                               fields are meaningful only on templates).
+---  • `origin` is permitted on clones (typically open/in-progress/completed
+---    tasks born from a template fire) and forbidden on automated templates
+---    themselves (a template firing produces a clone, not a back-pointer to
+---    itself).
+---  • `last_fired_at` MUST be nil unless `status == automated`.
+---
 ---@param t table
 ---@return boolean ok, string? err
 local function lifecycle_consistency(t)
   local s = t.status
 
-  if s == "open" or s == "deferred" then
+  -- Lifecycle timestamps (open / in-progress / deferred share the
+  -- "neither set" invariant; the three statuses are equivalent from
+  -- a timestamp-presence standpoint).
+  if s == "open" or s == "in-progress" or s == "deferred" then
     if t.completed_at ~= nil then
       return false, "completed_at must be nil when status == '" .. s .. "'"
     end
     if t.archived_at ~= nil then
       return false, "archived_at must be nil when status == '" .. s .. "'"
+    end
+
+  elseif s == "automated" then
+    if t.completed_at ~= nil then
+      return false, "completed_at must be nil when status == 'automated' (templates never complete)"
+    end
+    if t.archived_at ~= nil then
+      return false, "archived_at must be nil when status == 'automated' (templates never archive)"
+    end
+    -- ADR-0035 §3: template-level assignee is rejected.
+    if t.assignee ~= nil and t.assignee ~= "" then
+      return false,
+        "[automation-template-assignee] automated templates must not carry a top-level "
+          .. "`assignee:` — templates are inert; use `execute: assign agent:<name>` instead"
+    end
+    if t.origin ~= nil then
+      return false, "origin must be nil when status == 'automated' (templates aren't clones)"
     end
 
   elseif s == "completed" then
@@ -292,6 +369,20 @@ local function lifecycle_consistency(t)
     -- required (a task can be archived directly from open/deferred
     -- if a human/agent explicitly chooses to).
   end
+
+  -- Automation-field invariants (independent of the timestamp rules).
+  if s ~= "automated" then
+    if t.condition ~= nil then
+      return false, "`condition:` is meaningful only when status == 'automated'; got status == '" .. s .. "'"
+    end
+    if t.execute ~= nil then
+      return false, "`execute:` is meaningful only when status == 'automated'; got status == '" .. s .. "'"
+    end
+    if t.last_fired_at ~= nil then
+      return false, "`last_fired_at:` is meaningful only when status == 'automated'; got status == '" .. s .. "'"
+    end
+  end
+
   return true
 end
 

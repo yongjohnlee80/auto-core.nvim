@@ -236,8 +236,11 @@ end
 ---@return string?
 local function find_task_path(td, id)
   local fname = id .. ".md"
-  -- Flat buckets first (cheap):
-  for _, bucket in ipairs({ "open", "completed", "deferred" }) do
+  -- Flat buckets first (cheap). ADR-0035 expanded the flat set from
+  -- {open, completed, deferred} to include `in-progress` and
+  -- `automated`; iterate the canonical list from paths so we don't
+  -- duplicate the bucket inventory at every call site.
+  for _, bucket in ipairs(paths.FLAT_BUCKETS) do
     local candidate = fs_path.join(td, bucket, fname)
     if fs_path.is_file(candidate) then return candidate end
   end
@@ -493,6 +496,9 @@ function M.list(opts)
   end
 
   -- Status filter short-circuit: skip buckets we don't care about.
+  -- Bucket inventory comes from `paths.FLAT_BUCKETS` (ADR-0035) so
+  -- adding a future status only requires updating one source of
+  -- truth, not every scan site.
   if opts.status then
     if opts.status == "archived" then
       scan_archived()
@@ -500,9 +506,9 @@ function M.list(opts)
       scan_flat(opts.status)
     end
   else
-    scan_flat("open")
-    scan_flat("deferred")
-    scan_flat("completed")
+    for _, b in ipairs(paths.FLAT_BUCKETS) do
+      scan_flat(b)
+    end
     scan_archived()
   end
 
@@ -633,9 +639,9 @@ function M.scan()
     end
   end
 
-  scan_flat("open")
-  scan_flat("deferred")
-  scan_flat("completed")
+  for _, b in ipairs(paths.FLAT_BUCKETS) do
+    scan_flat(b)
+  end
   scan_archived()
 
   return { tasks = tasks_out, malformed = malformed_out }
@@ -733,9 +739,9 @@ local function older_than_28_days(iso_ts, now_iso)
 end
 
 ---Walk every YAML task file under `td`. Returns the list of absolute
----paths, in stable order (open → deferred → completed → archived
----YYYY/MM ascending, lexicographic within each leaf dir). Files that
----can't be statted are silently skipped.
+---paths, in stable order (open → in-progress → automated → deferred
+---→ completed → archived YYYY/MM ascending, lexicographic within
+---each leaf dir). Files that can't be statted are silently skipped.
 ---@param td string
 ---@return string[]
 local function walk_task_files(td)
@@ -750,9 +756,9 @@ local function walk_task_files(td)
       end
     end
   end
-  scan_flat_dir(fs_path.join(td, "open"))
-  scan_flat_dir(fs_path.join(td, "deferred"))
-  scan_flat_dir(fs_path.join(td, "completed"))
+  for _, b in ipairs(paths.FLAT_BUCKETS) do
+    scan_flat_dir(fs_path.join(td, b))
+  end
   local a_dir = fs_path.join(td, "archived")
   if fs_path.is_dir(a_dir) then
     local years = vim.fn.readdir(a_dir) or {}
@@ -1205,11 +1211,17 @@ end
 ---supported but skip the event surface — by design.
 ---
 ---Lifecycle-timestamp side effects:
----  → completed: sets completed_at = now, clears archived_at
----  → archived:  sets archived_at  = now; preserves completed_at if
----               coming from completed, otherwise leaves it nil
----  → open:      clears both completed_at and archived_at
----  → deferred:  clears both completed_at and archived_at
+---  → completed:   sets completed_at = now, clears archived_at
+---  → archived:    sets archived_at  = now; preserves completed_at if
+---                 coming from completed, otherwise leaves it nil
+---  → open:        clears both completed_at and archived_at
+---  → in-progress: clears both completed_at and archived_at (ADR-0035)
+---  → automated:   clears both completed_at and archived_at (ADR-0035;
+---                 templates are inert — clearing both is mostly defensive
+---                 since validate() also rejects either being set, but
+---                 keeps us robust against direct YAML edits that left
+---                 stale timestamps behind)
+---  → deferred:    clears both completed_at and archived_at
 ---
 ---Also bumps `status_changed` to now. `updated` is NOT bumped (it
 ---tracks content mutations only, per the schema separation).
@@ -1217,7 +1229,7 @@ end
 ---The file is physically moved to the bucket matching the new status.
 ---No-op when `new` equals current status (idempotent).
 ---@param id string
----@param new string   one of {open, completed, deferred, archived}
+---@param new string   one of {open, in-progress, automated, completed, deferred, archived}
 ---@return table? updated_task, string? err
 function M.status(id, new)
   if type(id) ~= "string" or id == "" then
@@ -1225,7 +1237,7 @@ function M.status(id, new)
   end
   if type(new) ~= "string" or not schema.VALID_STATUS[new] then
     return nil, "auto-core.todo.status: new status must be one of "
-      .. "{open,completed,deferred,archived}; got " .. tostring(new)
+      .. "{open,in-progress,automated,completed,deferred,archived}; got " .. tostring(new)
   end
 
   local td   = M._todo_dir()
@@ -1251,7 +1263,9 @@ function M.status(id, new)
   task.status_changed = now
 
   -- Lifecycle-timestamp maintenance per the rules above.
-  if new == "open" or new == "deferred" then
+  if new == "open" or new == "deferred" or new == "in-progress"
+      or new == "automated"
+  then
     task.completed_at = nil
     task.archived_at  = nil
   elseif new == "completed" then
@@ -1361,7 +1375,9 @@ function M.assign(id, assignee, reason)
     return nil, "task '" .. id .. "' decoded to non-table"
   end
 
-  local old = task.assignee
+  local old           = task.assignee
+  local old_status    = task.status
+  local old_file_path = file
 
   -- Idempotent no-op when the assignee is already what's requested.
   -- nil-vs-"" both count as "unassigned" for this comparison.
@@ -1376,13 +1392,44 @@ function M.assign(id, assignee, reason)
   task.assignee = assignee  -- nil clears the field
   task.updated  = now
 
+  -- ADR-0035 §2: atomic same-write-path `open → in-progress`
+  -- transition. When an open task gets a non-nil assignee, flip the
+  -- status in-line so the assignment AND the bucket move land in a
+  -- single file write — no event-subscriber chain, no recursion
+  -- hazard. Status reverse on assignee-clear is intentionally NOT
+  -- performed (Lector OQ1: clearing during reassignment/handoff
+  -- shouldn't churn the bucket).
+  local status_changed_now = false
+  if old_status == "open" and assignee ~= nil and assignee ~= "" then
+    task.status         = "in-progress"
+    task.status_changed = now
+    status_changed_now  = true
+  end
+
   local v = schema.validate(task)
   if not v.ok then return nil, "schema: " .. tostring(v.err) end
 
   local rendered, render_err = render_task(task)
   if render_err then return nil, render_err end
-  local ok, err = atomic_write(file, rendered)
+
+  -- When the status transitioned, the file must land in a different
+  -- bucket directory than it currently sits in. Write the new file
+  -- first, then unlink the old one — same crash-safe order
+  -- `M.status()` uses (see §775 comment).
+  local target_path = file
+  if status_changed_now then
+    target_path = paths.task_file_path(td, id, task.status, nil)
+  end
+
+  local ok, err = atomic_write(target_path, rendered)
   if not ok then return nil, "write: " .. tostring(err) end
+
+  if status_changed_now and target_path ~= old_file_path then
+    -- Best-effort unlink of the source. A failed unlink leaves a
+    -- duplicate that `refresh()` will reconcile on next pass; we
+    -- prefer that over rolling back the new write.
+    pcall(vim.fn.delete, old_file_path)
+  end
 
   -- Best-effort event publish so consumers (mailbox router, panel)
   -- can react. Carry enough context for a one-shot notification
@@ -1392,12 +1439,24 @@ function M.assign(id, assignee, reason)
     pcall(events.publish, "core.todo.assignee:changed", {
       id        = id,
       title     = task.title,
-      file_path = file,
+      file_path = target_path,
       from      = old,
       to        = assignee,
       reason    = reason,
       at        = now,
     })
+    -- Second event ONLY when the in-line transition actually fired.
+    -- Mirrors `M.status()`'s emission shape so panel + auto-archive
+    -- subscribers see a uniform event regardless of which API path
+    -- produced the move.
+    if status_changed_now then
+      pcall(events.publish, "core.todo.status:changed", {
+        id   = id,
+        from = old_status,
+        to   = task.status,
+        at   = now,
+      })
+    end
   end
 
   return task

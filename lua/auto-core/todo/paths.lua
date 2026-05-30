@@ -13,13 +13,33 @@ local fs_path = require("auto-core.fs.path")
 
 local M = {}
 
----Bucket directories per ADR-0031 §1 (`dir == status` invariant).
----Indexed by status enum value.
+---Bucket directories per ADR-0031 §1 (`dir == status` invariant),
+---extended by ADR-0035 with `in-progress` and `automated`. Indexed
+---by status enum value. The directory name on disk equals the status
+---string verbatim — including the hyphenated `in-progress/`.
 M.BUCKETS = {
-  open      = "open",
-  completed = "completed",
-  deferred  = "deferred",
-  archived  = "archived",  -- nested by YYYY/MM under here
+  open            = "open",
+  ["in-progress"] = "in-progress",  -- ADR-0035 Phase 1
+  automated       = "automated",    -- ADR-0035 Phase 1
+  completed       = "completed",
+  deferred        = "deferred",
+  archived        = "archived",     -- nested by YYYY/MM under here
+}
+
+---Flat (non-archived) buckets in canonical scan order. Used by
+---`auto-core.todo.init`'s `find_task_path` / `list` / `scan` /
+---`walk_task_files` / `refresh` to avoid the prior pattern of
+---hard-coding the bucket-name list at every call site. Order chosen
+---to mirror auto-finder's panel ordering (open → in-progress →
+---automated → deferred → completed) — purely cosmetic for callers
+---that iterate, but keeps debug output / log lines aligned with how
+---the user sees the buckets in the panel.
+M.FLAT_BUCKETS = {
+  "open",
+  "in-progress",
+  "automated",
+  "deferred",
+  "completed",
 }
 
 -- ── workspace resolution ──────────────────────────────────────

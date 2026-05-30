@@ -8058,6 +8058,199 @@ print("\n[67] todo.assign — sets assignee + fires core.todo.assignee:changed")
   cleanup()
 end)()
 
+-- ───────────────────── 68. ADR-0035 Phase 1 ─────────────────────────
+-- Schema additions (in-progress, automated statuses + automation
+-- frontmatter fields), six-bucket reconciliation, and the atomic
+-- in-line `open → in-progress` transition inside M.assign().
+print("\n[68] ADR-0035 Phase 1 — in-progress / automated buckets + atomic assign hook")
+;(function()
+  local ok_t, todo = pcall(require, "auto-core.todo")
+  if not ok_t then return end
+  local schema = require("auto-core.todo.schema")
+  local paths  = require("auto-core.todo.paths")
+
+  -- 68a. schema enum carries the two new statuses
+  ok("VALID_STATUS includes in-progress", schema.VALID_STATUS["in-progress"] == true)
+  ok("VALID_STATUS includes automated",   schema.VALID_STATUS["automated"]   == true)
+  ok("VALID_STATUS still has open",       schema.VALID_STATUS["open"]        == true)
+  ok("VALID_STATUS still has archived",   schema.VALID_STATUS["archived"]    == true)
+
+  -- 68b. paths.BUCKETS gains two literal dir mappings, and
+  -- FLAT_BUCKETS exposes the canonical scan order.
+  ok("paths.BUCKETS has in-progress entry",
+    paths.BUCKETS["in-progress"] == "in-progress")
+  ok("paths.BUCKETS has automated entry",
+    paths.BUCKETS.automated == "automated")
+  ok("paths.FLAT_BUCKETS is a sequence", type(paths.FLAT_BUCKETS) == "table" and #paths.FLAT_BUCKETS >= 5)
+  -- Canonical order: open, in-progress, automated, deferred, completed.
+  ok("FLAT_BUCKETS order: open first",          paths.FLAT_BUCKETS[1] == "open")
+  ok("FLAT_BUCKETS order: in-progress second",  paths.FLAT_BUCKETS[2] == "in-progress")
+  ok("FLAT_BUCKETS order: automated third",     paths.FLAT_BUCKETS[3] == "automated")
+  ok("FLAT_BUCKETS order: deferred fourth",     paths.FLAT_BUCKETS[4] == "deferred")
+  ok("FLAT_BUCKETS order: completed fifth",     paths.FLAT_BUCKETS[5] == "completed")
+
+  -- 68c. schema rejects invalid combinations.
+  local function _blank(over)
+    local t = schema.blank(over or {})
+    return t
+  end
+
+  -- Template-level assignee on automated → reject.
+  local v_ta = schema.validate(_blank({ status = "automated", assignee = "agent:foo" }))
+  ok("schema rejects automated template with top-level assignee",
+    not v_ta.ok and tostring(v_ta.err):find("automation-template-assignee", 1, true) ~= nil,
+    "got: " .. tostring(v_ta.err))
+
+  -- in-progress + completed_at → reject.
+  local v_ip_ct = schema.validate(_blank({ status = "in-progress", completed_at = "2026-05-30T00:00:00Z" }))
+  ok("schema rejects in-progress with completed_at set",
+    not v_ip_ct.ok, "got: " .. tostring(v_ip_ct.err))
+
+  -- automated + condition[] / execute[] are allowed shape-wise.
+  local v_auto_ok = schema.validate(_blank({
+    status = "automated",
+    condition = { "0 8 * * 2#1" },
+    execute   = { "bash echo hi" },
+  }))
+  ok("schema accepts automated with condition[]+execute[]",
+    v_auto_ok.ok, "got err: " .. tostring(v_auto_ok.err))
+
+  -- non-automated + condition → reject (fields are template-only).
+  local v_open_cond = schema.validate(_blank({ status = "open", condition = { "0 * * * *" } }))
+  ok("schema rejects condition: on non-automated",
+    not v_open_cond.ok, "got: " .. tostring(v_open_cond.err))
+
+  -- non-automated + last_fired_at → reject.
+  local v_open_lfa = schema.validate(_blank({ status = "open", last_fired_at = "2026-05-30T00:00:00Z" }))
+  ok("schema rejects last_fired_at: on non-automated",
+    not v_open_lfa.ok, "got: " .. tostring(v_open_lfa.err))
+
+  -- automated with stray completed_at → reject.
+  local v_auto_ct = schema.validate(_blank({
+    status = "automated", completed_at = "2026-05-30T00:00:00Z",
+  }))
+  ok("schema rejects automated with completed_at set",
+    not v_auto_ct.ok, "got: " .. tostring(v_auto_ct.err))
+
+  -- automated with `origin:` set → reject (templates aren't clones).
+  local v_auto_origin = schema.validate(_blank({
+    status = "automated", origin = "some-other-template",
+  }))
+  ok("schema rejects automated with origin: set",
+    not v_auto_origin.ok, "got: " .. tostring(v_auto_origin.err))
+
+  -- 68d. atomic in-line assign transition: open → in-progress.
+  local tmp_root = vim.fn.tempname()
+  vim.fn.mkdir(tmp_root, "p")
+  local worktree = require("auto-core.git.worktree")
+  worktree.set_workspace_root(tmp_root)
+  local function cleanup() worktree.set_workspace_root(nil); vim.fn.delete(tmp_root, "rf") end
+
+  local id = todo.add({ title = "Phase 1 assign hook" })
+  ok("freshly added task starts as open",
+    (todo.get(id) or {}).status == "open")
+
+  -- Capture both event types around the assign call.
+  local events = require("auto-core.events")
+  local assignee_evt, status_evt
+  local h_a = events.subscribe("core.todo.assignee:changed", function(p) assignee_evt = p end)
+  local h_s = events.subscribe("core.todo.status:changed",   function(p) status_evt   = p end)
+
+  local _, err_assign = todo.assign(id, "agent:foo", "phase-1 test")
+  ok("assign returns no error", err_assign == nil, "got: " .. tostring(err_assign))
+
+  local t_after = todo.get(id)
+  ok("status flipped open → in-progress atomically",
+    t_after and t_after.status == "in-progress",
+    "got: " .. tostring(t_after and t_after.status))
+  ok("assignee landed in the same write",
+    t_after and t_after.assignee == "agent:foo")
+  ok("status_changed bumped to a non-empty ISO datetime",
+    t_after and type(t_after.status_changed) == "string"
+      and t_after.status_changed:match("^%d%d%d%d%-%d%d%-%d%d") ~= nil)
+
+  -- File moved bucket: must now live in `.todo-list/in-progress/`.
+  local td = paths.default_todo_dir(tmp_root)
+  local ip_path = paths.task_file_path(td, id, "in-progress", nil)
+  ok("file relocated into .todo-list/in-progress/",
+    vim.fn.filereadable(ip_path) == 1,
+    "expected: " .. ip_path)
+  local old_open_path = paths.task_file_path(td, id, "open", nil)
+  ok("stale file in .todo-list/open/ was unlinked",
+    vim.fn.filereadable(old_open_path) == 0)
+
+  vim.wait(50, function() return false end)
+  ok("core.todo.assignee:changed event fired",
+    assignee_evt ~= nil and assignee_evt.to == "agent:foo")
+  ok("core.todo.status:changed event ALSO fired (atomic transition)",
+    status_evt ~= nil
+      and status_evt.from == "open"
+      and status_evt.to == "in-progress")
+
+  -- OQ1: clearing the assignee does NOT reverse the transition.
+  assignee_evt, status_evt = nil, nil
+  todo.assign(id, nil)
+  vim.wait(50, function() return false end)
+  local t_cleared = todo.get(id)
+  ok("OQ1: clearing assignee leaves status at in-progress (no reversal)",
+    t_cleared and t_cleared.status == "in-progress" and t_cleared.assignee == nil)
+  ok("OQ1: no status event fired on assignee-clear",
+    status_evt == nil)
+
+  -- Re-assigning an in-progress task does NOT re-fire status event.
+  status_evt = nil
+  todo.assign(id, "agent:bar")
+  vim.wait(50, function() return false end)
+  ok("re-assigning in-progress task does NOT re-fire status:changed",
+    status_evt == nil)
+
+  -- Assigning a deferred task does NOT auto-engage in-progress.
+  local id_def = todo.add({ id = "2026-05-30-deferred-assign-test", title = "deferred sibling" })
+  todo.status(id_def, "deferred")
+  status_evt = nil
+  todo.assign(id_def, "agent:baz")
+  vim.wait(50, function() return false end)
+  ok("assigning a DEFERRED task does NOT flip to in-progress",
+    (todo.get(id_def) or {}).status == "deferred")
+  ok("no status:changed event for deferred→assigned",
+    status_evt == nil)
+
+  events.unsubscribe(h_a)
+  events.unsubscribe(h_s)
+
+  -- 68e. six-bucket reconciliation via todo.list across every bucket.
+  -- Place one task in each bucket using the public API; list() must
+  -- find them all.
+  local id_open   = todo.add({ id = "2026-05-30-bucket-open",   title = "bucket open" })
+  local id_def2   = todo.add({ id = "2026-05-30-bucket-def",    title = "bucket deferred" })
+  todo.status(id_def2, "deferred")
+  local id_comp   = todo.add({ id = "2026-05-30-bucket-comp",   title = "bucket completed" })
+  todo.status(id_comp, "completed")
+  local id_ip     = todo.add({ id = "2026-05-30-bucket-ip",     title = "bucket in-progress" })
+  todo.assign(id_ip, "agent:bucket")  -- triggers the auto-transition
+  local id_auto   = todo.add({ id = "2026-05-30-bucket-auto",   title = "bucket automated" })
+  todo.status(id_auto, "automated")
+
+  local all = todo.list()
+  local by_id = {}
+  for _, t in ipairs(all) do by_id[t.id] = t.status end
+  ok("list() finds open task",        by_id[id_open]   == "open")
+  ok("list() finds deferred task",    by_id[id_def2]   == "deferred")
+  ok("list() finds completed task",   by_id[id_comp]   == "completed")
+  ok("list() finds in-progress task", by_id[id_ip]     == "in-progress")
+  ok("list() finds automated task",   by_id[id_auto]   == "automated")
+  ok("list(status=in-progress) returns only in-progress rows",
+    (function()
+      local rows = todo.list({ status = "in-progress" })
+      for _, r in ipairs(rows) do
+        if r.status ~= "in-progress" then return false end
+      end
+      return #rows >= 2  -- id + id_ip
+    end)())
+
+  cleanup()
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
