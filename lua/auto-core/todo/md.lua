@@ -57,12 +57,24 @@ local FRONTMATTER_ORDER = {
   "review",
   "blocked",
 
+  -- Hand-editable: automation (ADR-0035 Phase 1 — required-iff-automated).
+  -- Placed BEFORE the managed timestamp block so a template author
+  -- sees `condition:` / `execute:` near the top of the file where
+  -- they live operationally, not buried below the lifecycle TS.
+  "condition",
+  "execute",
+
   -- Managed: timestamps
   "created",
   "updated",
   "status_changed",
   "completed_at",
   "archived_at",
+
+  -- Managed: automation (ADR-0035 Phase 1). `origin` is set on
+  -- clones; `last_fired_at` is set on templates.
+  "origin",
+  "last_fired_at",
 
   -- Auto-managed
   "errors",

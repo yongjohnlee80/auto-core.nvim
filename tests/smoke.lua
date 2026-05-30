@@ -8251,6 +8251,341 @@ print("\n[68] ADR-0035 Phase 1 — in-progress / automated buckets + atomic assi
   cleanup()
 end)()
 
+-- ───────────────────── 69. ADR-0035 Phase 2 — cron parser ──────────
+print("\n[69] ADR-0035 Phase 2 — cron parser")
+;(function()
+  local cron = require("auto-core.todo.cron")
+
+  -- 69a. parse — happy path for the standard tokens.
+  local p, err = cron.parse("0 8 * * *")
+  ok("parse `0 8 * * *` succeeds", p ~= nil, "err: " .. tostring(err))
+
+  ok("parse `*/15 * * * *` succeeds (step)",
+    cron.parse("*/15 * * * *") ~= nil)
+  ok("parse `0 0-6 * * 1-5` succeeds (range)",
+    cron.parse("0 0-6 * * 1-5") ~= nil)
+  ok("parse `15,30,45 * * * *` succeeds (list)",
+    cron.parse("15,30,45 * * * *") ~= nil)
+  ok("parse `0 8 * * 2#1` succeeds (dow ordinal — first Tuesday)",
+    cron.parse("0 8 * * 2#1") ~= nil)
+  ok("parse accepts `7` as Sunday alias",
+    cron.parse("0 0 * * 7") ~= nil)
+
+  -- 69b. parse — rejection paths.
+  ok("parse rejects empty string",
+    select(2, cron.parse("")) ~= nil)
+  ok("parse rejects too few fields",
+    select(2, cron.parse("0 0 *")) ~= nil)
+  ok("parse rejects too many fields",
+    select(2, cron.parse("0 0 * * * *")) ~= nil)
+  ok("parse rejects out-of-range minute",
+    select(2, cron.parse("60 0 * * *")) ~= nil)
+  ok("parse rejects out-of-range hour",
+    select(2, cron.parse("0 24 * * *")) ~= nil)
+  ok("parse rejects malformed dow ordinal",
+    select(2, cron.parse("0 0 * * 2#")) ~= nil)
+  ok("parse rejects ordinal K out of range",
+    select(2, cron.parse("0 0 * * 2#6")) ~= nil)
+  ok("parse rejects non-string input",
+    select(2, cron.parse(nil)) ~= nil)
+
+  -- 69c. matches — every-minute pattern always matches.
+  local star = cron.parse("* * * * *")
+  ok("matches `* * * * *` always true",
+    cron.matches(star, os.time()))
+
+  -- 69d. matches — specific minute. Fabricate a components table
+  -- to avoid wall-clock flakiness.
+  local at_0800 = {
+    year = 2026, month = 5, day = 30,  -- a Saturday
+    hour = 8, min = 0, sec = 0, wday = 7,  -- wday: Sat (Lua 7=Sat)
+  }
+  local at_0801 = vim.deepcopy(at_0800); at_0801.min = 1
+  local p_eight = cron.parse("0 8 * * *")
+  ok("matches `0 8 * * *` at 08:00", cron.matches(p_eight, at_0800))
+  ok("does NOT match `0 8 * * *` at 08:01", not cron.matches(p_eight, at_0801))
+
+  -- 69e. dow ordinal — first Tuesday of June 2026 is the 2nd.
+  -- (June 1, 2026 is a Monday; June 2 is a Tuesday → first Tuesday.)
+  local first_tue_jun = {
+    year = 2026, month = 6, day = 2,
+    hour = 8, min = 0, sec = 0, wday = 3,  -- Tue (Lua 3=Tue)
+  }
+  local second_tue_jun = vim.deepcopy(first_tue_jun); second_tue_jun.day = 9
+  local p_ordinal = cron.parse("0 8 * * 2#1")
+  ok("dow ordinal: first Tuesday at 08:00 → matches",
+    cron.matches(p_ordinal, first_tue_jun))
+  ok("dow ordinal: second Tuesday at 08:00 → does NOT match",
+    not cron.matches(p_ordinal, second_tue_jun))
+
+  -- 69f. parse_and_match convenience.
+  local m, perr = cron.parse_and_match("* * * * *", os.time())
+  ok("parse_and_match returns true for `* * * * *`", m == true and perr == nil)
+  local m_bad, perr_bad = cron.parse_and_match("not cron", os.time())
+  ok("parse_and_match returns (false, err) for malformed",
+    m_bad == false and type(perr_bad) == "string")
+end)()
+
+-- ───────────────────── 70. ADR-0035 Phase 2 — automation engine ─────
+print("\n[70] ADR-0035 Phase 2 — automation engine (registry, validate, fire)")
+;(function()
+  local ok_a, automation = pcall(require, "auto-core.todo.automation")
+  if not ok_a then return end
+  local todo = require("auto-core.todo")
+  local schema = require("auto-core.todo.schema")
+
+  -- Isolate workspace + state.
+  local tmp_root = vim.fn.tempname()
+  vim.fn.mkdir(tmp_root, "p")
+  local worktree = require("auto-core.git.worktree")
+  worktree.set_workspace_root(tmp_root)
+  local state_tmp = vim.fn.tempname() .. "_p70-state"
+  vim.fn.mkdir(state_tmp, "p")
+  require("auto-core.state").configure({ persist_dir = state_tmp })
+  local function cleanup()
+    automation.stop()
+    -- Clear registry between tests (the module-locals are sticky).
+    for _, p in ipairs((function()
+      local hs = (select(1, automation.registry_snapshot())); return hs
+    end)()) do
+      automation.unregister_hook(p)
+    end
+    for _, p in ipairs((function()
+      local _, es = automation.registry_snapshot(); return es
+    end)()) do
+      automation.unregister_executor(p)
+    end
+    worktree.set_workspace_root(nil)
+    require("auto-core.state").configure({ persist_dir = nil })
+    vim.fn.delete(tmp_root,  "rf")
+    vim.fn.delete(state_tmp, "rf")
+  end
+
+  -- 70a. registry — register/snapshot/unregister.
+  local function id_hook(step) return "assign agent:fake", nil end
+  local function id_exec(_step, _clone)
+    return { ok = true, message = "stub", completed_clone = false }, nil
+  end
+  automation.register_hook("test-hook:", id_hook)
+  automation.register_executor("test-exec:", id_exec)
+  local hs, es = automation.registry_snapshot()
+  ok("registry_snapshot contains the registered hook",
+    (function() for _, p in ipairs(hs) do if p == "test-hook:" then return true end end return false end)())
+  ok("registry_snapshot contains the registered executor",
+    (function() for _, p in ipairs(es) do if p == "test-exec:" then return true end end return false end)())
+  automation.unregister_hook("test-hook:")
+  automation.unregister_executor("test-exec:")
+  local hs2, es2 = automation.registry_snapshot()
+  ok("unregister_hook removed the entry",
+    (function() for _, p in ipairs(hs2) do if p == "test-hook:" then return false end end return true end)())
+  ok("unregister_executor removed the entry",
+    (function() for _, p in ipairs(es2) do if p == "test-exec:" then return false end end return true end)())
+
+  -- 70b. validate — recognizes built-in primitives.
+  -- Build a synthetic automated task via schema.blank + overrides.
+  local function _automated_blank(over)
+    over = over or {}
+    over.status = "automated"
+    return schema.blank(over)
+  end
+
+  -- All-good automated template — no errors.
+  local good = _automated_blank({
+    condition = { "0 8 * * 2#1", "event:new-task" },
+    execute   = { "assign agent:lector", "bash echo hi" },
+  })
+  ok("validate accepts well-formed automated template",
+    #automation.validate(good) == 0)
+
+  -- Malformed cron in condition.
+  local bad_cron = _automated_blank({
+    condition = { "this is not cron" },
+    execute   = { "assign agent:foo" },
+  })
+  local errs_cron = automation.validate(bad_cron)
+  ok("validate flags malformed cron",
+    #errs_cron == 1 and errs_cron[1].code == "automation-condition-malformed")
+
+  -- Empty event topic.
+  local bad_evt = _automated_blank({
+    condition = { "event:" },
+    execute   = { "assign agent:foo" },
+  })
+  ok("validate flags empty event: topic",
+    #automation.validate(bad_evt) == 1)
+
+  -- Unknown execute prefix → automation-execute-malformed.
+  local bad_exec = _automated_blank({
+    condition = { "event:new-task" },
+    execute   = { "do-magic now" },
+  })
+  ok("validate flags unknown execute prefix",
+    (function()
+      local e = automation.validate(bad_exec)
+      return #e == 1 and e[1].code == "automation-execute-malformed"
+    end)())
+
+  -- `assign slot:` with NO auto-agents hook registered → hint.
+  local bad_slot = _automated_blank({
+    condition = { "event:new-task" },
+    execute   = { "assign slot:5" },
+  })
+  ok("validate flags assign slot: with no resolver",
+    (function()
+      local e = automation.validate(bad_slot)
+      return #e == 1 and e[1].code == "automation-slot-no-resolver"
+    end)())
+
+  -- `bash -t=N` with NO auto-agents executor registered → hint.
+  local bad_bt = _automated_blank({
+    condition = { "event:new-task" },
+    execute   = { "bash -t=2 echo hi" },
+  })
+  ok("validate flags bash -t= with no resolver",
+    (function()
+      local e = automation.validate(bad_bt)
+      return #e == 1 and e[1].code == "automation-bash-t-no-resolver"
+    end)())
+
+  -- 70c. Non-automated task → validate returns empty (out of scope).
+  local open_task = schema.blank({ status = "open" })
+  ok("validate returns empty for non-automated tasks",
+    #automation.validate(open_task) == 0)
+
+  -- 70d. registered hook makes `assign slot:` validate-clean.
+  automation.register_hook("assign slot:", function(step)
+    local n = step:match("^assign slot:(%d+)$")
+    if not n then return nil, "malformed" end
+    return "assign agent:slot" .. n .. "-agent", nil
+  end)
+  ok("after hook register, assign slot:5 validates clean",
+    #automation.validate(bad_slot) == 0)
+  automation.unregister_hook("assign slot:")
+
+  -- 70e. fire — happy path with a templated task whose execute step
+  -- assigns an agent. The clone is born as open; the assign step
+  -- runs through todo.assign which triggers the auto-transition
+  -- to in-progress.
+  local tpl_id = todo.add({
+    id          = "2026-05-30-p70-fire-template",
+    title       = "fire test template",
+    description = "body of the template",
+    tags        = { "kind:test", "owner:p70" },
+  })
+  -- Promote to automated via direct status + add condition/execute
+  -- through a direct file edit (todo.update doesn't accept these
+  -- fields yet — managed by the engine; for now we use a managed
+  -- write path mirroring what the engine does internally).
+  todo.status(tpl_id, "automated")
+  local paths_p70 = require("auto-core.todo.paths")
+  local md_p70    = require("auto-core.todo.md")
+  local tpl_path = paths_p70.task_file_path(paths_p70.resolve_todo_dir(), tpl_id, "automated", nil)
+  do
+    local f = io.open(tpl_path, "r"); local txt = f:read("*a"); f:close()
+    local dec = md_p70.decode(txt)
+    dec.value.condition = { "event:new-task" }
+    dec.value.execute   = { "assign agent:lector" }
+    local enc = md_p70.encode(dec.value)
+    local g = io.open(tpl_path .. ".tmp", "w"); g:write(enc); g:close()
+    os.rename(tpl_path .. ".tmp", tpl_path)
+  end
+
+  -- Subscribe to the fire event so we can assert payload shape.
+  local fired_payload
+  local events = require("auto-core.events")
+  local fired_handle = events.subscribe("core.todo.automation:fired", function(p)
+    fired_payload = p
+  end)
+
+  local fire_res, fire_err = automation.fire(tpl_id, { reason = "smoke" })
+  ok("fire succeeds", fire_res and not fire_err,
+    "got: " .. tostring(fire_err))
+  ok("fire returns a clone_id",
+    fire_res and type(fire_res.clone_id) == "string"
+      and fire_res.clone_id ~= "")
+  ok("clone_id format: `<origin>--YYYYMMDDTHHMMSSZ`",
+    fire_res and fire_res.clone_id:match("^"
+      .. tpl_id:gsub("([%-%.%+%[%]%(%)%$%^%%%?%*])", "%%%1")
+      .. "%-%-%d%d%d%d%d%d%d%dT%d%d%d%d%d%dZ$") ~= nil,
+    "got: " .. tostring(fire_res and fire_res.clone_id))
+
+  -- Clone should land in in-progress (assign agent step triggered
+  -- the auto-transition).
+  local clone = todo.get(fire_res.clone_id)
+  ok("clone status is in-progress after assign step",
+    clone and clone.status == "in-progress",
+    "got: " .. tostring(clone and clone.status))
+  ok("clone has origin: backref to template",
+    clone and clone.origin == tpl_id)
+  ok("clone has automation:fire tag",
+    (function()
+      if not (clone and type(clone.tags) == "table") then return false end
+      for _, t in ipairs(clone.tags) do
+        if t == "automation:fire" then return true end
+      end
+      return false
+    end)())
+
+  -- Template `last_fired_at` got bumped.
+  local tpl_after = todo.get(tpl_id)
+  ok("template last_fired_at is set after fire",
+    tpl_after and type(tpl_after.last_fired_at) == "string"
+      and tpl_after.last_fired_at:match("^%d%d%d%d%-%d%d%-%d%d") ~= nil)
+
+  -- Event payload shape.
+  vim.wait(50, function() return false end)
+  ok("core.todo.automation:fired event fired", fired_payload ~= nil)
+  ok("event carries origin_id", fired_payload and fired_payload.origin_id == tpl_id)
+  ok("event carries clone_id", fired_payload and fired_payload.clone_id == fire_res.clone_id)
+  ok("event carries outcome=ok", fired_payload and fired_payload.outcome == "ok")
+  events.unsubscribe(fired_handle)
+
+  -- 70f. trust_state defaults — bash disabled by default per ADR §4.5.
+  local ts = automation.trust_state()
+  ok("trust_state: bash_enabled defaults to false", ts.bash_enabled == false)
+  ok("trust_state: bash_first_run_acknowledged defaults to false",
+    ts.bash_first_run_acknowledged == false)
+
+  -- 70g. set_trust: mailbox-shaped enable WITHOUT acknowledge → refused.
+  local set_ok, set_err = automation.set_trust({ bash_enabled = true })
+  ok("set_trust({bash_enabled=true}) refuses without ack",
+    not set_ok and set_err == "trust_not_acknowledged",
+    "got: " .. tostring(set_err))
+
+  -- 70h. acknowledge_first_run, then enable works.
+  automation.acknowledge_first_run()
+  local ok2, err2 = automation.set_trust({ bash_enabled = true })
+  ok("set_trust({bash_enabled=true}) succeeds after ack",
+    ok2 and err2 == nil)
+  ok("trust_state: bash_enabled now true",
+    automation.trust_state().bash_enabled == true)
+
+  -- 70i. set_trust: allowlist validation.
+  local ok_al, err_al = automation.set_trust({ bash_allowlist = "not a list" })
+  ok("set_trust: allowlist must be list-or-nil",
+    not ok_al and err_al ~= nil)
+  automation.set_trust({ bash_allowlist = { "^echo ", "^make " } })
+  ok("set_trust: list-shaped allowlist accepted",
+    (function()
+      local v = automation.trust_state().bash_allowlist
+      return type(v) == "table" and #v == 2
+    end)())
+
+  -- 70j. start/stop are idempotent + re-armable.
+  automation.start()
+  automation.start()  -- second call no-ops
+  ok("start is idempotent (running=true)",
+    automation.list_pending().running == true)
+  automation.stop()
+  ok("stop sets running=false",
+    automation.list_pending().running == false)
+  automation.start()  -- re-arm works
+  ok("re-arm: start after stop works",
+    automation.list_pending().running == true)
+
+  cleanup()
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
