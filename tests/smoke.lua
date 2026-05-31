@@ -8583,6 +8583,234 @@ print("\n[70] ADR-0035 Phase 2 — automation engine (registry, validate, fire)"
   ok("re-arm: start after stop works",
     automation.list_pending().running == true)
 
+  -- 70k. Lector F4: register_hook / register_executor accept the
+  -- table form `{resolve|execute = fn, validate = fn}` so
+  -- malformed plugin-owned forms fail at validate time, not fire
+  -- time.
+  automation.register_hook("probe slot:", {
+    resolve = function(step)
+      local n = step:match("^probe slot:(%d+)$")
+      if not n then return nil, "malformed" end
+      return "assign agent:slot" .. n .. "-agent", nil
+    end,
+    validate = function(step)
+      if not step:match("^probe slot:%d+$") then
+        return "probe slot:<N> requires an integer"
+      end
+      return nil
+    end,
+  })
+  local v_bad_probe = automation.validate(_automated_blank({
+    condition = { "event:new-task" },
+    execute   = { "probe slot:abc" },
+  }))
+  ok("F4: hook validator surfaces malformed registered-prefix step",
+    #v_bad_probe == 1 and v_bad_probe[1].code == "automation-execute-malformed",
+    "got: " .. vim.inspect(v_bad_probe))
+  local v_good_probe = automation.validate(_automated_blank({
+    condition = { "event:new-task" },
+    execute   = { "probe slot:5" },
+  }))
+  ok("F4: hook validator passes well-formed registered-prefix step",
+    #v_good_probe == 0)
+
+  automation.register_executor("probe-exec:", {
+    execute = function(_step, _clone, _ctx)
+      return { ok = true, message = "stub", completed_clone = false }, nil
+    end,
+    validate = function(step)
+      if not step:match("^probe%-exec:%d+$") then
+        return "probe-exec:<N> expects an integer"
+      end
+      return nil
+    end,
+  })
+  local v_bad_pe = automation.validate(_automated_blank({
+    condition = { "event:new-task" },
+    execute   = { "probe-exec:bad" },
+  }))
+  ok("F4: executor validator surfaces malformed registered-prefix step",
+    #v_bad_pe == 1 and v_bad_pe[1].code == "automation-execute-malformed")
+
+  automation.unregister_hook("probe slot:")
+  automation.unregister_executor("probe-exec:")
+
+  cleanup()
+end)()
+
+-- ───────────────────── 71. Lector F1 + F2 + F3 ──────────────────────
+-- F1: bash steps are async; clone bumps to `in-progress` before
+--     launching; eventual completion lands via the
+--     `core.todo.automation:fired` event with the full outcome.
+-- F2: failed steps persist errors[] to the clone FILE (managed-field
+--     write), not just to the return value.
+-- F3: host Lua bypass flags reach plugin executors via ctx.
+print("\n[71] ADR-0035 Lector F1 + F2 + F3 — async bash + persisted errors + executor ctx")
+;(function()
+  local ok_a, automation = pcall(require, "auto-core.todo.automation")
+  if not ok_a then return end
+  local todo   = require("auto-core.todo")
+  local schema = require("auto-core.todo.schema")
+  local paths  = require("auto-core.todo.paths")
+  local md     = require("auto-core.todo.md")
+
+  -- Isolate workspace + state.
+  local tmp_root = vim.fn.tempname()
+  vim.fn.mkdir(tmp_root, "p")
+  local worktree = require("auto-core.git.worktree")
+  worktree.set_workspace_root(tmp_root)
+  local state_tmp = vim.fn.tempname() .. "_p71-state"
+  vim.fn.mkdir(state_tmp, "p")
+  require("auto-core.state").configure({ persist_dir = state_tmp })
+
+  -- Trust gate: enable bash for F1 happy-path testing. Reset the
+  -- allowlist explicitly because section [70] left a leftover
+  -- regex set (`{"^echo ", "^make "}`) and `auto-core.state`'s
+  -- registry caches the namespace handle, so the persist_dir flip
+  -- in this section's setup doesn't repopulate the in-memory
+  -- state. The trust state propagates across smoke sections
+  -- unless we explicitly reset.
+  automation.acknowledge_first_run()
+  automation.set_trust({ bash_enabled = true, bash_allowlist = false })
+
+  local function cleanup()
+    automation.stop()
+    automation.set_trust({ bash_enabled = false })
+    worktree.set_workspace_root(nil)
+    require("auto-core.state").configure({ persist_dir = nil })
+    vim.fn.delete(tmp_root,  "rf")
+    vim.fn.delete(state_tmp, "rf")
+  end
+
+  -- ── helper: build a template via direct managed-field write ──
+  local function _make_automated_template(id, title, exec_list)
+    local tpl_id = todo.add({ id = id, title = title,
+      description = "F1+F2 fixture" })
+    todo.status(tpl_id, "automated")
+    local tpl_path = paths.task_file_path(paths.resolve_todo_dir(), tpl_id, "automated", nil)
+    local f = io.open(tpl_path, "r"); local txt = f:read("*a"); f:close()
+    local dec = md.decode(txt)
+    dec.value.condition = { "event:new-task" }
+    dec.value.execute   = exec_list
+    local enc = md.encode(dec.value)
+    local g = io.open(tpl_path .. ".tmp", "w"); g:write(enc); g:close()
+    os.rename(tpl_path .. ".tmp", tpl_path)
+    return tpl_id
+  end
+
+  -- ── F1: bash success path. Use `true` so the step exits 0 fast.
+  local tpl_ok = _make_automated_template(
+    "2026-05-30-p71-bash-ok", "F1 bash ok", { "bash:5 true" })
+
+  local events = require("auto-core.events")
+  -- One subscriber, payloads keyed by origin_id so both F1 and F2
+  -- can read their own fire result independently.
+  local fired_by_origin = {}
+  local sub_handle = events.subscribe("core.todo.automation:fired", function(p)
+    if p and p.origin_id then fired_by_origin[p.origin_id] = p end
+  end)
+
+  local fire_res, fire_err = automation.fire(tpl_ok, {})
+  ok("F1: fire returns immediately without blocking",
+    fire_res and not fire_err)
+  ok("F1: outcome reports in_flight (async)",
+    fire_res and fire_res.outcome == "in_flight",
+    "got outcome: " .. tostring(fire_res and fire_res.outcome))
+
+  -- Clone must be in-progress while bash is in flight. The async
+  -- callback fires via `vim.schedule` so the in-progress status
+  -- transition (which happens BEFORE the vim.system call inside
+  -- _execute_step) is observable synchronously after fire() returns.
+  local clone = todo.get(fire_res.clone_id)
+  ok("F1: clone exists after fire (file written to disk)",
+    clone ~= nil,
+    "clone_id=" .. tostring(fire_res.clone_id)
+      .. " todo_dir=" .. tostring(require("auto-core.todo.paths").resolve_todo_dir()))
+  ok("F1: clone bumped to in-progress BEFORE bash exit",
+    clone and clone.status == "in-progress",
+    "got status: " .. tostring(clone and clone.status))
+
+  -- Wait for the fired event (`true` typically completes within
+  -- 200ms; allow generous slack).
+  vim.wait(5000, function() return fired_by_origin[tpl_ok] ~= nil end)
+  local f1_event = fired_by_origin[tpl_ok]
+  ok("F1: core.todo.automation:fired fires AFTER async bash completes",
+    f1_event ~= nil)
+  ok("F1: event outcome=ok for successful bash",
+    f1_event and f1_event.outcome == "ok",
+    "got outcome: " .. tostring(f1_event and f1_event.outcome))
+
+  -- Clone should now be completed (last step succeeded; completed_clone=true).
+  vim.wait(500, function()
+    local t = todo.get(fire_res.clone_id)
+    return t and t.status == "completed"
+  end)
+  local final = todo.get(fire_res.clone_id)
+  ok("F1: clone reaches completed after async exit 0",
+    final and final.status == "completed",
+    "got: " .. tostring(final and final.status))
+
+  -- ── F2: failed bash → errors[] persists to the clone FILE.
+  local tpl_fail = _make_automated_template(
+    "2026-05-30-p71-bash-fail", "F2 bash fail",
+    { "bash:5 exit 7" })  -- exits non-zero
+
+  local fire_res2, fire_err2 = automation.fire(tpl_fail, {})
+  ok("F2: fire returns immediately even for failing bash",
+    fire_res2 and not fire_err2)
+
+  vim.wait(5000, function() return fired_by_origin[tpl_fail] ~= nil end)
+  local f2_event = fired_by_origin[tpl_fail]
+  ok("F2: fired event arrives for failed bash",
+    f2_event ~= nil)
+  ok("F2: outcome reports failed/partial",
+    f2_event and (f2_event.outcome == "failed"
+                  or f2_event.outcome == "partial"),
+    "got: " .. tostring(f2_event and f2_event.outcome))
+
+  -- The clone's errors[] must include the step-failed entry.
+  local failed_clone = todo.get(fire_res2.clone_id)
+  ok("F2: clone exists after failed bash",
+    failed_clone ~= nil)
+  ok("F2: clone's errors[] persisted to disk with code automation-step-failed",
+    failed_clone and type(failed_clone.errors) == "table"
+      and #failed_clone.errors >= 1
+      and failed_clone.errors[1].code == "automation-step-failed",
+    "got errors: " .. vim.inspect(failed_clone and failed_clone.errors))
+
+  events.unsubscribe(sub_handle)
+
+  -- ── F3: host Lua bypass flags reach plugin executors via ctx.
+  -- Register a probe executor that asserts ctx is present and
+  -- carries the flags we pass.
+  local seen_ctx
+  automation.register_executor("ctx-probe:", function(_step, _clone, ctx)
+    seen_ctx = ctx
+    return { ok = true, message = "ctx received", completed_clone = false }, nil
+  end)
+
+  local tpl_ctx = _make_automated_template(
+    "2026-05-30-p71-ctx-probe", "F3 ctx probe", { "ctx-probe:1" })
+
+  -- Trust state currently has bash_enabled=true (set above). To
+  -- prove the bypass flow, flip back to disabled and pass bypass
+  -- through opts.
+  automation.set_trust({ bash_enabled = false })
+  seen_ctx = nil
+  automation.fire(tpl_ctx, {
+    bypass_bash_disabled = true,
+    bypass_allowlist     = true,
+  })
+  ok("F3: executor received ctx as 3rd argument",
+    type(seen_ctx) == "table")
+  ok("F3: ctx.bypass_bash_disabled propagated from opts",
+    seen_ctx and seen_ctx.bypass_bash_disabled == true)
+  ok("F3: ctx.bypass_allowlist propagated from opts",
+    seen_ctx and seen_ctx.bypass_allowlist == true)
+  ok("F3: ctx.clone_id is populated for executor introspection",
+    seen_ctx and type(seen_ctx.clone_id) == "string")
+
+  automation.unregister_executor("ctx-probe:")
   cleanup()
 end)()
 

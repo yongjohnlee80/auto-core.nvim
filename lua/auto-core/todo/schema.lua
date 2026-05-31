@@ -42,8 +42,20 @@ M.VALID_ERROR_CODE = {
   ["unresolved-variable"]          = true,  -- v0.1.40: `$VAR/...` ref whose VAR has no resolver
   ["automation-template-assignee"] = true,  -- ADR-0035 §3: automated templates must not carry a top-level assignee
   ["automation-origin-not-found"]  = true,  -- ADR-0035 §5.5: clone's `origin:` doesn't resolve to a live automated template
-  ["automation-condition-malformed"] = true, -- ADR-0035 §12: cron-or-event parse failure (Phase 2 populates; Phase 1 reserves)
-  ["automation-execute-malformed"] = true,  -- ADR-0035 §8: execute DSL parse failure (Phase 2 populates; Phase 1 reserves)
+  ["automation-condition-malformed"] = true, -- ADR-0035 §12: cron-or-event parse failure
+  ["automation-execute-malformed"] = true,  -- ADR-0035 §8: execute DSL parse failure
+  -- ADR-0035 Phase 2 + Lector F2 amendment: codes produced by
+  -- `auto-core.todo.automation` at fire-time, written to the clone's
+  -- `errors[]` via the managed-field write helper. Without them in
+  -- this catalog, schema.validate rejects clones whose execute steps
+  -- failed and `todo.get()` returns nil — which masks the audit trail.
+  ["automation-step-failed"]         = true,  -- generic step failure (catches every fire-time error)
+  ["automation-bash-disabled"]       = true,  -- bash step refused: workspace trust gate off (§4.5)
+  ["automation-bash-not-allowlisted"] = true, -- bash step refused: doesn't match `bash_allowlist` (§4.5)
+  ["automation-bash-t-no-resolver"]  = true,  -- `bash -t=N` step but no auto-agents executor registered
+  ["automation-bash-t-range"]        = true,  -- `bash -t=N` step with N out of 1..MAX_SLOTS (4)
+  ["automation-bash-t-slot-admin"]   = true,  -- reserved (was used pre-floating-terminal correction; kept for cross-version migration)
+  ["automation-slot-no-resolver"]    = true,  -- `assign slot:N` but no auto-agents hook registered
 }
 
 -- Field-shape catalog. Drives both presence-checks and unknown-key

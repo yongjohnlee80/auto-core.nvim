@@ -126,42 +126,83 @@ end
 
 -- ── hook + executor registry ──────────────────────────────────────
 
--- `_hooks` are pure rewrite resolvers: prefix → fn(step) → (rewritten_step, err)
--- `_executors` are plugin-owned executors: prefix → fn(step, clone) → ({ok, message, completed_clone}, err)
+-- Storage shape (Lector F4 amendment, 2026-05-30):
+--   _hooks[prefix]     = { resolve = fn(step) → (rewritten_step, err),
+--                          validate = fn(step) → err? }   -- validate optional
+--   _executors[prefix] = { execute = fn(step, clone, ctx) → (result, err),
+--                          validate = fn(step) → err? }   -- validate optional
+--
+-- `register_*` accepts EITHER a bare function (back-compat with the
+-- Phase 2 API; no validator) OR a table `{ resolve|execute = fn,
+-- validate = fn }`. The table form lets plugin owners express
+-- content validation alongside the handler so refresh-side / live
+-- diagnostics catch malformed plugin-owned forms (e.g.
+-- `assign slot:abc`, `bash -t=99 echo hi`) instead of waiting for
+-- fire time. Pure prefix-match validation (existing behavior) is
+-- the fallback when no validator is registered.
 local _hooks     = {}
 local _executors = {}
 
----Register a rewrite hook. fn receives the raw step string, returns
----`(rewritten_step, err)` — auto-core then fires the rewritten step
----through its own primitives. Used for `assign slot:<N>` (auto-agents
----registers this).
+---Normalize a `(fn | table)` argument into the canonical registry
+---record. `kind` is `"resolve"` or `"execute"` and identifies which
+---function field to extract from a table form.
+local function _normalize_handler_spec(spec, kind, caller)
+  if type(spec) == "function" then
+    return { [kind] = spec }
+  end
+  if type(spec) == "table" then
+    if type(spec[kind]) ~= "function" then
+      error(caller .. ": table form must provide `" .. kind .. " = fn`")
+    end
+    if spec.validate ~= nil and type(spec.validate) ~= "function" then
+      error(caller .. ": optional `validate` must be a function")
+    end
+    return { [kind] = spec[kind], validate = spec.validate }
+  end
+  error(caller .. ": handler must be a function or { " .. kind .. " = fn, validate = fn? }")
+end
+
+---Register a rewrite hook. The handler receives the raw step string
+---and returns `(rewritten_step, err)`. Auto-core then fires the
+---rewritten step through its own primitives. Used for
+---`assign slot:<N>` (auto-agents registers this).
+---
+---ADR-0035 Lector F4: optional `validate` function can be provided
+---via the table form `{ resolve = fn, validate = fn }` so refresh-
+---side / live diagnostics catch malformed forms at validate time
+---instead of waiting for fire time.
 ---@param prefix string
----@param fn fun(step: string): string?, string?
-function M.register_hook(prefix, fn)
+---@param fn_or_spec fun(step: string): string?, string? | { resolve: fun(string): string?, string?, validate: fun(string): string? }
+function M.register_hook(prefix, fn_or_spec)
   if type(prefix) ~= "string" or prefix == "" then
     error("automation.register_hook: prefix must be a non-empty string")
   end
-  if type(fn) ~= "function" then
-    error("automation.register_hook: fn must be a function")
-  end
-  _hooks[prefix] = fn
+  _hooks[prefix] = _normalize_handler_spec(fn_or_spec, "resolve",
+    "automation.register_hook")
 end
 
----Register a plugin-owned executor. fn receives the raw step string
----and the clone task, returns `({ok=bool, message=str?, completed_clone=bool?}, err)`.
----Auto-core does NOT execute the step itself; the executor's result
----IS the step outcome. Used for `bash -t=<N> <cmd>` (auto-agents
----registers this; calls `auto-agents.term.send(N, cmd)`).
+---Register a plugin-owned executor. The handler receives `(step,
+---clone, ctx)` and returns `({ok=bool, message=str?,
+---completed_clone=bool?}, err)`. Auto-core does NOT execute the step
+---itself; the executor's result IS the step outcome. Used for
+---`bash -t=<N> <cmd>` (auto-agents registers this).
+---
+---Lector F3 amendment: `ctx` carries the bypass flags from
+---`M.fire`'s `opts` so the documented host Lua bypass path applies
+---uniformly to both built-in `bash` AND plugin-extended forms. The
+---third arg is optional in the back-compat 2-arg signature, but
+---plugin owners SHOULD declare three to honor ctx-driven bypass.
+---
+---Lector F4 amendment: optional `validate` function via the table
+---form (same shape as register_hook).
 ---@param prefix string
----@param fn fun(step: string, clone: table): table?, string?
-function M.register_executor(prefix, fn)
+---@param fn_or_spec fun(step: string, clone: table, ctx: table?): table?, string? | { execute: fun(string, table, table?): table?, string?, validate: fun(string): string? }
+function M.register_executor(prefix, fn_or_spec)
   if type(prefix) ~= "string" or prefix == "" then
     error("automation.register_executor: prefix must be a non-empty string")
   end
-  if type(fn) ~= "function" then
-    error("automation.register_executor: fn must be a function")
-  end
-  _executors[prefix] = fn
+  _executors[prefix] = _normalize_handler_spec(fn_or_spec, "execute",
+    "automation.register_executor")
 end
 
 function M.unregister_hook(prefix)     _hooks[prefix]     = nil end
@@ -174,6 +215,18 @@ function M.registry_snapshot()
   for k, _ in pairs(_executors) do es[#es + 1] = k end
   table.sort(hs); table.sort(es)
   return hs, es
+end
+
+---Call the resolve function for a registered hook prefix. Lookup
+---encapsulated here so the registry's storage shape can evolve
+---without scattering knowledge of it across the file.
+local function _call_hook_resolve(prefix, step)
+  return _hooks[prefix].resolve(step)
+end
+
+---Call the execute function for a registered executor prefix.
+local function _call_executor_execute(prefix, step, clone, ctx)
+  return _executors[prefix].execute(step, clone, ctx)
 end
 
 -- ── DSL validation (Phase 2 + Phase 3 share this) ─────────────────
@@ -284,7 +337,12 @@ function M.validate(task)
   end
 
   -- execute[] — each entry must match a built-in primitive OR a
-  -- registered hook prefix OR a registered executor prefix.
+  -- registered hook prefix OR a registered executor prefix. Lector
+  -- F4: when a plugin prefix matches AND that plugin registered a
+  -- validator, call it so malformed forms (`assign slot:abc`,
+  -- `bash -t=99 echo hi`) fail at validate time instead of fire
+  -- time. Plugins without a validator fall back to the prior
+  -- "prefix match = trust" behavior.
   if type(task.execute) == "table" then
     for i, step in ipairs(task.execute) do
       if type(step) ~= "string" or step == "" then
@@ -298,11 +356,46 @@ function M.validate(task)
         local bp = _builtin_prefix(step)
         local hp = _hook_prefix(step)
         local ep = _executor_prefix(step)
-        if not (bp or hp or ep) then
-          -- Probe for known plugin prefixes that aren't currently
-          -- registered (e.g. `assign slot:` without auto-agents
-          -- loaded) so the error message points the user at the
-          -- right fix.
+        if hp then
+          -- Plugin-owned rewrite prefix matched. Call the
+          -- validator if the plugin registered one.
+          local vfn = _hooks[hp].validate
+          if vfn then
+            local verr = vfn(step)
+            if verr then
+              -- Use a code that points at the plugin family. Auto-
+              -- agents' hook for `assign slot:` maps cleanly to
+              -- `automation-slot-no-resolver` semantically — the
+              -- form is recognized but unusable — but we keep
+              -- `automation-execute-malformed` here so the code
+              -- specifically signals "the syntax is wrong" vs
+              -- "the resolver is missing".
+              out[#out + 1] = {
+                field = "execute[" .. i .. "]",
+                code  = "automation-execute-malformed",
+                message = "step '" .. step .. "': " .. tostring(verr),
+                detected = now,
+              }
+            end
+          end
+        elseif ep then
+          local vfn = _executors[ep].validate
+          if vfn then
+            local verr = vfn(step)
+            if verr then
+              out[#out + 1] = {
+                field = "execute[" .. i .. "]",
+                code  = "automation-execute-malformed",
+                message = "step '" .. step .. "': " .. tostring(verr),
+                detected = now,
+              }
+            end
+          end
+        elseif not bp then
+          -- Nothing matched. Probe for known plugin prefixes that
+          -- aren't currently registered (e.g. `assign slot:` without
+          -- auto-agents loaded) so the error message points the
+          -- user at the right fix.
           local err_code = "automation-execute-malformed"
           local hint = "no built-in primitive, hook, or executor matches"
           if step:sub(1, 12) == "assign slot:" then
@@ -372,22 +465,41 @@ local function _check_bash_trust(cmd, opts)
   return true, nil
 end
 
----Execute a single step. Returns
----`{ ok=bool, message=str?, completed_clone=bool? }, err?`.
+---Execute a single step. Continuation-passing: the caller MUST
+---supply `on_complete(result, err)` — for sync steps the callback
+---fires inline before this function returns; for async steps
+---(plain `bash` / `bash:<sec>`) the function kicks off the work
+---and returns immediately, with the callback invoked later when
+---the process exits.
+---
+---Lector F1 amendment: bash steps no longer call `sys:wait()` — that
+---blocked Neovim for up to 1 hour. The async-callback path is
+---mandatory now; sync semantics are reserved for assigns, executors
+---(which already report delivery success synchronously), and
+---hook-rewrites.
+---
+---Lector F3 amendment: `ctx` (the third arg) is passed through to
+---registered executors so plugin-owned forms can honor the host's
+---`bypass_bash_disabled` / `bypass_allowlist` flags. Without this,
+---only the built-in `bash` primitive saw the bypass, leaving
+---`bash -t=` blocked even from the documented host Lua escape
+---hatch.
+---
 ---@param step string
 ---@param clone table
----@param opts { bypass_bash_disabled: boolean?, bypass_allowlist: boolean? }?
----@return table? result, string? err
-local function _execute_step(step, clone, opts)
-  opts = opts or {}
+---@param ctx { bypass_bash_disabled: boolean?, bypass_allowlist: boolean?, clone_id: string? }?
+---@param on_complete fun(result: table?, err: string?)
+local function _execute_step(step, clone, ctx, on_complete)
+  ctx = ctx or {}
 
   -- 1. Rewrite hook first (longest matching prefix).
   local hp = _hook_prefix(step)
   if hp then
-    local rewritten, herr = _hooks[hp](step)
-    if herr then return nil, herr end
+    local rewritten, herr = _call_hook_resolve(hp, step)
+    if herr then return on_complete(nil, herr) end
     if type(rewritten) ~= "string" or rewritten == "" then
-      return nil, "hook for prefix '" .. hp .. "' returned empty step"
+      return on_complete(nil,
+        "hook for prefix '" .. hp .. "' returned empty step")
     end
     -- Recurse with the rewritten step. The rewritten step is expected
     -- to match a built-in primitive (e.g. `assign slot:N` rewrites to
@@ -399,61 +511,133 @@ local function _execute_step(step, clone, opts)
   -- 2. Executor next (longest matching prefix).
   local ep = _executor_prefix(step)
   if ep then
-    local res, eerr = _executors[ep](step, clone)
-    if eerr then return nil, eerr end
+    local res, eerr = _call_executor_execute(ep, step, clone, ctx)
+    if eerr then return on_complete(nil, eerr) end
     if type(res) ~= "table" or res.ok ~= true then
-      return nil, "executor for prefix '" .. ep .. "' returned non-ok result"
+      return on_complete(nil,
+        "executor for prefix '" .. ep .. "' returned non-ok result")
     end
-    return res, nil
+    return on_complete(res, nil)
   end
 
-  -- 3. Built-in: `assign agent:` / `assign user`.
+  -- 3. Built-in: `assign agent:` / `assign user`. Synchronous.
   if _builtin_prefix(step) == "assign agent:" or step == "assign user" then
     local target, perr = _parse_assign(step)
-    if perr then return nil, perr end
+    if perr then return on_complete(nil, perr) end
     local _, asn_err = _todo().assign(clone.id, target, "ADR-0035 automation")
-    if asn_err then return nil, asn_err end
-    return { ok = true, message = "assigned to " .. target }, nil
+    if asn_err then return on_complete(nil, asn_err) end
+    return on_complete({ ok = true, message = "assigned to " .. target }, nil)
   end
 
-  -- 4. Built-in: `bash:<sec> <cmd>` (explicit timeout override).
+  -- 4 / 5. Built-in bash (`bash:<sec> <cmd>` with explicit timeout
+  -- OR plain `bash <cmd>` with the 1h default). Async via
+  -- vim.system's callback form — does NOT block Neovim.
+  local cmd, timeout_ms
   do
-    local timeout_ms, rest = _parse_bash_timeout(step)
-    if timeout_ms then
-      local ok_t, terr = _check_bash_trust(rest, opts)
-      if not ok_t then return nil, terr end
-      -- Use vim.system async with the supplied timeout. The fire
-      -- caller can await via the returned handle or fire-and-forget
-      -- depending on use case; we capture the exit code synchronously
-      -- (via `:wait(timeout_ms)`) so the step outcome reflects
-      -- command success vs failure.
-      local sys = vim.system({ "bash", "-c", rest }, { text = true })
-      local r = sys:wait(timeout_ms)
-      if r.code == 0 then
-        return { ok = true, message = "bash exit 0", completed_clone = true }, nil
-      else
-        return nil, "bash exit " .. tostring(r.code)
-          .. (r.stderr and r.stderr ~= "" and (": " .. r.stderr) or "")
-      end
+    local sec_ms, rest = _parse_bash_timeout(step)
+    if sec_ms then
+      cmd, timeout_ms = rest, sec_ms
+    elseif _builtin_prefix(step) == "bash " then
+      cmd, timeout_ms = step:sub(6), DEFAULT_BASH_TIMEOUT_MS
     end
   end
+  if cmd then
+    local ok_t, terr = _check_bash_trust(cmd, ctx)
+    if not ok_t then return on_complete(nil, terr) end
 
-  -- 5. Built-in: plain `bash <cmd>` (default 1h timeout).
-  if _builtin_prefix(step) == "bash " then
-    local cmd = step:sub(6)  -- strip "bash "
-    local ok_t, terr = _check_bash_trust(cmd, opts)
-    if not ok_t then return nil, terr end
-    local sys = vim.system({ "bash", "-c", cmd }, { text = true })
-    local r = sys:wait(DEFAULT_BASH_TIMEOUT_MS)
-    if r.code == 0 then
-      return { ok = true, message = "bash exit 0", completed_clone = true }, nil
-    else
-      return nil, "bash exit " .. tostring(r.code)
-        .. (r.stderr and r.stderr ~= "" and (": " .. r.stderr) or "")
+    -- ADR §5: bash-owned clones bump to `in-progress` BEFORE
+    -- launching so the panel reflects "actively running" while the
+    -- command is in flight. Only fires when the clone is currently
+    -- `open` (assigns earlier in the chain may have already moved
+    -- it through M.assign's atomic transition).
+    if clone and clone.status == "open" then
+      pcall(_todo().status, clone.id, "in-progress")
     end
+
+    -- Async vim.system. The callback runs on libuv's thread; wrap
+    -- with vim.schedule so any nvim API calls inside on_complete
+    -- run on the main loop.
+    vim.system({ "bash", "-c", cmd }, {
+      text    = true,
+      timeout = timeout_ms,
+    }, function(result)
+      vim.schedule(function()
+        if result.code == 0 then
+          on_complete({
+            ok               = true,
+            message          = "bash exit 0",
+            completed_clone  = true,
+          }, nil)
+        else
+          local stderr = result.stderr or ""
+          local suffix = stderr ~= "" and (": " .. stderr) or ""
+          -- vim.system signals a timeout via `signal == "SIGKILL"`
+          -- after the timeout window elapses. Surface as a
+          -- recognizable error so the clone's `errors[]` entry is
+          -- specific.
+          if result.signal and result.signal ~= 0 then
+            on_complete(nil, "bash killed by signal "
+              .. tostring(result.signal) .. " (timeout?)" .. suffix)
+          else
+            on_complete(nil, "bash exit " .. tostring(result.code) .. suffix)
+          end
+        end
+      end)
+    end)
+    return  -- async; on_complete fires later
   end
 
-  return nil, "no handler matched step: '" .. step .. "'"
+  on_complete(nil, "no handler matched step: '" .. step .. "'")
+end
+
+-- ── managed-field write helper (Lector F2) ────────────────────────
+
+---Internal helper: rewrite ONE managed field on disk. The schema
+---validator rejects bypass paths via `todo.update()`, so managed
+---fields (`origin`, `last_fired_at`, `errors`) need a direct file
+---mutation. Atomic via `<file>.tmp` + os.rename, matching the same
+---contract `atomic_write` uses elsewhere.
+---
+---`task_id` is looked up across the four flat buckets (open,
+---in-progress, automated, deferred, completed) — the clone may
+---have moved between bucket dirs since fire started. `archived`
+---tasks are not supported here (callers don't need this for the
+---automation surface).
+---@param task_id string
+---@param mutate fun(task: table)  -- mutates `task` in place
+---@return boolean ok, string? err
+local function _write_managed_field(task_id, mutate)
+  local paths = _paths()
+  local td    = paths.resolve_todo_dir()
+  local md    = require("auto-core.todo.md")
+
+  -- Find the live file location. Mirror find_task_path's flat-
+  -- bucket scan without importing a private from init.lua.
+  local fs_path = require("auto-core.fs.path")
+  local file
+  for _, bucket in ipairs(paths.FLAT_BUCKETS) do
+    local candidate = fs_path.join(td, bucket, task_id .. ".md")
+    if fs_path.is_file(candidate) then file = candidate; break end
+  end
+  if not file then return false, "task '" .. task_id .. "' not found" end
+
+  local f = io.open(file, "r")
+  if not f then return false, "open failed: " .. file end
+  local txt = f:read("*a"); f:close()
+  local dec = md.decode(txt)
+  if not (dec and dec.ok and type(dec.value) == "table") then
+    return false, "decode failed: " .. tostring(dec and dec.err or "?")
+  end
+  mutate(dec.value)
+  local enc_ok, enc = pcall(md.encode, dec.value)
+  if not enc_ok then return false, "encode failed: " .. tostring(enc) end
+  local tmp = file .. ".tmp"
+  local g = io.open(tmp, "w")
+  if not g then return false, "open write failed: " .. tmp end
+  g:write(enc); g:close()
+  local ok_ren, ren_err = os.rename(tmp, file)
+  if not ok_ren then return false, "rename failed: " .. tostring(ren_err) end
+  return true, nil
 end
 
 -- ── clone-on-fire ─────────────────────────────────────────────────
@@ -538,123 +722,161 @@ function M.fire(id, opts)
     description = description,
     tags        = clone_tags,
     -- `origin:` set via direct frontmatter — todo.add doesn't
-    -- expose it (it's a managed field), but we want it on the
-    -- clone immediately. We patch via todo.update after add.
+    -- expose it (it's a managed field). We patch via the
+    -- _write_managed_field helper below.
   })
   if aerr or not clone_id then return nil, aerr or "todo.add failed" end
 
-  -- Patch the origin field via direct file mutation (managed, not
-  -- a normal `update` field). Use a small helper that re-reads
-  -- + rewrites, preserving the atomic-write contract.
-  do
-    local paths = _paths()
-    local td    = paths.resolve_todo_dir()
-    local file  = paths.task_file_path(td, clone_id, "open", nil)
-    local md    = require("auto-core.todo.md")
-    local f = io.open(file, "r")
-    if f then
-      local txt = f:read("*a"); f:close()
-      local dec = md.decode(txt)
-      if dec.ok and type(dec.value) == "table" then
-        dec.value.origin = id
-        local enc_ok, enc = pcall(md.encode, dec.value)
-        if enc_ok then
-          local tmp = file .. ".tmp"
-          local g = io.open(tmp, "w")
-          if g then
-            g:write(enc); g:close()
-            os.rename(tmp, file)
-          end
+  -- Patch the origin field on the clone (managed). Lector F2: use
+  -- the shared managed-field helper.
+  _write_managed_field(clone_id, function(task)
+    task.origin = id
+  end)
+
+  -- ── async step continuation chain ─────────────────────────────
+  --
+  -- Lector F1: bash steps are async (vim.system callback form).
+  -- We can't run the step loop as a flat `for` — once a bash step
+  -- kicks off, the remaining steps need to run inside its
+  -- callback. Pass a `run_next(idx)` continuation that walks the
+  -- step list; bash steps return into the callback, which then
+  -- calls run_next(idx + 1).
+  --
+  -- M.fire returns synchronously after kicking off the chain. For
+  -- pure sync templates (only assigns/executors), the entire chain
+  -- runs inline before return — outcome reflects the final state.
+  -- For templates with bash, M.fire returns with `outcome =
+  -- "in_flight"`; the final outcome lands in the
+  -- `core.todo.automation:fired` event when the chain completes.
+
+  local execute_steps = template.execute or {}
+  local errors        = {}
+  local last_completed = false
+  local outcome       = "ok"
+  local async_seen    = false
+  local finished      = false  -- true once the chain has reached the end
+  local ctx = {
+    bypass_bash_disabled = opts.bypass_bash_disabled == true,
+    bypass_allowlist     = opts.bypass_allowlist == true,
+    clone_id             = clone_id,
+  }
+
+  local function _finalize()
+    if finished then return end
+    finished = true
+
+    -- Lector F2: errors[] are managed; todo.update rejects them.
+    -- Persist via the direct managed-field write so the clone
+    -- file carries the durable audit trail the panel renders.
+    if #errors > 0 then
+      _write_managed_field(clone_id, function(task)
+        task.errors = errors
+      end)
+    end
+
+    -- ADR §5 clone-completion lifecycle: only transition to
+    -- `completed` when outcome=ok AND the last successful step's
+    -- result claimed completed_clone (true only for plain `bash`
+    -- exit-0; never for `bash -t=` per A3; never for assigns).
+    if outcome == "ok" and last_completed then
+      pcall(_todo().status, clone_id, "completed")
+    end
+
+    -- Bump the template's `last_fired_at` (managed).
+    _write_managed_field(id, function(task)
+      task.last_fired_at = now_iso
+      task.updated       = now_iso
+    end)
+
+    -- Fire event AFTER persistence so subscribers see consistent
+    -- on-disk state.
+    local ok_ev, events = pcall(_events)
+    if ok_ev and events and type(events.publish) == "function" then
+      pcall(events.publish, "core.todo.automation:fired", {
+        origin_id          = id,
+        clone_id           = clone_id,
+        fired_at           = now_iso,
+        conditions_matched = snapshot,
+        execute_steps      = execute_steps,
+        outcome            = outcome,
+        errors             = errors,
+      })
+    end
+
+    local log = _log()
+    if log and log.info then
+      pcall(log.info, "todo.automation",
+        string.format("fired %s → %s [%s]", id, clone_id, outcome))
+    end
+  end
+
+  local function run_next(idx)
+    if idx > #execute_steps then
+      return _finalize()
+    end
+    local step = execute_steps[idx]
+    -- Re-read clone since the previous step may have mutated state
+    -- (assign triggers the auto-transition + bucket move).
+    local clone = todo.get(clone_id) or { id = clone_id, status = "open" }
+
+    -- Detect whether this step will be async BEFORE dispatching —
+    -- async_seen drives the M.fire return outcome.
+    local maybe_async = false
+    do
+      -- Strip rewrite hooks once to decide async-ness on the
+      -- effective step (a hook that rewrites `assign slot:N` to
+      -- `assign agent:foo` makes the step sync). Executors are
+      -- always sync (they return the result synchronously);
+      -- bash is the only async family.
+      local effective = step
+      local hp = _hook_prefix(effective)
+      if hp then
+        local rewritten, _herr = _call_hook_resolve(hp, effective)
+        if type(rewritten) == "string" and rewritten ~= "" then
+          effective = rewritten
         end
       end
-    end
-  end
-
-  -- Execute steps sequentially.
-  local clone = todo.get(clone_id)
-  local errors = {}
-  local outcome = "ok"
-  local last_completed = false  -- whether the last step said completed_clone
-
-  for i, step in ipairs(template.execute or {}) do
-    local res, sterr = _execute_step(step, clone, opts)
-    -- Re-read clone since the step may have mutated state (assign
-    -- triggers the auto-transition + bucket move).
-    clone = todo.get(clone_id) or clone
-    if sterr then
-      errors[#errors + 1] = {
-        field = "execute[" .. i .. "]",
-        code  = "automation-step-failed",
-        message = "step " .. i .. " (`" .. step .. "`): " .. sterr,
-        detected = now_iso,
-      }
-      outcome = (i == 1) and "failed" or "partial"
-      break
-    end
-    last_completed = res.completed_clone == true
-  end
-
-  -- If the last successful step's result claimed completed_clone,
-  -- transition the clone. Per ADR §5, `bash -t=N` (executor) sets
-  -- this to false; only plain `bash` exit-0 sets it true. Agent
-  -- assignment leaves it false (the assignee closes the clone).
-  if outcome == "ok" and last_completed then
-    pcall(_todo().status, clone_id, "completed")
-  end
-
-  -- Surface errors[] on the clone if any landed.
-  if #errors > 0 then
-    pcall(_todo().update, clone_id, { errors = errors })
-  end
-
-  -- Bump the template's `last_fired_at` (managed field — patch via
-  -- the same managed-field mutation pattern used above for origin).
-  do
-    local paths = _paths()
-    local td    = paths.resolve_todo_dir()
-    local tfile = paths.task_file_path(td, id, "automated", nil)
-    local md    = require("auto-core.todo.md")
-    local f = io.open(tfile, "r")
-    if f then
-      local txt = f:read("*a"); f:close()
-      local dec = md.decode(txt)
-      if dec.ok and type(dec.value) == "table" then
-        dec.value.last_fired_at = now_iso
-        dec.value.updated       = now_iso
-        local enc_ok, enc = pcall(md.encode, dec.value)
-        if enc_ok then
-          local tmp = tfile .. ".tmp"
-          local g = io.open(tmp, "w")
-          if g then
-            g:write(enc); g:close()
-            os.rename(tmp, tfile)
-          end
-        end
+      if _builtin_prefix(effective) == "bash " or effective:sub(1, 5) == "bash:" then
+        maybe_async = true
       end
     end
+    if maybe_async then async_seen = true end
+
+    _execute_step(step, clone, ctx, function(res, sterr)
+      if sterr then
+        errors[#errors + 1] = {
+          field    = "execute[" .. idx .. "]",
+          code     = "automation-step-failed",
+          message  = "step " .. idx .. " (`" .. step .. "`): " .. sterr,
+          detected = now_iso,
+        }
+        outcome = (idx == 1) and "failed" or "partial"
+        return _finalize()
+      end
+      last_completed = res.completed_clone == true
+      run_next(idx + 1)
+    end)
   end
 
-  -- Best-effort event emission.
-  local ok_ev, events = pcall(_events)
-  if ok_ev and events and type(events.publish) == "function" then
-    pcall(events.publish, "core.todo.automation:fired", {
-      origin_id          = id,
-      clone_id           = clone_id,
-      fired_at           = now_iso,
-      conditions_matched = snapshot,
-      execute_steps      = template.execute or {},
-      outcome            = outcome,
-      errors             = errors,
-    })
-  end
+  run_next(1)
 
-  local log = _log()
-  if log and log.info then
-    pcall(log.info, "todo.automation",
-      string.format("fired %s → %s [%s]", id, clone_id, outcome))
+  -- If no async step kicked off, the chain already finalized
+  -- inline; reflect the synchronous outcome to the caller.
+  if not async_seen then
+    return {
+      clone_id = clone_id,
+      outcome  = outcome,
+      errors   = errors,
+    }, nil
   end
-
-  return { clone_id = clone_id, outcome = outcome, errors = errors }, nil
+  -- Async work is in flight. The caller (mailbox handler / smoke /
+  -- admin debug) sees `outcome = "in_flight"` and can subscribe to
+  -- `core.todo.automation:fired` for the final state.
+  return {
+    clone_id = clone_id,
+    outcome  = "in_flight",
+    errors   = {},  -- not yet finalized
+  }, nil
 end
 
 -- ── scheduler + event router ──────────────────────────────────────
