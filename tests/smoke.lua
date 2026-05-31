@@ -8970,6 +8970,96 @@ print("\n[72] ADR-0035 post-ship — empty condition/execute flagged as malforme
   local v_open = automation.validate(schema.blank({ status = "open" }))
   ok("validator: empty-list rules don't fire for non-automated tasks",
     #v_open == 0)
+
+  -- ADR-0035 post-ship Lector blocker (2026-05-31): demoting
+  -- FROM automated must clear the template-only fields so the
+  -- "non-automated rejects condition/execute/last_fired_at"
+  -- validator rule doesn't reject the write and leave the file
+  -- stuck at automated. Round-trip via real todo.status.
+  local todo = require("auto-core.todo")
+  local tmp_root = vim.fn.tempname()
+  vim.fn.mkdir(tmp_root, "p")
+  local worktree = require("auto-core.git.worktree")
+  worktree.set_workspace_root(tmp_root)
+  local state_tmp = vim.fn.tempname() .. "_p72-state"
+  vim.fn.mkdir(state_tmp, "p")
+  require("auto-core.state").configure({ persist_dir = state_tmp })
+  local function _cleanup()
+    worktree.set_workspace_root(nil)
+    require("auto-core.state").configure({ persist_dir = nil })
+    vim.fn.delete(tmp_root,  "rf")
+    vim.fn.delete(state_tmp, "rf")
+  end
+
+  -- Build an automated template via the public surface; patch
+  -- condition + execute via the managed-field-write pattern (the
+  -- same one M.fire / auto-finder scaffold use).
+  local tpl_id = todo.add({
+    id    = "2026-05-31-p72-demote-test",
+    title = "demote-clears-fields",
+  })
+  todo.status(tpl_id, "automated")
+  do
+    local paths = require("auto-core.todo.paths")
+    local md    = require("auto-core.todo.md")
+    local tpath = paths.task_file_path(paths.resolve_todo_dir(), tpl_id, "automated", nil)
+    local f = io.open(tpath, "r"); local txt = f:read("*a"); f:close()
+    local dec = md.decode(txt)
+    dec.value.condition     = { "0 0 * * *" }
+    dec.value.execute       = { 'bash -t=1 "echo hi"' }
+    dec.value.last_fired_at = "2026-05-30T00:00:00Z"
+    local enc = md.encode(dec.value)
+    local g = io.open(tpath .. ".tmp", "w"); g:write(enc); g:close()
+    os.rename(tpath .. ".tmp", tpath)
+  end
+
+  local before = todo.get(tpl_id)
+  ok("demote-cleanup: template starts with condition + execute populated",
+    type(before.condition) == "table" and #before.condition == 1
+      and type(before.execute) == "table" and #before.execute == 1
+      and before.last_fired_at ~= nil)
+
+  -- THE TEST: demote automated → open must succeed AND clear the
+  -- template-only fields.
+  local demoted, demote_err = todo.status(tpl_id, "open")
+  ok("demote-cleanup: todo.status(automated→open) succeeds",
+    demoted ~= nil and demote_err == nil,
+    "got err: " .. tostring(demote_err))
+  ok("demote-cleanup: condition cleared on demote",
+    demoted and demoted.condition == nil,
+    "got: " .. vim.inspect(demoted and demoted.condition))
+  ok("demote-cleanup: execute cleared on demote",
+    demoted and demoted.execute == nil,
+    "got: " .. vim.inspect(demoted and demoted.execute))
+  ok("demote-cleanup: last_fired_at cleared on demote",
+    demoted and demoted.last_fired_at == nil,
+    "got: " .. tostring(demoted and demoted.last_fired_at))
+
+  -- Re-read from disk to confirm persistence.
+  local on_disk = todo.get(tpl_id)
+  ok("demote-cleanup: cleared fields are persisted on disk",
+    on_disk and on_disk.condition == nil and on_disk.execute == nil
+      and on_disk.last_fired_at == nil)
+
+  -- Demote to deferred / completed / archived also works (same path).
+  todo.status(tpl_id, "automated")
+  do
+    local paths = require("auto-core.todo.paths")
+    local md    = require("auto-core.todo.md")
+    local tpath = paths.task_file_path(paths.resolve_todo_dir(), tpl_id, "automated", nil)
+    local f = io.open(tpath, "r"); local txt = f:read("*a"); f:close()
+    local dec = md.decode(txt)
+    dec.value.condition = { "0 0 * * *" }
+    dec.value.execute   = { 'bash -t=1 "echo hi"' }
+    local enc = md.encode(dec.value)
+    local g = io.open(tpath .. ".tmp", "w"); g:write(enc); g:close()
+    os.rename(tpath .. ".tmp", tpath)
+  end
+  local def_demoted = todo.status(tpl_id, "deferred")
+  ok("demote-cleanup: automated → deferred also clears template fields",
+    def_demoted and def_demoted.condition == nil and def_demoted.execute == nil)
+
+  _cleanup()
 end)()
 
 -- ─────────────────────── summary ─────────────────────────

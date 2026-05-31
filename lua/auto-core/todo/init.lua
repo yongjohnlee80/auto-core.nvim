@@ -1304,6 +1304,22 @@ function M.status(id, new)
     end
   end
 
+  -- ADR-0035 post-ship Lector finding (2026-05-31): when
+  -- transitioning AWAY from automated, clear the template-only
+  -- fields. Without this, the new "non-automated rejects
+  -- condition/execute/last_fired_at" validator rule would reject
+  -- the demote write and leave the file stuck at automated.
+  -- Symmetric to the lifecycle-timestamp cleanup block above —
+  -- M.status owns the full state-transition contract; callers
+  -- (the auto-finder modal, mailbox todos.status, any direct
+  -- todo.status user) trust it to produce a schema-valid output
+  -- regardless of which source field set was present on the input.
+  if new ~= "automated" then
+    task.condition     = nil
+    task.execute       = nil
+    task.last_fired_at = nil
+  end
+
   local v = schema.validate(task)
   if not v.ok then return nil, "schema: " .. tostring(v.err) end
 
