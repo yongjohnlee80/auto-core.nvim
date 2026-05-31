@@ -753,17 +753,38 @@ function M.fire(id, opts)
   local errors        = {}
   local last_completed = false
   local outcome       = "ok"
-  local async_seen    = false
-  local finished      = false  -- true once the chain has reached the end
+  -- `finalized` flips inside _finalize. The OUTER M.fire-return
+  -- logic uses it to distinguish "chain completed inline" from
+  -- "chain is async; on_complete will fire later" — replaces the
+  -- pre-detection `async_seen` heuristic from the prior revision,
+  -- which got Lector A1 wrong (a step that failed at the trust
+  -- gate BEFORE vim.system kicked off would set async_seen via
+  -- bash-prefix detection AND finalize sync, then incorrectly
+  -- return outcome=in_flight).
+  local finalized     = false
   local ctx = {
     bypass_bash_disabled = opts.bypass_bash_disabled == true,
     bypass_allowlist     = opts.bypass_allowlist == true,
     clone_id             = clone_id,
   }
 
+  -- Lector F5: stamp the template's `last_fired_at` BEFORE the
+  -- step chain runs, not in _finalize. The scheduler's debounce
+  -- gate (`_conditions_satisfied`) checks last_fired_at to suppress
+  -- same-minute re-fires; without an early stamp, a long-running
+  -- bash template can be re-fired on the 30s tick that lands while
+  -- the first command is still executing. Stamp at fire-start
+  -- (now_iso, computed above as the canonical "this fire happened
+  -- at" timestamp) so the debounce gate is durable from the moment
+  -- this fire begins, not from when it finishes.
+  _write_managed_field(id, function(task)
+    task.last_fired_at = now_iso
+    task.updated       = now_iso
+  end)
+
   local function _finalize()
-    if finished then return end
-    finished = true
+    if finalized then return end
+    finalized = true
 
     -- Lector F2: errors[] are managed; todo.update rejects them.
     -- Persist via the direct managed-field write so the clone
@@ -782,11 +803,8 @@ function M.fire(id, opts)
       pcall(_todo().status, clone_id, "completed")
     end
 
-    -- Bump the template's `last_fired_at` (managed).
-    _write_managed_field(id, function(task)
-      task.last_fired_at = now_iso
-      task.updated       = now_iso
-    end)
+    -- Note: template `last_fired_at` was stamped at fire-start
+    -- above (Lector F5). No additional write needed here.
 
     -- Fire event AFTER persistence so subscribers see consistent
     -- on-disk state.
@@ -819,29 +837,6 @@ function M.fire(id, opts)
     -- (assign triggers the auto-transition + bucket move).
     local clone = todo.get(clone_id) or { id = clone_id, status = "open" }
 
-    -- Detect whether this step will be async BEFORE dispatching —
-    -- async_seen drives the M.fire return outcome.
-    local maybe_async = false
-    do
-      -- Strip rewrite hooks once to decide async-ness on the
-      -- effective step (a hook that rewrites `assign slot:N` to
-      -- `assign agent:foo` makes the step sync). Executors are
-      -- always sync (they return the result synchronously);
-      -- bash is the only async family.
-      local effective = step
-      local hp = _hook_prefix(effective)
-      if hp then
-        local rewritten, _herr = _call_hook_resolve(hp, effective)
-        if type(rewritten) == "string" and rewritten ~= "" then
-          effective = rewritten
-        end
-      end
-      if _builtin_prefix(effective) == "bash " or effective:sub(1, 5) == "bash:" then
-        maybe_async = true
-      end
-    end
-    if maybe_async then async_seen = true end
-
     _execute_step(step, clone, ctx, function(res, sterr)
       if sterr then
         errors[#errors + 1] = {
@@ -860,18 +855,20 @@ function M.fire(id, opts)
 
   run_next(1)
 
-  -- If no async step kicked off, the chain already finalized
-  -- inline; reflect the synchronous outcome to the caller.
-  if not async_seen then
+  -- Lector A1: rather than pre-detecting which step LOOKS async,
+  -- observe whether _finalize ran synchronously. If yes, the chain
+  -- finalized inline — return the actual outcome. If no, the
+  -- chain is mid-flight (some step kicked off vim.system and
+  -- registered its callback) — return `in_flight` and let the
+  -- async path finalize via the event. This correctly handles
+  -- bash-trust-gate failures that abort before vim.system fires.
+  if finalized then
     return {
       clone_id = clone_id,
       outcome  = outcome,
       errors   = errors,
     }, nil
   end
-  -- Async work is in flight. The caller (mailbox handler / smoke /
-  -- admin debug) sees `outcome = "in_flight"` and can subscribe to
-  -- `core.todo.automation:fired` for the final state.
   return {
     clone_id = clone_id,
     outcome  = "in_flight",

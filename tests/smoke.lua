@@ -8811,6 +8811,76 @@ print("\n[71] ADR-0035 Lector F1 + F2 + F3 — async bash + persisted errors + e
     seen_ctx and type(seen_ctx.clone_id) == "string")
 
   automation.unregister_executor("ctx-probe:")
+
+  -- ── Lector F5: last_fired_at stamped at fire-start, not at
+  -- async completion. Scheduler debounce depends on this; without
+  -- the early stamp, a long-running cron bash template can be
+  -- re-fired on the 30s tick that lands while the first command
+  -- is still in flight, producing duplicate clones.
+  --
+  -- The test fires a bash:5 template and IMMEDIATELY reads the
+  -- template's last_fired_at — must be set even though the bash
+  -- step hasn't finished. (Re-enable bash for this since F3 left
+  -- bash_enabled=false in the trust state.)
+  automation.set_trust({ bash_enabled = true, bash_allowlist = false })
+  local tpl_f5 = _make_automated_template(
+    "2026-05-30-p71-f5-debounce", "F5 debounce stamp", { "bash:5 sleep 1" })
+  local prior_lfa = (todo.get(tpl_f5) or {}).last_fired_at
+  ok("F5: template starts with no last_fired_at",
+    prior_lfa == nil)
+
+  local f5_res = automation.fire(tpl_f5, {})
+  ok("F5: fire returns in_flight for long-running bash",
+    f5_res and f5_res.outcome == "in_flight")
+
+  -- KEY ASSERTION: template's last_fired_at is set NOW, while
+  -- async bash is still in flight. Without F5's fix this would
+  -- be nil until _finalize runs (~1s later).
+  local tpl_state = todo.get(tpl_f5)
+  ok("F5: template.last_fired_at stamped at fire-start (in-flight)",
+    tpl_state and type(tpl_state.last_fired_at) == "string"
+      and tpl_state.last_fired_at:match("^%d%d%d%d%-%d%d%-%d%d") ~= nil,
+    "got: " .. tostring(tpl_state and tpl_state.last_fired_at))
+
+  -- Wait for the async to actually complete so cleanup doesn't
+  -- leak a vim.uv handle.
+  vim.wait(3000, function()
+    return (todo.get(f5_res.clone_id) or {}).status == "completed"
+  end)
+
+  -- ── Lector A1: M.fire must NOT return outcome=in_flight when
+  -- the (only / first) step fails synchronously BEFORE vim.system
+  -- kicks off. Prior revision pre-detected `async_seen` by
+  -- prefix-matching, so a `bash:5 anything` step that failed at
+  -- the trust gate still returned in_flight, misleading callers
+  -- (notably todos.fire). Disable bash, fire a bash template, and
+  -- assert outcome reflects the synchronous failure.
+  automation.set_trust({ bash_enabled = false })
+  local tpl_a1 = _make_automated_template(
+    "2026-05-30-p71-a1-sync-fail", "A1 sync trust-gate failure",
+    { "bash:5 echo hi" })
+
+  local a1_res = automation.fire(tpl_a1, {})
+  ok("A1: fire of a sync-failing bash template returns synchronously (not in_flight)",
+    a1_res and a1_res.outcome ~= "in_flight",
+    "got outcome: " .. tostring(a1_res and a1_res.outcome))
+  ok("A1: sync-failure outcome reports failed",
+    a1_res and a1_res.outcome == "failed",
+    "got outcome: " .. tostring(a1_res and a1_res.outcome))
+  ok("A1: synchronous errors[] populated on the return value",
+    a1_res and type(a1_res.errors) == "table" and #a1_res.errors >= 1
+      and a1_res.errors[1].code == "automation-step-failed",
+    "got errors: " .. vim.inspect(a1_res and a1_res.errors))
+
+  -- A1 corollary: the clone file ALSO carries the errors[] on
+  -- disk (F2 invariant continues to hold for sync failures).
+  local a1_clone = todo.get(a1_res.clone_id)
+  ok("A1: clone file errors[] persisted on sync failure",
+    a1_clone and type(a1_clone.errors) == "table"
+      and #a1_clone.errors >= 1
+      and a1_clone.errors[1].code == "automation-step-failed",
+    "got errors: " .. vim.inspect(a1_clone and a1_clone.errors))
+
   cleanup()
 end)()
 

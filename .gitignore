@@ -12,3 +12,6 @@ nvim.log
 # cwd. When the plugin is developed in-place inside this repo, that
 # CLAUDE.md lands here — environment-specific, not part of the release.
 CLAUDE.md
+
+# auto-agents workspace mailbox (v0.2.30+)
+.auto-agents/
