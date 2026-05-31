@@ -302,6 +302,29 @@ function M.validate(task)
 
   local now = os.date("!%Y-%m-%dT%H:%M:%SZ")
 
+  -- ADR-0035 post-ship UX amendment (2026-05-31): empty-or-missing
+  -- condition / execute on an automated template is malformed. The
+  -- template can't ever fire (or has nothing to run); flag it so
+  -- the user-facing surfaces (refresh-side errors[] + live
+  -- vim.diagnostic + fire pre-flight) catch a freshly-promoted
+  -- template that wasn't given a scaffold default.
+  if type(task.condition) ~= "table" or #task.condition == 0 then
+    out[#out + 1] = {
+      field = "condition",
+      code  = "automation-condition-malformed",
+      message = "condition[] is empty or missing — automated templates need at least one cron or event entry to fire",
+      detected = now,
+    }
+  end
+  if type(task.execute) ~= "table" or #task.execute == 0 then
+    out[#out + 1] = {
+      field = "execute",
+      code  = "automation-execute-malformed",
+      message = "execute[] is empty or missing — automated templates need at least one step to run",
+      detected = now,
+    }
+  end
+
   -- condition[] — each entry must parse as cron OR `event:<topic>`.
   if type(task.condition) == "table" then
     for i, entry in ipairs(task.condition) do

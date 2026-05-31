@@ -8884,6 +8884,94 @@ print("\n[71] ADR-0035 Lector F1 + F2 + F3 — async bash + persisted errors + e
   cleanup()
 end)()
 
+-- ───────────────── 72. ADR-0035 post-ship validator ─────────────
+-- Empty / missing condition[] or execute[] on an automated template
+-- is now flagged as malformed via automation.validate, so a
+-- just-promoted template (without scaffolded defaults) lands in
+-- the panel's malformed surface immediately instead of silently
+-- never firing. The auto-finder scaffold (panel `s` → automated)
+-- populates working defaults to keep newly-promoted templates
+-- clean; the validator catches templates that explicitly clear
+-- the fields or are authored by hand without them.
+print("\n[72] ADR-0035 post-ship — empty condition/execute flagged as malformed")
+;(function()
+  local schema = require("auto-core.todo.schema")
+  local automation = require("auto-core.todo.automation")
+
+  local function _auto(over)
+    over = over or {}
+    over.status = "automated"
+    return schema.blank(over)
+  end
+
+  -- Both fields absent → two errors.
+  local v_both_absent = automation.validate(_auto())
+  local saw_cond, saw_exec = false, false
+  for _, e in ipairs(v_both_absent) do
+    if e.code == "automation-condition-malformed" and e.field == "condition" then saw_cond = true end
+    if e.code == "automation-execute-malformed"  and e.field == "execute"  then saw_exec = true end
+  end
+  ok("validator: missing condition[] flagged as automation-condition-malformed",
+    saw_cond, "got: " .. vim.inspect(v_both_absent))
+  ok("validator: missing execute[] flagged as automation-execute-malformed",
+    saw_exec, "got: " .. vim.inspect(v_both_absent))
+
+  -- Both empty lists → two errors.
+  local v_both_empty = automation.validate(_auto({
+    condition = {},
+    execute   = {},
+  }))
+  local saw_cond_empty, saw_exec_empty = false, false
+  for _, e in ipairs(v_both_empty) do
+    if e.code == "automation-condition-malformed" and e.field == "condition" then saw_cond_empty = true end
+    if e.code == "automation-execute-malformed"  and e.field == "execute"  then saw_exec_empty = true end
+  end
+  ok("validator: empty condition[] flagged",
+    saw_cond_empty, "got: " .. vim.inspect(v_both_empty))
+  ok("validator: empty execute[] flagged",
+    saw_exec_empty, "got: " .. vim.inspect(v_both_empty))
+
+  -- Only one missing → only one error of that kind.
+  local v_only_cond_empty = automation.validate(_auto({
+    condition = {},
+    execute   = { "assign user" },
+  }))
+  local empty_cond_only = false
+  for _, e in ipairs(v_only_cond_empty) do
+    if e.code == "automation-condition-malformed" and e.field == "condition" then
+      empty_cond_only = true
+    end
+  end
+  ok("validator: only empty condition fires the condition error",
+    empty_cond_only and #v_only_cond_empty == 1,
+    "got: " .. vim.inspect(v_only_cond_empty))
+
+  -- Scaffold-style template (the auto-finder defaults) passes clean.
+  local v_scaffold = automation.validate(_auto({
+    condition = { "0 0 * * *" },
+    execute   = { 'bash -t=1 "echo hello world"' },
+  }))
+  -- May still have bash-t-no-resolver if auto-agents isn't loaded
+  -- in this smoke (it isn't — auto-core smoke runs standalone),
+  -- but specifically should NOT carry an empty-list error.
+  local has_empty_err = false
+  for _, e in ipairs(v_scaffold) do
+    if e.field == "condition" or e.field == "execute" then
+      if e.message:find("empty or missing", 1, true) then
+        has_empty_err = true
+      end
+    end
+  end
+  ok("validator: scaffold-style defaults don't trigger empty-list errors",
+    not has_empty_err,
+    "got: " .. vim.inspect(v_scaffold))
+
+  -- Non-automated tasks are out of scope.
+  local v_open = automation.validate(schema.blank({ status = "open" }))
+  ok("validator: empty-list rules don't fire for non-automated tasks",
+    #v_open == 0)
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
