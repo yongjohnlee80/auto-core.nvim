@@ -9109,6 +9109,108 @@ print("\n[72] ADR-0035 post-ship — empty condition/execute flagged as malforme
   _cleanup()
 end)()
 
+-- ───────────── 73. ADR-0035 post-ship — overridden todo-dir ──────────
+-- BUG FIX (2026-06-01): the automation engine's managed-field
+-- writer (_write_managed_field — patches origin / last_fired_at /
+-- errors during M.fire) resolved the todo-dir with the
+-- override-IGNORING `paths.resolve_todo_dir(nil)`, which falls back
+-- to `<workspace>/.todo-list`. On a KB-rooted store (todo-dir set
+-- via `set_todo_dir` to a path OUTSIDE the workspace), it scanned
+-- the wrong tree, never found the clone, and the managed writes
+-- silently failed. Worst casualty: last_fired_at never stamped →
+-- the debounce gate never engages → re-fire every scheduler tick.
+-- This section reproduces the override mismatch and asserts the
+-- managed writes land.
+print("\n[73] ADR-0035 post-ship — clone-on-fire under an OVERRIDDEN todo-dir")
+;(function()
+  local ok_a, automation = pcall(require, "auto-core.todo.automation")
+  if not ok_a then return end
+  local todo  = require("auto-core.todo")
+  local paths = require("auto-core.todo.paths")
+  local md    = require("auto-core.todo.md")
+
+  -- Workspace at tmp_ws, but todo-dir OVERRIDDEN to a DIFFERENT
+  -- tree (tmp_store) — mirrors the user's KB-rooted setup where
+  -- the store lives outside the workspace.
+  local tmp_ws    = vim.fn.tempname() .. "_p73-ws"
+  local tmp_store = vim.fn.tempname() .. "_p73-store"
+  vim.fn.mkdir(tmp_ws, "p")
+  vim.fn.mkdir(tmp_store, "p")
+  local worktree = require("auto-core.git.worktree")
+  worktree.set_workspace_root(tmp_ws)
+  local state_tmp = vim.fn.tempname() .. "_p73-state"
+  vim.fn.mkdir(state_tmp, "p")
+  require("auto-core.state").configure({ persist_dir = state_tmp })
+
+  -- Override the todo-dir to the OUT-OF-WORKSPACE store.
+  todo.set_todo_dir(tmp_store .. "/.todo-list")
+
+  local function _cleanup()
+    automation.stop()
+    automation.set_trust({ bash_enabled = false })
+    todo.set_todo_dir(nil)
+    worktree.set_workspace_root(nil)
+    require("auto-core.state").configure({ persist_dir = nil })
+    vim.fn.delete(tmp_ws,    "rf")
+    vim.fn.delete(tmp_store, "rf")
+    vim.fn.delete(state_tmp, "rf")
+  end
+
+  -- Sanity: the override resolver disagrees with the raw workspace
+  -- fallback — exactly the mismatch that hid the bug.
+  ok("p73: get_todo_dir() honors the override (not the workspace)",
+    todo.get_todo_dir() == (tmp_store .. "/.todo-list"),
+    "got: " .. tostring(todo.get_todo_dir()))
+  ok("p73: raw resolve_todo_dir() would have pointed at the workspace",
+    paths.resolve_todo_dir() ~= todo.get_todo_dir())
+
+  -- Build an automated template in the OVERRIDDEN store. Use an
+  -- assign step (no bash trust needed) so the fire's managed
+  -- writes (origin on clone, last_fired_at on template) are the
+  -- thing under test, not bash.
+  local tpl_id = todo.add({ id = "2026-06-01-p73-tpl", title = "override fire test" })
+  todo.status(tpl_id, "automated")
+  do
+    local tpath = paths.task_file_path(todo.get_todo_dir(), tpl_id, "automated", nil)
+    local f = io.open(tpath, "r"); local txt = f:read("*a"); f:close()
+    local dec = md.decode(txt)
+    dec.value.condition = { "event:new-task" }
+    dec.value.execute   = { "assign user" }
+    local enc = md.encode(dec.value)
+    local g = io.open(tpath .. ".tmp", "w"); g:write(enc); g:close()
+    os.rename(tpath .. ".tmp", tpath)
+  end
+
+  -- Fire it.
+  local res, ferr = automation.fire(tpl_id, {})
+  ok("p73: fire succeeds under the overridden todo-dir",
+    res and not ferr, "got err: " .. tostring(ferr))
+
+  -- The clone must exist IN THE OVERRIDDEN STORE (todo.get is
+  -- override-aware, so this also confirms find_task_path agrees).
+  local clone = todo.get(res.clone_id)
+  ok("p73: clone exists in the overridden store",
+    clone ~= nil, "clone_id=" .. tostring(res and res.clone_id))
+  ok("p73: clone file physically under the override path",
+    res and vim.fn.filereadable(
+      paths.task_file_path(todo.get_todo_dir(), res.clone_id,
+        (clone or {}).status or "open", nil)) == 1)
+
+  -- THE KEY ASSERTIONS: managed-field writes landed despite the
+  -- override (would have silently failed under the old resolver).
+  ok("p73: clone carries origin backref (managed write found the file)",
+    clone and clone.origin == tpl_id,
+    "got: " .. tostring(clone and clone.origin))
+
+  local tpl_after = todo.get(tpl_id)
+  ok("p73: template last_fired_at stamped (debounce gate works under override)",
+    tpl_after and type(tpl_after.last_fired_at) == "string"
+      and tpl_after.last_fired_at:match("^%d%d%d%d%-%d%d%-%d%d") ~= nil,
+    "got: " .. tostring(tpl_after and tpl_after.last_fired_at))
+
+  _cleanup()
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

@@ -77,14 +77,26 @@ function M.default_todo_dir(ws_root)
   return fs_path.normalize(fs_path.join(ws_root, ".todo-list"))
 end
 
----Resolve the absolute todo-dir to use. If `override` is supplied
----and non-empty it wins (accepts `~`-prefixed). Otherwise falls back
----to `<workspace_root>/.todo-list/`.
+---INTERNAL — pure helper. **External callers MUST NOT use this to
+---"get the active todo-dir".** Call `require("auto-core.todo")
+---.get_todo_dir()` instead — it is the single override-aware
+---resolver (the one source of truth) every component shares.
 ---
----Callers of the public API layer (auto-core.todo) consult the state
----namespace `todo.dir_overrides[<ws_root>]` to obtain `override`. This
----function stays pure so it's trivially testable.
----@param override string?
+---Why this warning exists (2026-06-01 bug, see
+---[[shared-resolver-single-source-of-truth]] convention): callers
+---that did `resolve_todo_dir(nil)` got the `<workspace>/.todo-list`
+---FALLBACK, silently ignoring the `todo.dir_overrides` state. On a
+---KB-rooted store (override set via `set_todo_dir`) that points at
+---a tree which doesn't hold the tasks — producing silent no-ops
+---(auto-finder scaffold) and broken managed writes (automation
+---`last_fired_at` debounce). This footgun bit twice.
+---
+---This function takes an EXPLICIT `override` and stays pure (no
+---state access) precisely so it's testable; the stateful entry
+---`auto-core.todo.get_todo_dir()` reads `dir_overrides` and
+---delegates here with the resolved value. If you find yourself
+---about to call `resolve_todo_dir(nil)`, you want `get_todo_dir()`.
+---@param override string?  REQUIRED for external use; nil = workspace fallback (internal only)
 ---@return string absolute path
 function M.resolve_todo_dir(override)
   if type(override) == "string" and override ~= "" then

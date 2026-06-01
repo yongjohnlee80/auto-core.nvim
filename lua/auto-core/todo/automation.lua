@@ -631,7 +631,19 @@ end
 ---@return boolean ok, string? err
 local function _write_managed_field(task_id, mutate)
   local paths = _paths()
-  local td    = paths.resolve_todo_dir()
+  -- BUG FIX (2026-06-01): use the OVERRIDE-AWARE dir resolver, not
+  -- `paths.resolve_todo_dir(nil)`. The latter falls back to
+  -- `<workspace>/.todo-list` and ignores the `todo.dir_overrides`
+  -- state — so on a KB-rooted store (set via `todos.set_dir`) the
+  -- bucket scan below looks in the wrong tree, never finds the
+  -- clone, and the managed-field write silently fails. That breaks
+  -- the `last_fired_at` debounce stamp (template re-fires every
+  -- scheduler tick → clone spam — the F5 failure mode resurfacing)
+  -- and the `origin` backref + errors[] persistence. `M.fire`
+  -- creates the clone via `todo.add` (override-aware), so this MUST
+  -- resolve the same way to find it again. `todo.get_todo_dir()` is
+  -- auto-core's public override-aware resolver.
+  local td    = _todo().get_todo_dir()
   local md    = require("auto-core.todo.md")
 
   -- Find the live file location. Mirror find_task_path's flat-
