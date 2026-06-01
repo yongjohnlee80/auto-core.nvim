@@ -72,9 +72,13 @@ local FRONTMATTER_ORDER = {
   "archived_at",
 
   -- Managed: automation (ADR-0035 Phase 1). `origin` is set on
-  -- clones; `last_fired_at` is set on templates.
+  -- clones; `last_fired_at` is set on templates. `exit_code`
+  -- (2026-06-01) is set on clones whose fire ran a captured bash
+  -- step (`bash` / `bash:<sec>`); terminal-routed `bash -t=N`
+  -- records none.
   "origin",
   "last_fired_at",
+  "exit_code",
 
   -- Auto-managed
   "errors",

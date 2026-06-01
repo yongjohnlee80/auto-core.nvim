@@ -9211,6 +9211,151 @@ print("\n[73] ADR-0035 post-ship — clone-on-fire under an OVERRIDDEN todo-dir"
   _cleanup()
 end)()
 
+-- ───────── 74. ADR-0035 amendment — clone lifecycle + exit_code ─────────
+-- (2026-06-01) Two coupled semantics under test:
+--   • Clone-completion lifecycle. Every fire bumps its clone
+--     open→in-progress at fire-start (covered by [71] F1). On
+--     SUCCESS the clone completes UNLESS a step assigned it to an
+--     AGENT (`assign agent:` / `assign slot:`) — that agent owns
+--     closing it. `assign user` does NOT block completion. Failures
+--     stay in-progress with errors[] for triage.
+--   • exit_code capture. A built-in CAPTURED bash step
+--     (`bash <cmd>` / `bash:<sec> <cmd>`, run via vim.system) records
+--     its exit status in the managed `exit_code` field — 0 on
+--     success, the real code on failure. Executor-routed steps
+--     (the shape `bash -t=N` takes — auto-agents floating terminal)
+--     record NO exit_code: nothing to capture. Assigns record none.
+print("\n[74] ADR-0035 amendment — clone in-progress→completed lifecycle + exit_code")
+;(function()
+  local ok_a, automation = pcall(require, "auto-core.todo.automation")
+  if not ok_a then return end
+  local todo  = require("auto-core.todo")
+  local paths = require("auto-core.todo.paths")
+  local md    = require("auto-core.todo.md")
+  local events = require("auto-core.events")
+
+  -- Isolate workspace + state.
+  local tmp_root = vim.fn.tempname() .. "_p74"
+  vim.fn.mkdir(tmp_root, "p")
+  local worktree = require("auto-core.git.worktree")
+  worktree.set_workspace_root(tmp_root)
+  local state_tmp = vim.fn.tempname() .. "_p74-state"
+  vim.fn.mkdir(state_tmp, "p")
+  require("auto-core.state").configure({ persist_dir = state_tmp })
+
+  automation.acknowledge_first_run()
+  automation.set_trust({ bash_enabled = true, bash_allowlist = false })
+
+  local function cleanup()
+    automation.stop()
+    automation.set_trust({ bash_enabled = false })
+    worktree.set_workspace_root(nil)
+    require("auto-core.state").configure({ persist_dir = nil })
+    vim.fn.delete(tmp_root,  "rf")
+    vim.fn.delete(state_tmp, "rf")
+  end
+
+  local function _make_tpl(id, exec_list)
+    local tpl_id = todo.add({ id = id, title = id, description = "p74 fixture" })
+    todo.status(tpl_id, "automated")
+    local tpath = paths.task_file_path(todo.get_todo_dir(), tpl_id, "automated", nil)
+    local f = io.open(tpath, "r"); local txt = f:read("*a"); f:close()
+    local dec = md.decode(txt)
+    dec.value.condition = { "event:new-task" }
+    dec.value.execute   = exec_list
+    local enc = md.encode(dec.value)
+    local g = io.open(tpath .. ".tmp", "w"); g:write(enc); g:close()
+    os.rename(tpath .. ".tmp", tpath)
+    return tpl_id
+  end
+
+  local fired = {}
+  local sub = events.subscribe("core.todo.automation:fired", function(p)
+    if p and p.origin_id then fired[p.origin_id] = p end
+  end)
+
+  -- ── (a) Captured bash SUCCESS → exit_code=0, clone completed. ──
+  local tpl_ok = _make_tpl("2026-06-01-p74-bash-ok", { "bash:10 true" })
+  local res_ok = automation.fire(tpl_ok, {})
+  vim.wait(5000, function() return fired[tpl_ok] ~= nil end)
+  vim.wait(1000, function()
+    return (todo.get(res_ok.clone_id) or {}).status == "completed"
+  end)
+  local clone_ok = todo.get(res_ok.clone_id)
+  ok("p74(a): captured-bash success → clone completed",
+    clone_ok and clone_ok.status == "completed",
+    "got status: " .. tostring(clone_ok and clone_ok.status))
+  ok("p74(a): captured-bash success → exit_code == 0 persisted on clone",
+    clone_ok and clone_ok.exit_code == 0,
+    "got exit_code: " .. tostring(clone_ok and clone_ok.exit_code))
+
+  -- ── (b) Captured bash FAILURE → exit_code=7, stays in-progress. ──
+  local tpl_fail = _make_tpl("2026-06-01-p74-bash-fail", { "bash:10 exit 7" })
+  local res_fail = automation.fire(tpl_fail, {})
+  vim.wait(5000, function() return fired[tpl_fail] ~= nil end)
+  -- Give the async finalize a beat to land the managed write.
+  vim.wait(1000, function()
+    return (todo.get(res_fail.clone_id) or {}).exit_code ~= nil
+  end)
+  local clone_fail = todo.get(res_fail.clone_id)
+  ok("p74(b): captured-bash failure → exit_code == 7 persisted on clone",
+    clone_fail and clone_fail.exit_code == 7,
+    "got exit_code: " .. tostring(clone_fail and clone_fail.exit_code))
+  ok("p74(b): captured-bash failure → clone STAYS in-progress (not completed)",
+    clone_fail and clone_fail.status == "in-progress",
+    "got status: " .. tostring(clone_fail and clone_fail.status))
+  ok("p74(b): captured-bash failure → errors[] carries automation-step-failed",
+    clone_fail and type(clone_fail.errors) == "table"
+      and #clone_fail.errors >= 1
+      and clone_fail.errors[1].code == "automation-step-failed",
+    "got errors: " .. vim.inspect(clone_fail and clone_fail.errors))
+
+  -- ── (c) Executor-routed step (the `bash -t=N` shape) → clone
+  --        completes but records NO exit_code. Register a stub
+  --        executor standing in for auto-agents' terminal router:
+  --        returns ok with no exit_code, exactly like the real one.
+  automation.register_executor("p74-term:", function(_step, _clone, _ctx)
+    return { ok = true, message = "routed to terminal", completed_clone = true }, nil
+  end)
+  local tpl_term = _make_tpl("2026-06-01-p74-term", { "p74-term:echo hi" })
+  local res_term = automation.fire(tpl_term, {})
+  -- Synchronous executor: fire finalizes inline. completion is a
+  -- status-API call; allow a brief settle in case of scheduling.
+  vim.wait(1000, function()
+    return (todo.get(res_term.clone_id) or {}).status == "completed"
+  end)
+  local clone_term = todo.get(res_term.clone_id)
+  ok("p74(c): executor-routed step → clone completes on successful dispatch",
+    clone_term and clone_term.status == "completed",
+    "got status: " .. tostring(clone_term and clone_term.status))
+  ok("p74(c): executor-routed step → NO exit_code recorded (nothing to capture)",
+    clone_term and clone_term.exit_code == nil,
+    "got exit_code: " .. tostring(clone_term and clone_term.exit_code))
+  automation.unregister_executor("p74-term:")
+
+  -- ── (d) Agent-assign step → clone STAYS in-progress (the agent
+  --        owns closing it), NO exit_code.
+  local tpl_asn = _make_tpl("2026-06-01-p74-assign", { "assign agent:smoke-target" })
+  local res_asn = automation.fire(tpl_asn, {})
+  vim.wait(500, function()
+    local t = todo.get(res_asn.clone_id)
+    return t and t.assignee == "agent:smoke-target"
+  end)
+  local clone_asn = todo.get(res_asn.clone_id)
+  ok("p74(d): agent-assign → clone assignee set",
+    clone_asn and clone_asn.assignee == "agent:smoke-target",
+    "got assignee: " .. tostring(clone_asn and clone_asn.assignee))
+  ok("p74(d): agent-assign → clone STAYS in-progress (agent owns close)",
+    clone_asn and clone_asn.status == "in-progress",
+    "got status: " .. tostring(clone_asn and clone_asn.status))
+  ok("p74(d): agent-assign → NO exit_code recorded",
+    clone_asn and clone_asn.exit_code == nil,
+    "got exit_code: " .. tostring(clone_asn and clone_asn.exit_code))
+
+  events.unsubscribe(sub)
+  cleanup()
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

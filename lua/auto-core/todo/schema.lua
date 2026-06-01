@@ -106,8 +106,14 @@ local FIELDS = {
   --                      shape here.
   --   `last_fired_at`  — template-only timestamp of the most recent
   --                      clone-fire. Datetime.
+  --   `exit_code`      — managed (2026-06-01). Exit code of the
+  --                      clone's captured-exec bash step (`bash` /
+  --                      `bash:<sec>`). nil when the fire had no
+  --                      such step — terminal-routed `bash -t=N`
+  --                      records none. Integer.
   origin         = { required = false, kind = "string_or_null" },
   last_fired_at  = { required = false, kind = "datetime_or_null" },
+  exit_code      = { required = false, kind = "integer_or_null" },
 
   -- Auto-managed
   errors         = { required = false, kind = "error_list" },
@@ -181,6 +187,17 @@ end
 local function is_string_or_null(v)
   if v == nil then return true end
   return is_string(v)
+end
+
+---Integer, or nil. Used for the managed `exit_code` field (ADR-0035,
+---2026-06-01): the exit status of a clone's captured bash step. nil
+---when the fire had no captured step (terminal-routed `bash -t=N`
+---records none).
+---@param v any
+---@return boolean ok, string? err
+local function is_integer_or_null(v)
+  if v == nil then return true end
+  return is_integer(v)
 end
 
 ---@param v any
@@ -294,6 +311,7 @@ local KIND_VALIDATORS = {
   datetime_or_null  = is_datetime_or_null,
   date_or_null      = is_date_or_null,
   string_or_null    = is_string_or_null,
+  integer_or_null   = is_integer_or_null,
   status            = is_status,
   priority          = is_priority,
   string_list       = is_string_list,

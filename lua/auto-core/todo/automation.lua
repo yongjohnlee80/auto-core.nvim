@@ -511,7 +511,7 @@ end
 ---@param step string
 ---@param clone table
 ---@param ctx { bypass_bash_disabled: boolean?, bypass_allowlist: boolean?, clone_id: string? }?
----@param on_complete fun(result: table?, err: string?)
+---@param on_complete fun(result: table?, err: string?, exit_code: integer?)
 local function _execute_step(step, clone, ctx, on_complete)
   ctx = ctx or {}
 
@@ -568,18 +568,20 @@ local function _execute_step(step, clone, ctx, on_complete)
     local ok_t, terr = _check_bash_trust(cmd, ctx)
     if not ok_t then return on_complete(nil, terr) end
 
-    -- ADR §5: bash-owned clones bump to `in-progress` BEFORE
-    -- launching so the panel reflects "actively running" while the
-    -- command is in flight. Only fires when the clone is currently
-    -- `open` (assigns earlier in the chain may have already moved
-    -- it through M.assign's atomic transition).
-    if clone and clone.status == "open" then
-      pcall(_todo().status, clone.id, "in-progress")
-    end
+    -- Note (2026-06-01): the clone's `open → in-progress` bump is no
+    -- longer done here per-step. `M.fire` now bumps the clone to
+    -- in-progress ONCE, before running ANY step (universal — covers
+    -- the executor path too, which previously left `bash -t=` clones
+    -- stuck in `open`). See M.fire.
 
     -- Async vim.system. The callback runs on libuv's thread; wrap
     -- with vim.schedule so any nvim API calls inside on_complete
-    -- run on the main loop.
+    -- run on the main loop. The exit code is surfaced as
+    -- `result.exit_code` (built-in, captured-exec bash ONLY) so
+    -- M.fire can record it on the clone's managed `exit_code`
+    -- field. Terminal-routed `bash -t=N` goes through the executor
+    -- registry, NOT this path, and deliberately records no
+    -- exit_code (nothing to capture — per user 2026-06-01).
     vim.system({ "bash", "-c", cmd }, {
       text    = true,
       timeout = timeout_ms,
@@ -590,6 +592,7 @@ local function _execute_step(step, clone, ctx, on_complete)
             ok               = true,
             message          = "bash exit 0",
             completed_clone  = true,
+            exit_code        = 0,
           }, nil)
         else
           local stderr = result.stderr or ""
@@ -597,12 +600,15 @@ local function _execute_step(step, clone, ctx, on_complete)
           -- vim.system signals a timeout via `signal == "SIGKILL"`
           -- after the timeout window elapses. Surface as a
           -- recognizable error so the clone's `errors[]` entry is
-          -- specific.
+          -- specific. Carry the exit code through the error path too
+          -- (third return) so M.fire can still stamp `exit_code`.
           if result.signal and result.signal ~= 0 then
             on_complete(nil, "bash killed by signal "
-              .. tostring(result.signal) .. " (timeout?)" .. suffix)
+              .. tostring(result.signal) .. " (timeout?)" .. suffix,
+              result.code)
           else
-            on_complete(nil, "bash exit " .. tostring(result.code) .. suffix)
+            on_complete(nil, "bash exit " .. tostring(result.code) .. suffix,
+              result.code)
           end
         end
       end)
@@ -786,8 +792,26 @@ function M.fire(id, opts)
 
   local execute_steps = template.execute or {}
   local errors        = {}
-  local last_completed = false
   local outcome       = "ok"
+  -- Captured exit code from a built-in captured-exec bash step
+  -- (`bash <cmd>` / `bash:<sec> <cmd>`). nil when no such step ran
+  -- — notably `bash -t=N` (terminal-routed) records NO exit_code
+  -- (nothing to capture; per user 2026-06-01).
+  local captured_exit_code = nil
+  -- (2026-06-01) Completion lifecycle: a fire's clone completes on
+  -- success UNLESS a step handed ownership to an agent — that agent
+  -- closes it. `assign user` (local human) does NOT block
+  -- completion; only `assign agent:` / `assign slot:` (resolves to
+  -- an agent) do. Computed from the raw step list up-front.
+  local has_agent_assign = false
+  for _, s in ipairs(execute_steps) do
+    if type(s) == "string"
+        and (s:match("^assign agent:") or s:match("^assign slot:"))
+    then
+      has_agent_assign = true
+      break
+    end
+  end
   -- `finalized` flips inside _finalize. The OUTER M.fire-return
   -- logic uses it to distinguish "chain completed inline" from
   -- "chain is async; on_complete will fire later" — replaces the
@@ -817,24 +841,42 @@ function M.fire(id, opts)
     task.updated       = now_iso
   end)
 
+  -- (2026-06-01) Universal in-progress bump: the clone is born
+  -- `open`; bump it to `in-progress` ONCE, before running ANY step.
+  -- Doing it here (not per-step) fixes the prior gap where
+  -- executor-routed steps (`bash -t=N`) left the clone stuck in
+  -- `open`. `M.assign`'s own open→in-progress transition becomes a
+  -- no-op when the clone is already in-progress, so an
+  -- `assign agent:` step still works correctly.
+  pcall(_todo().status, clone_id, "in-progress")
+
   local function _finalize()
     if finalized then return end
     finalized = true
 
     -- Lector F2: errors[] are managed; todo.update rejects them.
-    -- Persist via the direct managed-field write so the clone
+    -- (2026-06-01) The captured bash exit code is ALSO managed.
+    -- Persist both in one direct managed-field write so the clone
     -- file carries the durable audit trail the panel renders.
-    if #errors > 0 then
+    -- `exit_code` is set ONLY when a built-in captured-exec bash
+    -- step produced one; terminal-routed `bash -t=N` records none.
+    if #errors > 0 or captured_exit_code ~= nil then
       _write_managed_field(clone_id, function(task)
-        task.errors = errors
+        if #errors > 0 then task.errors = errors end
+        if captured_exit_code ~= nil then task.exit_code = captured_exit_code end
       end)
     end
 
-    -- ADR §5 clone-completion lifecycle: only transition to
-    -- `completed` when outcome=ok AND the last successful step's
-    -- result claimed completed_clone (true only for plain `bash`
-    -- exit-0; never for `bash -t=` per A3; never for assigns).
-    if outcome == "ok" and last_completed then
+    -- (2026-06-01) Clone-completion lifecycle. The clone was bumped
+    -- to `in-progress` at fire start. On success, complete it
+    -- UNLESS a step handed ownership to an agent (`assign agent:` /
+    -- `assign slot:`) — that agent owns closing it. `assign user`
+    -- (local human) does NOT block completion. Failures stay
+    -- `in-progress` with errors[] for the user to triage.
+    -- (Supersedes the prior `last_completed` rule, which left
+    -- bash-only and `bash -t=` clones stuck because their step
+    -- result didn't set completed_clone.)
+    if outcome == "ok" and not has_agent_assign then
       pcall(_todo().status, clone_id, "completed")
     end
 
@@ -872,8 +914,12 @@ function M.fire(id, opts)
     -- (assign triggers the auto-transition + bucket move).
     local clone = todo.get(clone_id) or { id = clone_id, status = "open" }
 
-    _execute_step(step, clone, ctx, function(res, sterr)
+    _execute_step(step, clone, ctx, function(res, sterr, err_exit)
       if sterr then
+        -- A failing captured-exec bash carries its exit code as the
+        -- third callback arg — record it so the clone shows e.g.
+        -- exit_code=7 alongside the errors[] entry.
+        if type(err_exit) == "number" then captured_exit_code = err_exit end
         errors[#errors + 1] = {
           field    = "execute[" .. idx .. "]",
           code     = "automation-step-failed",
@@ -883,7 +929,11 @@ function M.fire(id, opts)
         outcome = (idx == 1) and "failed" or "partial"
         return _finalize()
       end
-      last_completed = res.completed_clone == true
+      -- Captured-exec bash success surfaces exit_code=0 on the
+      -- result; assigns / `bash -t=` executors leave it nil.
+      if res and type(res.exit_code) == "number" then
+        captured_exit_code = res.exit_code
+      end
       run_next(idx + 1)
     end)
   end
