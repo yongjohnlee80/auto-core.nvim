@@ -9059,6 +9059,53 @@ print("\n[72] ADR-0035 post-ship — empty condition/execute flagged as malforme
   ok("demote-cleanup: automated → deferred also clears template fields",
     def_demoted and def_demoted.condition == nil and def_demoted.execute == nil)
 
+  -- ADR-0035 post-ship Lector finding F2 (round-2): the
+  -- SYMMETRIC promote direction. A clone (born from a template
+  -- fire) carries `origin: <template-id>` as a managed field.
+  -- Schema rejects origin on automated rows ("templates aren't
+  -- clones"); without M.status clearing origin on the into-
+  -- automated transition, a user promoting a clone via the
+  -- modal hits the validator and the promote write is rejected.
+  --
+  -- Synthesize a clone-like task (status=open + origin set),
+  -- promote to automated, verify origin is cleared on the
+  -- returned task AND persisted to disk.
+  local clone_id = todo.add({
+    id    = "2026-05-31-p72-clone-promote",
+    title = "clone promote test",
+  })
+  -- Patch origin via the managed-field write pattern.
+  do
+    local paths = require("auto-core.todo.paths")
+    local md    = require("auto-core.todo.md")
+    local cpath = paths.task_file_path(paths.resolve_todo_dir(), clone_id, "open", nil)
+    local f = io.open(cpath, "r"); local txt = f:read("*a"); f:close()
+    local dec = md.decode(txt)
+    dec.value.origin = "some-parent-template"
+    local enc = md.encode(dec.value)
+    local g = io.open(cpath .. ".tmp", "w"); g:write(enc); g:close()
+    os.rename(cpath .. ".tmp", cpath)
+  end
+
+  local pre_promote = todo.get(clone_id)
+  ok("F2: clone starts with origin set",
+    pre_promote and pre_promote.origin == "some-parent-template")
+
+  local promoted_clone, prom_err = todo.status(clone_id, "automated")
+  ok("F2: todo.status(open→automated) on a clone succeeds",
+    promoted_clone and prom_err == nil,
+    "got err: " .. tostring(prom_err))
+  ok("F2: origin cleared on promote to automated",
+    promoted_clone and promoted_clone.origin == nil,
+    "got: " .. tostring(promoted_clone and promoted_clone.origin))
+
+  -- Re-read from disk to confirm persistence.
+  local clone_on_disk = todo.get(clone_id)
+  ok("F2: origin clear persists on disk after promote",
+    clone_on_disk and clone_on_disk.origin == nil)
+  ok("F2: clone is now status=automated",
+    clone_on_disk and clone_on_disk.status == "automated")
+
   _cleanup()
 end)()
 

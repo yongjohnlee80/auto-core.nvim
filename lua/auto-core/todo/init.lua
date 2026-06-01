@@ -1304,20 +1304,35 @@ function M.status(id, new)
     end
   end
 
-  -- ADR-0035 post-ship Lector finding (2026-05-31): when
-  -- transitioning AWAY from automated, clear the template-only
-  -- fields. Without this, the new "non-automated rejects
-  -- condition/execute/last_fired_at" validator rule would reject
-  -- the demote write and leave the file stuck at automated.
-  -- Symmetric to the lifecycle-timestamp cleanup block above —
-  -- M.status owns the full state-transition contract; callers
-  -- (the auto-finder modal, mailbox todos.status, any direct
+  -- ADR-0035 post-ship Lector findings (2026-05-31): M.status
+  -- owns the full state-transition contract — callers (the
+  -- auto-finder modal, mailbox todos.status, any direct
   -- todo.status user) trust it to produce a schema-valid output
-  -- regardless of which source field set was present on the input.
+  -- regardless of which source field set was present on the
+  -- input. Two symmetric cleanup directions:
+  --
+  -- (F1) Demote AWAY from automated: clear the template-only
+  -- fields. Schema rule rejects condition/execute/last_fired_at
+  -- on non-automated rows; without this, M.status would reject
+  -- the write and leave the file stuck at automated. Mirrors
+  -- the lifecycle-timestamp cleanup block above.
   if new ~= "automated" then
     task.condition     = nil
     task.execute       = nil
     task.last_fired_at = nil
+  end
+
+  -- (F2) Promote INTO automated: clear `origin`. A non-automated
+  -- row being promoted may be a clone of some prior template
+  -- fire (origin = parent template id). Schema rule rejects
+  -- origin on automated rows ("templates aren't clones") —
+  -- without this, M.status would reject the promote and leave
+  -- the clone stuck at its current status. The semantic: the
+  -- promotion detaches the clone from its origin lineage and
+  -- elevates it to a fresh template. The original template
+  -- referenced by `origin` is unaffected.
+  if new == "automated" then
+    task.origin = nil
   end
 
   local v = schema.validate(task)
