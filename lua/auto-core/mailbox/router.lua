@@ -356,6 +356,12 @@ local function dispatch_wake(rec, kind, mid)
     mailbox_full = rec.id,
     arrival_kind = kind,
     arrival_id   = mid,
+    -- ADR-0036: full path of the arriving message file, so the wake
+    -- nudge can point the agent straight at it (Read tool) instead of
+    -- listing the dir. `<kind-dir>/<id>.json` (mid carries no `.json`;
+    -- cf. handle_response's response path).
+    arrival_path = (rec.subs and rec.subs[kind])
+      and (rec.subs[kind] .. "/" .. mid .. ".json") or nil,
     -- ADR 0023 Track A — agent-side drift detection. Carries the
     -- LIVE host's authoritative identity for the addressed mailbox
     -- so a resumed agent (whose AUTO_AGENTS_* env is fork-frozen

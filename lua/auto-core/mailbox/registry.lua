@@ -121,6 +121,13 @@ function M.register(id, opts)
   -- revision-skip keeps repeat calls free.
   local boot = bootstrap.upsert({ root = root })
 
+  -- ADR-0036: the PERMISSION.md guideline is a peer per-workspace-root
+  -- doc, written alongside the bootstrap doc (same revision-skip). It
+  -- is ADVISORY — a write failure must NOT break mailbox registration,
+  -- so it's pcall'd and the error is swallowed (the doc's absence is
+  -- handled gracefully agent-side per ADR-0036 §F4).
+  pcall(function() bootstrap.upsert_permission({ root = root }) end)
+
   -- Executioner default keyed on the BARE id, so "nvim" still
   -- triggers the host-side executioner convention after the
   -- instance suffix is applied.

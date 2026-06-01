@@ -169,6 +169,10 @@ function M.set_instance_id(id) return path_mod.set_instance_id(id) end
 ---  AUTO_AGENTS_MAILBOX_ID             — agent's full mailbox id
 ---  AUTO_AGENTS_MAILBOX_DIR            — agent's mailbox dir
 ---  AUTO_AGENTS_MAILBOX_BOOTSTRAP_DOC  — per-workspace bootstrap doc
+---  AUTO_AGENTS_PERMISSION_DOC         — per-workspace PERMISSION.md
+---                                       guideline (ADR-0036), peer to
+---                                       the bootstrap doc in the same
+---                                       workspace mailbox root
 ---@param record AutoCoreMailboxRecord
 ---@return table<string, string>
 function M.env_for_agent(record)
@@ -176,11 +180,19 @@ function M.env_for_agent(record)
     error("auto-core.mailbox.env_for_agent: pass a registered record "
       .. "(result of mailbox.register)")
   end
+  -- PERMISSION.md is a peer of the bootstrap doc in the workspace
+  -- mailbox root (ADR-0036). Derive it from the bootstrap path's dir
+  -- so the two always co-locate.
+  local boot = record.bootstrap and record.bootstrap.path
+  local permission_doc = boot
+    and (vim.fn.fnamemodify(boot, ":h") .. "/PERMISSION.md")
+    or nil
   return {
     AUTO_AGENTS_INSTANCE_ID           = path_mod.get_instance_id(),
     AUTO_AGENTS_MAILBOX_ID            = record.id,
     AUTO_AGENTS_MAILBOX_DIR           = record.dir,
     AUTO_AGENTS_MAILBOX_BOOTSTRAP_DOC = record.bootstrap.path,
+    AUTO_AGENTS_PERMISSION_DOC        = permission_doc,
   }
 end
 

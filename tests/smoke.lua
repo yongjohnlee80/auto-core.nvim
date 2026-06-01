@@ -3738,6 +3738,32 @@ ok("bootstrap doc still documents spawn-time permission grants",
   boot_text:find("Spawn-time permission grants", 1, true) ~= nil
     and boot_text:find("--add-dir <path>", 1, true) ~= nil)
 
+-- ── ADR-0036: PERMISSION.md guideline (peer to bootstrap doc) ──
+-- registry.register now also upserts PERMISSION.md (advisory peer) into
+-- the workspace mailbox root; the bootstrap doc references it.
+local perm_path = codex_like_root .. "/PERMISSION.md"
+ok("ADR-0036: PERMISSION.md written alongside bootstrap doc",
+  vim.fn.filereadable(perm_path) == 1, "expected at " .. perm_path)
+local perm_text = vim.fn.filereadable(perm_path) == 1
+  and table.concat(vim.fn.readfile(perm_path), "\n") or ""
+ok("PERMISSION.md leads with the prompt-avoidance directive",
+  perm_text:find("disrupt", 1, true) ~= nil
+    and perm_text:find("avoid", 1, true) ~= nil)
+ok("PERMISSION.md states the Read/Write tools are the prompt-free surface",
+  perm_text:find("Read/Write", 1, true) ~= nil)
+ok("PERMISSION.md frontmatter carries its own revision",
+  perm_text:find("revision:") ~= nil)
+ok("bootstrap doc references PERMISSION.md (ADR-0036) + schema_version 9",
+  boot_text:find("PERMISSION.md", 1, true) ~= nil
+    and boot_text:find("schema_version: 9", 1, true) ~= nil)
+-- render_permission is deterministic (content sha → stable revision)
+local _, perm_rev_a = boot.render_permission()
+local _, perm_rev_b = boot.render_permission()
+ok("render_permission revision is deterministic (content-addressed)",
+  perm_rev_a == perm_rev_b and type(perm_rev_a) == "string")
+ok("permission revision differs from the bootstrap revision",
+  perm_rev_a ~= select(2, boot.render()))
+
 -- v0.1.8 render is agent-agnostic — identical revisions across
 -- arbitrary inputs (the template no longer substitutes per-call
 -- variables beyond revision/upserted_at).

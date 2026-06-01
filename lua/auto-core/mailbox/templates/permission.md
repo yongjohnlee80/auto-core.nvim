@@ -45,9 +45,9 @@ Live-tested findings (2026-06-01) — internalize these:
 - **Resolve identity/paths from your runtime-identity sidecar (Read
   tool) or your already-known env values** — not by `echo`-ing env
   vars.
-- **Find a new inbox message from the wake nudge's message id** (the
-  wake carries a bare id, no path) + your known mailbox dir, then Read
-  it directly — do not `ls` the inbox to discover it.
+- **Read a new inbox message from the path the wake nudge gives you**
+  (the wake carries the message's full file path) — Read it directly
+  with the Read tool; do not `ls` the inbox to discover it.
 - The one-time, per-spawn **identity verification** prompt is kept on
   purpose (transparency — "no surprise"); that is the only mailbox
   prompt expected as routine.

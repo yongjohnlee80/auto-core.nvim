@@ -38,21 +38,24 @@ local M = {}
 
 -- ── template resolution ─────────────────────────────────────
 
----Absolute path to the canonical template shipped in this plugin.
----Computed once at module load; the file is part of the plugin
----tree so any rtp-prepended install finds it.
+---Absolute path to a template shipped in this plugin. `name` defaults
+---to the canonical mailbox bootstrap; `permission.md` (ADR-0036) is the
+---peer permission guideline. Computed relative to this module so any
+---rtp-prepended install finds it.
+---@param name string?  -- template basename; default "bootstrap.md"
 ---@return string
-local function template_path()
+local function template_path(name)
   local src = debug.getinfo(1, "S").source
   if src:sub(1, 1) == "@" then src = src:sub(2) end
   local self_dir = vim.fn.fnamemodify(src, ":h")
-  return self_dir .. "/templates/bootstrap.md"
+  return self_dir .. "/templates/" .. (name or "bootstrap.md")
 end
 
 ---Read the raw template body. Returns text, err — exactly one is nil.
+---@param name string?  -- template basename; default "bootstrap.md"
 ---@return string? text, string? err
-function M.read_template()
-  local path = template_path()
+function M.read_template(name)
+  local path = template_path(name)
   local fd, oerr = vim.uv.fs_open(path, "r", 420)
   if not fd then return nil, "bootstrap: cannot open template at "
                              .. tostring(path) .. ": " .. tostring(oerr) end
@@ -101,23 +104,34 @@ local function sha256(text) return vim.fn.sha256(text) end
 ---template variables are agent-agnostic at the v0.1.8 schema).
 ---@param opts table?
 ---@return string text, string revision
-function M.render(opts)
-  local _ = opts  -- reserved for future per-tool overrides
-  local raw, err = M.read_template()
+---Render a template by basename. Revision is the sha256 of the body
+---with placeholders substituted, so identical content → identical
+---revision regardless of when it ran.
+---@param name string?  -- template basename; default "bootstrap.md"
+---@return string text, string revision
+local function render_template(name)
+  local raw, err = M.read_template(name)
   if not raw then error("auto-core.mailbox.bootstrap: " .. tostring(err)) end
-
-  local stable_vars = {
-    revision    = "PLACEHOLDER",
-    upserted_at = "PLACEHOLDER",
-  }
-  local stable = substitute(raw, stable_vars)
+  local stable = substitute(raw, { revision = "PLACEHOLDER", upserted_at = "PLACEHOLDER" })
   local revision = sha256(stable)
+  return substitute(raw, { revision = revision, upserted_at = message.now_iso() }), revision
+end
 
-  local final_vars = {
-    revision    = revision,
-    upserted_at = message.now_iso(),
-  }
-  return substitute(raw, final_vars), revision
+---Render the canonical mailbox bootstrap doc. `opts` reserved for
+---forward-compat (template vars are agent-agnostic at this schema).
+---@param opts table?
+---@return string text, string revision
+function M.render(opts)
+  local _ = opts
+  return render_template("bootstrap.md")
+end
+
+---Render the ADR-0036 permission guideline doc (`PERMISSION.md`).
+---@param opts table?
+---@return string text, string revision
+function M.render_permission(opts)
+  local _ = opts
+  return render_template("permission.md")
 end
 
 -- ── upsert ──────────────────────────────────────────────────
@@ -183,26 +197,56 @@ end
 ---`register()` calls with unchanged protocol inputs.
 ---@param opts { root: string }  -- workspace mailbox root (absolute path)
 ---@return { path: string, revision: string, wrote: boolean }
-function M.upsert(opts)
-  if type(opts) ~= "table" or type(opts.root) ~= "string"
-      or opts.root == "" then
-    error("auto-core.mailbox.bootstrap.upsert: opts.root "
-      .. "(absolute path) is required")
+---Generic render-and-upsert into the workspace mailbox root, with the
+---revision no-op short-circuit. Shared by the mailbox bootstrap doc
+---and the ADR-0036 permission guideline. `render_fn` returns
+---(text, revision). `root` must be an absolute path.
+---@param root string
+---@param render_fn fun(): string, string
+---@param out_name string
+---@param label string
+---@return { path: string, revision: string, wrote: boolean }
+local function upsert_doc(root, render_fn, out_name, label)
+  if type(root) ~= "string" or root == "" then
+    error("auto-core.mailbox.bootstrap." .. label
+      .. ": opts.root (absolute path) is required")
   end
-  local text, revision = M.render()
-  local path = opts.root .. "/bootstrap-mailbox.md"
+  local text, revision = render_fn()
+  local path = root .. "/" .. out_name
   if read_existing_revision(path) == revision then
     return { path = path, revision = revision, wrote = false }
   end
-  -- Ensure root exists before writing — register() normally
-  -- creates the mailbox subtree which would mkdir the parent, but
-  -- a caller invoking upsert directly might not have.
-  vim.fn.mkdir(opts.root, "p")
+  -- Ensure root exists before writing — register() normally creates
+  -- the mailbox subtree (mkdir-ing the parent), but a direct caller
+  -- might not have.
+  vim.fn.mkdir(root, "p")
   local ok, err = atomic_write(path, text)
   if not ok then
-    error("auto-core.mailbox.bootstrap.upsert: " .. tostring(err))
+    error("auto-core.mailbox.bootstrap." .. label .. ": " .. tostring(err))
   end
   return { path = path, revision = revision, wrote = true }
+end
+
+function M.upsert(opts)
+  if type(opts) ~= "table" then
+    error("auto-core.mailbox.bootstrap.upsert: opts.root "
+      .. "(absolute path) is required")
+  end
+  return upsert_doc(opts.root, M.render, "bootstrap-mailbox.md", "upsert")
+end
+
+---Render + upsert the ADR-0036 `PERMISSION.md` guideline into the
+---**workspace mailbox root** (peer to `bootstrap-mailbox.md`; same
+---no-op-on-unchanged-revision short-circuit). Advisory doc — callers
+---should not treat a write failure as fatal to mailbox bootstrap.
+---@param opts { root: string }
+---@return { path: string, revision: string, wrote: boolean }
+function M.upsert_permission(opts)
+  if type(opts) ~= "table" then
+    error("auto-core.mailbox.bootstrap.upsert_permission: opts.root "
+      .. "(absolute path) is required")
+  end
+  return upsert_doc(opts.root, M.render_permission, "PERMISSION.md", "upsert_permission")
 end
 
 return M

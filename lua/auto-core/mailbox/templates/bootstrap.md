@@ -1,7 +1,7 @@
 ---
 revision: {{revision}}
 upserted_at: {{upserted_at}}
-schema_version: 8
+schema_version: 9
 ---
 
 # Mailbox bootstrap (auto-core v0.1.33+)
@@ -61,25 +61,34 @@ following lands in your tree:
 - a new file in `$AUTO_AGENTS_MAILBOX_DIR/responses/` (a reply
   to a message you sent).
 
-Every time you wake, **before reading inbox or responses**:
+Every time you wake, **before reading inbox or responses**, check
+whether the protocol revision changed — using the **Read tool**, NOT
+`stat`/`cat`/`$(dirname …)`/compound shell (those expand env vars or
+substitute commands and trip the permission gate; see `PERMISSION.md`):
 
-1. `stat $AUTO_AGENTS_MAILBOX_BOOTSTRAP_DOC`.
-2. Read the `revision:` field from its frontmatter.
-3. Compare it to the revision you last acknowledged. The default
-   location (schema_version 7+, workspace-scoped layout) is:
-   `<workspace_mailbox_root>/seen_revisions/<your-agent-name>/seen_revision`
-   where `<workspace_mailbox_root>` is `$(dirname "$AUTO_AGENTS_MAILBOX_BOOTSTRAP_DOC")`
-   and `<your-agent-name>` is the bare name from your `$AUTO_AGENTS_MAILBOX_ID`
-   (e.g. `agent:jarvis:1747-3478` → `jarvis`). The file persists
-   across nvim restarts: the doc revision is a global protocol
-   property, not a per-spawn one. If you have never seen a revision
-   before, treat this as a first-time bootstrap.
+1. Read the `revision:` frontmatter of `$AUTO_AGENTS_MAILBOX_BOOTSTRAP_DOC`
+   — resolve the absolute path from the env var yourself and pass the
+   literal path to the Read tool.
+2. Read your last-acknowledged revision from the seen-revision file.
+   The default location (schema_version 7+, workspace-scoped layout) is
+   `<workspace_mailbox_root>/seen_revisions/<your-agent-name>/seen_revision`,
+   where `<workspace_mailbox_root>` is the directory CONTAINING the
+   bootstrap doc (resolve the dir part of
+   `$AUTO_AGENTS_MAILBOX_BOOTSTRAP_DOC` in your reasoning — do NOT build
+   a `$(dirname …)` shell command) and `<your-agent-name>` is the bare
+   name from your `$AUTO_AGENTS_MAILBOX_ID` (e.g.
+   `agent:jarvis:1747-3478` → `jarvis`). The file persists across nvim
+   restarts: the doc revision is a global protocol property, not a
+   per-spawn one. If you have never seen a revision before, treat this
+   as a first-time bootstrap.
+3. Compare the two `revision:` values in your reasoning.
 4. If the revision **differs** from your last-acknowledged value,
    the protocol changed between your last wake and this one.
    **Re-read this entire document end-to-end** and update your
    internal protocol assumptions before processing any inbox or
    response messages. Then write the new revision to your
-   seen-revision file.
+   seen-revision file with the **Write tool** (not `echo >` /
+   shell redirect).
 5. If the revision **matches**, your protocol is up to date and
    you can proceed directly to message processing.
 
@@ -477,9 +486,19 @@ is how the user discovers your drift if you didn't).
   protocol changes; your audit step catches each bump and
   re-reads the doc. Recent bumps: `6 → 7` workspace-scoped mailbox
   layout (auto-core v0.1.33); `7 → 8` explicit response-envelope
-  contract (this doc's § Response envelope contract).
+  contract (this doc's § Response envelope contract); `8 → 9`
+  `PERMISSION.md` permission guideline reference (ADR-0036).
 - Auto-family state ownership: per
   `shared/conventions/auto-family-state-ownership.md`, auto-core
   owns the canonical answer for "where this session lives"
   (workspace root / active worktree). Consumer plugins read it
   rather than deriving a parallel answer.
+- **Permissions (ADR-0036):** a peer doc `PERMISSION.md` lives in
+  this same workspace mailbox root. It is the **guideline** for
+  performing mailbox/KB operations **without recurring permission
+  prompts** — which grants you require per capability bucket, and
+  how to **request** them from the user (never self-grant). The
+  user's own workflow is disrupted by every prompt you raise, so
+  read `PERMISSION.md` and make best effort to avoid them. The
+  reference is advisory: if `PERMISSION.md` is absent, continue
+  normally and report the gap — it never blocks mailbox bootstrap.
