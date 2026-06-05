@@ -10,6 +10,43 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.56] — 2026-06-04 — `fs.path.agent_workspace_root` — stable per-project identity
+
+**Need**: per-project state keyed on `sha256(core.workspace_root)` —
+auto-finder's panel composition (`state.set_sections_for`) and
+md-harpoon's per-project pins — silently "reset" across restarts.
+`core.workspace_root` was pinned to the raw launch cwd by
+worktree.nvim, so one project hashed to a different key for every
+directory nvim happened to start in: a panel added from one cwd
+vanished on the next launch from a sibling worktree or subdir.
+
+**Change**: new resolver `auto-core.fs.path.agent_workspace_root(opts)`
+mapping any start dir to ONE stable project root. Precedence
+(first hit wins):
+
+1. `.auto-agents/` — the multi-repo agent-workspace marker, walked
+   across the WHOLE ancestry first, so a git repo nested inside an
+   agent workspace still collapses to the workspace, not the inner repo.
+2. `.bare/` container — bare-repo multi-worktree layout.
+3. plain git repo root — the dir holding `.git` (file or dir), the
+   repo root ITSELF, not its parent (the distinction from the existing
+   `workspace_root`, which intentionally returns parent-of-container
+   for the `<leader>gQ/gW` switcher).
+4. marker-less — the start dir unchanged (parity with the legacy
+   raw-cwd pin for a non-project launch).
+
+Pure function (filesystem walk only); operator overrides
+(`WORKTREE_ROOT` env, `worktree.setup({ root })`) are applied by the
+caller. worktree.nvim v0.4.8 wires this into its session-start capture,
+so every per-project consumer (auto-finder, md-harpoon, the todo
+default dir) inherits the stable key with no edits — one source of
+truth.
+
+**Back-compat**: additive — `agent_workspace_root` is new; the
+existing `workspace_root` is unchanged and keeps its callers.
+`api_version` stays at `0.1`. Smoke `[24]` +7 assertions; suite green
+at 1279 passed, 0 failed.
+
 ## [v0.1.48] — 2026-05-27 — todo `review` frontmatter accepts a list
 
 **Need**: multi-repo / multi-agent tasks routinely carry more than one

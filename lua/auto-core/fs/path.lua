@@ -26,6 +26,7 @@
 ---  M.project_root(opts?)          walk up looking for project markers
 ---  M.git_root(opts?)              walk up looking for `.git`
 ---  M.workspace_root(opts?)        parent of the nearest `.bare`/`.git` container
+---  M.agent_workspace_root(opts?)  stable per-project identity (`.auto-agents/` → `.bare` → repo root → cwd)
 ---@module 'auto-core.fs.path'
 
 local M = {}
@@ -266,6 +267,75 @@ function M.workspace_root(opts)
 
   -- Last resort: cwd's parent.
   return M.parent(start)
+end
+
+---Resolve a STABLE per-project identity from `opts.start` (default
+---cwd). Distinct from `M.workspace_root`: that one returns the
+---*parent* of the nearest container (designed for the `<leader>gQ/gW`
+---worktree-switcher "return to the dir holding all worktrees"
+---behavior); this one returns the project root ITSELF, so it is safe
+---to hash into a per-project key.
+---
+---This is the value `worktree.nvim` pins as `core.workspace_root` at
+---session start, and therefore the key every per-project consumer
+---hashes — auto-finder's panel composition
+---(`auto-finder.state.set_sections_for`), md-harpoon's pins, and the
+---todo subsystem's default dir. The single source of truth: change
+---resolution here and every consumer's per-project key moves in
+---lockstep (no per-plugin divergence).
+---
+---Precedence (first hit wins):
+---  1. **`.auto-agents/` (full ancestry)** — the auto-agents
+---     multi-repo workspace marker. Walked across the WHOLE ancestry
+---     before anything else, so a git repo nested inside an agent
+---     workspace still collapses to the workspace, not the inner repo.
+---     This is what makes every repo / worktree / subdir under one
+---     auto-agents project resolve to a single key (the reported bug:
+---     a panel added from one launch cwd "vanished" on the next
+---     launch from another, because each cwd hashed to its own key).
+---  2. **`.bare/` container** — a bare-repo multi-worktree layout:
+---     the dir holding `.bare` is the project root for all its
+---     worktrees.
+---  3. **plain git repo root** — the dir containing `.git` (file or
+---     dir). Returns the repo root itself, NOT its parent.
+---  4. **marker-less** — `opts.start` unchanged (e.g. launched from
+---     `~/` with no project above): the raw cwd, matching the legacy
+---     capture so a non-project launch is keyed exactly as before.
+---
+---Pure (filesystem walk only). Operator/explicit overrides
+---(`WORKTREE_ROOT` env, `worktree.setup({ root })`) are applied by the
+---caller (`worktree.nvim`'s capture point) ABOVE this resolver.
+---@param opts { start: string? }?
+---@return string
+function M.agent_workspace_root(opts)
+  opts = opts or {}
+  local start = M.normalize(opts.start or vim.fn.getcwd())
+  if start == "" then return start end
+
+  -- 1. `.auto-agents/` — highest precedence, full-ancestry walk.
+  local cur = start
+  while cur ~= "" and cur ~= "/" do
+    if M.is_dir(M.join(cur, ".auto-agents")) then return cur end
+    local parent = M.parent(cur)
+    if parent == cur then break end
+    cur = parent
+  end
+
+  -- 2. `.bare/` container.
+  cur = start
+  while cur ~= "" and cur ~= "/" do
+    if M.is_dir(M.join(cur, ".bare")) then return cur end
+    local parent = M.parent(cur)
+    if parent == cur then break end
+    cur = parent
+  end
+
+  -- 3. Plain git repo root (the dir holding `.git`, not its parent).
+  local gr = M.git_root({ start = start })
+  if gr then return gr end
+
+  -- 4. Marker-less: the start dir itself, unchanged.
+  return start
 end
 
 ---Public read of the marker list (consumers may want to extend it).

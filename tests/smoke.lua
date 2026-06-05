@@ -765,6 +765,46 @@ vim.fn.mkdir(ws .. "/branch-a/.git", "p")
 ok("workspace_root with .bare picks the container directly",
   p.workspace_root({ start = ws .. "/branch-a" }) == ws)
 
+-- agent_workspace_root: stable per-project identity (the value
+-- worktree.nvim pins as core.workspace_root, hashed into every
+-- per-project key — auto-finder panels, md-harpoon pins, todo dir).
+-- Precedence: `.auto-agents/` (full ancestry) → `.bare` container →
+-- plain repo root → cwd unchanged.
+-- NOTE: scoped in a `do … end` so its locals release their registers
+-- before the chunk's peak — this driver sits at Lua's 200-local cap.
+do
+  local aws = td .. "/agent-ws"
+  vim.fn.mkdir(aws .. "/.auto-agents", "p")
+  -- a plain git repo nested inside the agent workspace, with a deep
+  -- subdir AND a linked-worktree-style `.git` FILE child
+  vim.fn.mkdir(aws .. "/repoX/.git", "p")
+  vim.fn.writefile({ "ref: refs/heads/main" }, aws .. "/repoX/.git/HEAD")
+  vim.fn.mkdir(aws .. "/repoX/deep/nested", "p")
+  vim.fn.mkdir(aws .. "/repoX/wt", "p")
+  vim.fn.writefile({ "gitdir: " .. aws .. "/repoX/.git/worktrees/wt" },
+    aws .. "/repoX/wt/.git")
+  ok("agent_workspace_root: .auto-agents wins at the marker dir",
+    p.agent_workspace_root({ start = aws }) == aws)
+  ok("agent_workspace_root: .auto-agents collapses a nested repo",
+    p.agent_workspace_root({ start = aws .. "/repoX" }) == aws)
+  ok("agent_workspace_root: .auto-agents collapses a deep subdir",
+    p.agent_workspace_root({ start = aws .. "/repoX/deep/nested" }) == aws)
+  ok("agent_workspace_root: .auto-agents collapses a linked worktree",
+    p.agent_workspace_root({ start = aws .. "/repoX/wt" }) == aws)
+  -- standalone `.bare` layout (no .auto-agents) → the bare container
+  ok("agent_workspace_root: .bare layout collapses worktrees to container",
+    p.agent_workspace_root({ start = ws .. "/branch-a" }) == ws)
+  -- standalone plain repo (no .auto-agents/.bare) → the repo ROOT
+  -- itself, not its parent (the distinction from workspace_root)
+  ok("agent_workspace_root: plain repo returns the repo root, not parent",
+    p.agent_workspace_root({ start = sub }) == repo)
+  -- marker-less start → unchanged (parity with the legacy raw-cwd pin)
+  local bare_dir = td .. "/no-markers/here"
+  vim.fn.mkdir(bare_dir, "p")
+  ok("agent_workspace_root: marker-less start returns the start dir",
+    p.agent_workspace_root({ start = bare_dir }) == bare_dir)
+end
+
 -- Cleanup
 pcall(vim.fn.delete, td, "rf")
 
