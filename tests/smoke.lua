@@ -9422,6 +9422,274 @@ print("\n[74] ADR-0035 amendment — clone in-progress→completed lifecycle + e
   cleanup()
 end)()
 
+-- ─────────────── 75. ADR-0038 Batches A-C ────────────────
+print("\n[75] ADR-0038 — scope-local wo writes, response_write_failed, poll re-arm, entry cache, UI debounce, shared todo walker")
+
+-- ── (a) panel with_unfixed_buf must NOT leak winfixbuf into the
+--        global default (ADR-0028; the "winfixbuf propagation" bug).
+;(function()
+  local Panel = require("auto-core.ui.panel")
+  Panel._reset_for_tests()
+  local p = Panel.new({
+    name  = "p75-panel",
+    side  = "left",
+    width = { default = 28, min = 20, max = 60 },
+    filetype = "p75-test",
+  })
+  local winid = p:open(true)
+  ok("p75(a): panel opens with winfixbuf set locally",
+    winid and vim.wo[winid].winfixbuf == true)
+  local g_before = vim.api.nvim_get_option_value("winfixbuf", { scope = "global" })
+  local ran = false
+  p:with_unfixed_buf(function() ran = true end)
+  ok("p75(a): with_unfixed_buf ran the callback", ran)
+  ok("p75(a): panel window winfixbuf restored locally",
+    vim.wo[winid].winfixbuf == true)
+  local g_after = vim.api.nvim_get_option_value("winfixbuf", { scope = "global" })
+  ok("p75(a): global winfixbuf default NOT mutated by the toggle (ADR-0028)",
+    g_after == g_before and g_after == false,
+    "global winfixbuf before=" .. tostring(g_before) .. " after=" .. tostring(g_after))
+  p:close()
+end)()
+
+-- ── (b) multi-float pane options are scope-local (ADR-0028).
+;(function()
+  local multi = require("auto-core.ui.float.multi")
+  local function g(name)
+    return vim.api.nvim_get_option_value(name, { scope = "global" })
+  end
+  local pre = { cursorline = g("cursorline"), wrap = g("wrap"),
+                winhighlight = g("winhighlight") }
+  local m = multi.new({
+    name  = "p75-float",
+    outer = { width_pct = 0.8, height_pct = 0.8, title = " p75 " },
+    panes = {
+      left   = { width = 24, cursorline = true },
+      middle = { cursorline = true },
+    },
+  })
+  m:open()
+  ok("p75(b): multi float opened", m:is_open())
+  local mid_win = m:winid("middle")
+  ok("p75(b): pane window got cursorline LOCALLY",
+    mid_win and vim.wo[mid_win].cursorline == true)
+  ok("p75(b): global cursorline/wrap/winhighlight defaults NOT mutated (ADR-0028)",
+    g("cursorline") == pre.cursorline
+      and g("wrap") == pre.wrap
+      and g("winhighlight") == pre.winhighlight,
+    string.format("cursorline %s>%s wrap %s>%s winhl %q>%q",
+      tostring(pre.cursorline), tostring(g("cursorline")),
+      tostring(pre.wrap), tostring(g("wrap")),
+      pre.winhighlight, g("winhighlight")))
+  m:dispose()
+end)()
+
+-- ── (c) executioner response-write failure is OBSERVABLE: failed
+--        transport.complete → log.error + response_write_failed event
+--        (previously fully silent; sender polled forever).
+;(function()
+  local mb       = require("auto-core.mailbox")
+  local registry = require("auto-core.mailbox.registry")
+  local router   = mb.router
+  local commands = mb.commands
+  local tr       = mb.transport
+  local events_m = require("auto-core.events")
+
+  mb.register("nvim")
+  mb.register("agent:p75-sender")
+  router.start()
+
+  commands.register("p75.echo", {
+    owner = "smoke",
+    handler = function(args) return { ok = true, value = { echoed = args.x } } end,
+    description = "p75 echo",
+  })
+
+  local failed_events = {}
+  local sub = events_m.subscribe("core.mailbox:response_write_failed", function(p)
+    failed_events[#failed_events + 1] = p
+  end)
+
+  local real_complete = tr.complete
+  tr.complete = function() return false, "p75 forced response-write failure" end
+
+  local cor = "cor-p75-fail-" .. tostring(vim.uv.hrtime())
+  local cmd_msg = mb.message.build({
+    from = "agent:p75-sender", to = "nvim",
+    kind = "command", command = "p75.echo",
+    args = { x = 1 }, correlation_id = cor,
+  })
+  local srec = registry.get("agent:p75-sender")
+  vim.fn.writefile({ vim.json.encode(cmd_msg) },
+    srec.subs.outbox .. "/" .. cmd_msg.id .. ".json")
+
+  router.scan_now()
+  vim.wait(600, function() return #failed_events >= 1 end, 25)
+
+  tr.complete = real_complete
+  events_m.unsubscribe(sub)
+
+  ok("p75(c): core.mailbox:response_write_failed published when complete() fails",
+    #failed_events >= 1, "events: " .. vim.inspect(failed_events))
+  ok("p75(c): payload carries mailbox + id + error",
+    failed_events[1] ~= nil
+      and failed_events[1].mailbox == "nvim"
+      and failed_events[1].id == cmd_msg.id
+      and tostring(failed_events[1].error):find("p75 forced", 1, true) ~= nil,
+    vim.inspect(failed_events[1]))
+
+  -- The stubbed complete left the message in processing/ — finish it
+  -- for real so downstream state stays clean.
+  pcall(real_complete, "nvim", cmd_msg.id, { ok = true, value = {} })
+end)()
+
+-- ── (d) poll timer re-arms when poll_interval_ms changes (was
+--        frozen at the first-armed interval until stop()/start()).
+;(function()
+  local router = require("auto-core.mailbox.router")
+  router.stop()
+  router.configure({ mode = "poll", poll_interval_ms = 60000 })
+  router.start()
+  local st = router.status()
+  ok("p75(d): poll mode arms the global timer",
+    st.poll_running == true, vim.inspect(st))
+  ok("p75(d): status reports the ARMED interval",
+    st.poll_armed_interval_ms == 60000,
+    "got " .. tostring(st.poll_armed_interval_ms))
+  router.configure({ poll_interval_ms = 90000 })
+  router.refresh()
+  st = router.status()
+  ok("p75(d): refresh() re-arms the live timer at the NEW interval (ADR-0038 A3)",
+    st.poll_armed_interval_ms == 90000,
+    "got " .. tostring(st.poll_armed_interval_ms))
+  router.stop()
+  router.configure({ mode = "auto", poll_interval_ms = 1000 })
+end)()
+
+-- ── (e) list_entries entry cache: unchanged dir → zero decodes;
+--        a new message invalidates via the dir signature.
+;(function()
+  local mb = require("auto-core.mailbox")
+  local tr = mb.transport
+  mb.register("agent:p75-cache")
+  mb.send({ from = "agent:p75-cache", to = "agent:p75-cache", body = "one" })
+  mb.send({ from = "agent:p75-cache", to = "agent:p75-cache", body = "two" })
+
+  tr._invalidate_entry_cache()
+  local e1 = tr.list_entries("agent:p75-cache", "inbox")
+  ok("p75(e): first list decodes the inbox", #e1 == 2, "#e1=" .. tostring(#e1))
+  local d_after_first = tr._list_decode_count
+  local e2 = tr.list_entries("agent:p75-cache", "inbox")
+  ok("p75(e): unchanged dir → cache hit with ZERO additional decodes (ADR-0038 B2)",
+    tr._list_decode_count == d_after_first and #e2 == 2,
+    string.format("decodes %d>%d #e2=%d", d_after_first, tr._list_decode_count, #e2))
+
+  mb.send({ from = "agent:p75-cache", to = "agent:p75-cache", body = "three" })
+  local e3 = tr.list_entries("agent:p75-cache", "inbox")
+  ok("p75(e): new message invalidates the cache via dir signature",
+    #e3 == 3 and tr._list_decode_count > d_after_first,
+    string.format("#e3=%d decodes %d>%d", #e3, d_after_first, tr._list_decode_count))
+end)()
+
+-- ── (f) viewer refresh is COALESCED: an event burst inside the
+--        debounce window produces exactly one repaint.
+;(function()
+  local mb = require("auto-core.mailbox")
+  local ui = mb.ui
+  local events_m = require("auto-core.events")
+  ui.open()
+  ui._refresh_count = 0
+  for i = 1, 6 do
+    events_m.publish("core.mailbox:message_queued",
+      { mailbox = "agent:p75-cache", id = "p75-burst-" .. i })
+  end
+  vim.wait(2000, function() return ui._refresh_count >= 1 end, 25)
+  vim.wait(400)  -- window for any (wrongly) stacked extra repaints
+  ok("p75(f): 6-event burst coalesced into exactly ONE repaint (ADR-0038 B1)",
+    ui._refresh_count == 1, "refresh_count=" .. tostring(ui._refresh_count))
+  ui.close()
+end)()
+
+-- ── (g) shared todo walker + find_task_file + origin-at-birth.
+;(function()
+  local todo     = require("auto-core.todo")
+  local t_paths  = require("auto-core.todo.paths")
+  local worktree = require("auto-core.git.worktree")
+
+  local tmp_root = vim.fn.tempname() .. "_p75todo"
+  vim.fn.mkdir(tmp_root, "p")
+  worktree.set_workspace_root(tmp_root)
+  pcall(todo.set_todo_dir, nil)  -- clear any override from earlier sections
+
+  local td = todo.get_todo_dir()
+  local under_tmp = td:find(tmp_root, 1, true) == 1
+  ok("p75(g): todo dir resolved under the tmp fixture root", under_tmp, td)
+  if not under_tmp then
+    worktree.set_workspace_root(nil)
+    vim.fn.delete(tmp_root, "rf")
+    return  -- refuse to write into a real store
+  end
+
+  local a = todo.add({ title = "p75 walker open task" })
+  local b = todo.add({ title = "p75 walker progress task" })
+  todo.status(b, "in-progress")
+  local c = todo.add({ title = "p75 walker archived task" })
+  todo.status(c, "archived")
+
+  -- Canonical walk: every task visited, flat buckets before archived,
+  -- bucket labels correct.
+  local seen = {}
+  t_paths.walk(td, function(fp, bucket)
+    seen[#seen + 1] = { fp = fp, bucket = bucket }
+  end)
+  ok("p75(g): paths.walk visits all three tasks", #seen == 3,
+    "saw " .. tostring(#seen))
+  ok("p75(g): walk order = flat buckets then archived, labels correct",
+    seen[1] ~= nil and seen[1].bucket == "open"
+      and seen[2] ~= nil and seen[2].bucket == "in-progress"
+      and seen[3] ~= nil and seen[3].bucket == "archived",
+    vim.inspect(seen))
+
+  -- Bucket filter narrows the walk (list()'s status short-circuit).
+  local only_open = {}
+  t_paths.walk(td, function(fp) only_open[#only_open + 1] = fp end, "open")
+  ok("p75(g): bucket filter visits only the requested bucket",
+    #only_open == 1 and only_open[1]:find(a, 1, true) ~= nil,
+    vim.inspect(only_open))
+
+  -- Shared finder reaches the archived YYYY/MM partition.
+  local cpath = t_paths.find_task_file(td, c)
+  ok("p75(g): find_task_file resolves an ARCHIVED task",
+    type(cpath) == "string" and cpath:find("/archived/", 1, true) ~= nil,
+    tostring(cpath))
+
+  -- list/scan regression through the shared walker.
+  local open_list = todo.list({ status = "open" })
+  ok("p75(g): todo.list(status=open) via the shared walker",
+    #open_list == 1 and open_list[1].id == a, "#open=" .. tostring(#open_list))
+  local scan_res = todo.scan()
+  ok("p75(g): todo.scan via the shared walker — all tasks, none malformed",
+    #scan_res.tasks == 3 and #scan_res.malformed == 0,
+    string.format("tasks=%d malformed=%d", #scan_res.tasks, #scan_res.malformed))
+
+  -- origin-at-birth (ADR-0038 C): the internal add() parameter stamps
+  -- the managed backref INSIDE the create write — no post-create
+  -- read/modify/write round-trip.
+  local d = todo.add({ title = "p75 clone-ish task" },
+    { origin = "2026-06-11-p75-template" })
+  local dt = todo.get(d)
+  ok("p75(g): add(spec, {origin=...}) stamps origin at birth",
+    dt ~= nil and dt.origin == "2026-06-11-p75-template",
+    tostring(dt and dt.origin))
+  local plain = todo.add({ title = "p75 plain task" })
+  local pt = todo.get(plain)
+  ok("p75(g): plain add leaves origin nil",
+    pt ~= nil and pt.origin == nil, tostring(pt and pt.origin))
+
+  worktree.set_workspace_root(nil)
+  vim.fn.delete(tmp_root, "rf")
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

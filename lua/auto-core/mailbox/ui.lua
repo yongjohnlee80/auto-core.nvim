@@ -234,6 +234,32 @@ local function refresh_panes(mf)
   set_buf_lines(mf:bufnr("preview"), render_preview(focused_entry))
 end
 
+-- ── event-driven refresh (coalesced) ──────────────────────
+--
+-- ADR-0038 Batch B: the viewer subscribes to `core.mailbox:*`, and a
+-- single command round-trip publishes several events (queued, claimed,
+-- completed, response_written, …). Repainting per event re-walked and
+-- re-decoded every message file N times for one logical change. Any
+-- burst inside the debounce window now produces exactly ONE repaint.
+
+local REFRESH_DEBOUNCE_MS = 250
+
+---Test observability: bumped once per coalesced (debounced) repaint.
+M._refresh_count = 0
+
+local function schedule_refresh()
+  if _state.refresh_scheduled then return end
+  _state.refresh_scheduled = true
+  vim.defer_fn(function()
+    _state.refresh_scheduled = nil
+    local cur = multi.get(FLOAT_NAME)
+    if cur and cur:is_open() then
+      refresh_panes(cur)
+      M._refresh_count = M._refresh_count + 1
+    end
+  end, REFRESH_DEBOUNCE_MS)
+end
+
 -- ── selection handling ────────────────────────────────────
 
 ---Move the cursor into the left pane and pin the selection from
@@ -372,14 +398,10 @@ function M.open(opts)
 
   if not mf:is_open() then mf:open() end
 
-  -- Auto-refresh on any mailbox / command event.
+  -- Auto-refresh on any mailbox / command event — coalesced, so an
+  -- event burst repaints once (see schedule_refresh above).
   if _state.sub_handle then events.unsubscribe(_state.sub_handle) end
-  _state.sub_handle = events.subscribe("core.mailbox:*", function()
-    vim.schedule(function()
-      local cur = multi.get(FLOAT_NAME)
-      if cur and cur:is_open() then refresh_panes(cur) end
-    end)
-  end)
+  _state.sub_handle = events.subscribe("core.mailbox:*", schedule_refresh)
 
   return mf
 end

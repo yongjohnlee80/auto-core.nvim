@@ -772,6 +772,50 @@ return {
   -- auto-finder v0.2.47. The schema field-kind widens with read
   -- coercion rather than break-shaping existing data; `api_version`
   -- stays at `0.1` consistent with the v0.1.x todo additions.
-  version     = "0.1.48",
+  -- (v0.1.49–v0.1.56: see CHANGELOG.md — the in-file log lagged the
+  -- git tags for those releases; resynced here at v0.1.57.)
+  -- v0.1.57 (2026-06-11): ADR-0038 Batches A–C — correctness +
+  -- performance pass from the full v0.1.56 audit. Strictly additive;
+  -- `api_version` stays at `0.1`.
+  --   Batch A (correctness):
+  --   - ui/float/multi.lua + ui/panel.lua with_unfixed_buf: ALL
+  --     window-option writes now scope-local per ADR-0028. The
+  --     with_unfixed_buf restore leg previously mutated the GLOBAL
+  --     winfixbuf default ("winfixbuf propagation" bug — every window
+  --     created after a section mount was born buffer-locked).
+  --   - mailbox/router.lua executioner: transport.complete() failures
+  --     are now logged + published as NEW additive topic
+  --     `core.mailbox:response_write_failed` (previously fully silent;
+  --     the sender polled its responses/ dir forever).
+  --   - mailbox/router.lua: the poll fallback timer re-arms when
+  --     `poll_interval_ms` changes (was frozen at first-armed value).
+  --     `router.status()` gains `poll_armed_interval_ms`.
+  --   Batch B (mailbox UI responsiveness):
+  --   - mailbox/ui.lua: event-driven refresh coalesced (250ms) — an
+  --     event burst repaints once, not N times.
+  --   - mailbox/transport.lua list_entries: per-(mailbox,subdir) entry
+  --     cache keyed on a scandir name:mtime:size signature — an
+  --     unchanged dir returns prior entries with ZERO file decodes.
+  --     Decoded fields normalized string-or-nil at the boundary
+  --     (JSON null → vim.NIL userdata previously crashed the viewer's
+  --     renderer). Adds _invalidate_entry_cache() + _list_decode_count
+  --     test hooks.
+  --   Batch C (todo I/O consolidation):
+  --   - todo/paths.lua: NEW `walk(td, on_file, bucket_filter?)` +
+  --     `find_task_file(td, id)` — the single canonical bucket
+  --     walk/find. todo/init.lua's three hand-rolled walk copies
+  --     (list/scan/walk_task_files) and automation.lua's private
+  --     bucket scan all delegate (the duplication class that shipped
+  --     the v0.1.47 override-dir bug).
+  --   - todo/init.lua add(spec, internal?): internal second parameter
+  --     lets auto-core-internal callers stamp the managed `origin`
+  --     INTO the create write; automation clone-on-fire drops its
+  --     post-create read/modify/write round-trip and the backref is
+  --     crash-durable from birth.
+  -- Smoke [75] added (25 assertions); suite at 1300 passed. The 4
+  -- failures on the dev machine pre-exist on main (macOS env issues:
+  -- max_handles cap, fan_out sort, prune ×2 — tracked in the KB todo
+  -- 2026-05-26-fix-macos-symlink-resolution-failures-in-smoke-tests).
+  version     = "0.1.57",
   api_version = "0.1",
 }

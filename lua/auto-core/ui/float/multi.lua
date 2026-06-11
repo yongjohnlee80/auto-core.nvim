@@ -53,6 +53,15 @@ local events = require("auto-core.events")
 
 local M = {}
 
+-- ADR 0028: window-appearance options must be written with explicit
+-- local scope. Bare `vim.wo[winid].opt = v` mutates the global-local
+-- DEFAULT for `cursorline` / `wrap` / `winhighlight`, polluting every
+-- editor window materialized after the float opens. Same helper as
+-- `auto-core/ui/panel.lua` — use it for every window-option write here.
+local function set_winlocal(winid, name, value)
+  vim.api.nvim_set_option_value(name, value, { win = winid, scope = "local" })
+end
+
 ---@type table<string, AutoCoreMultiFloat>
 local _registry = {}
 
@@ -265,10 +274,11 @@ function Float:_open_pane(name, geom)
   end
   local winid = vim.api.nvim_open_win(bufnr, false, win_opts)
   if pane_opts.cursorline then
-    vim.wo[winid].cursorline = true
+    set_winlocal(winid, "cursorline", true)
   end
-  vim.wo[winid].wrap = false
-  vim.wo[winid].winhighlight = "Normal:NormalFloat,FloatBorder:FloatBorder,CursorLine:Visual"
+  set_winlocal(winid, "wrap", false)
+  set_winlocal(winid, "winhighlight",
+    "Normal:NormalFloat,FloatBorder:FloatBorder,CursorLine:Visual")
 
   _stamp(winid, self.opts.name)
   -- Buffer-local q closes the whole instance unless overridden.
@@ -305,7 +315,7 @@ function Float:_open_bg(geom)
     winopts.title_pos = outer.title_pos or "center"
   end
   local winid = vim.api.nvim_open_win(b, false, winopts)
-  vim.wo[winid].winhighlight = "Normal:NormalFloat,FloatBorder:FloatBorder"
+  set_winlocal(winid, "winhighlight", "Normal:NormalFloat,FloatBorder:FloatBorder")
   _stamp(winid, self.opts.name)
   self.panes.bg = { winid = winid, bufnr = b, _spawned_buf = true }
 end

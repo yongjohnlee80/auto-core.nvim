@@ -336,9 +336,58 @@ end
 ---@field correlation_id string?
 ---@field responded     boolean?            true if a matching response exists (only set when scope='outbox'/'archive' and the message has a correlation_id)
 
+-- ── entry cache (ADR-0038 Batch B) ─────────────────────────
+--
+-- The expensive part of list_entries is the read + JSON-decode of
+-- EVERY message file; the viewer calls it on each repaint. Message
+-- files are immutable once atomically renamed into place, so a cheap
+-- scandir signature (name:mtime:size per file) detects any change and
+-- invalidates. The `responded` flag on archive entries depends on a
+-- DIFFERENT directory (the original sender's responses/), so it is
+-- re-derived on every call — fs_stat-cheap — instead of being cached.
+
+---@type table<string, { sig: string, dir: string, entries: AutoCoreMailboxMessageEntry[] }>
+local _entry_cache = {}
+
+---Test observability: bumped once per message-file decode inside
+---list_entries. A cache hit performs zero decodes.
+M._list_decode_count = 0
+
+---Drop all cached listings (tests / defensive callers).
+function M._invalidate_entry_cache()
+  _entry_cache = {}
+end
+
+---Cheap change signature for a mailbox subdir: sorted
+---`name:mtime:size` per message file. No file contents are read.
+---@param dir string
+---@return string?
+local function _dir_signature(dir)
+  local sd = vim.uv.fs_scandir(dir)
+  if not sd then return nil end
+  local parts = {}
+  while true do
+    local name, type_ = vim.uv.fs_scandir_next(sd)
+    if not name then break end
+    if (type_ == "file" or type_ == nil)
+        and name:sub(1, 1) ~= "."
+        and name:sub(-5) == ".json"
+    then
+      local st = vim.uv.fs_stat(dir .. "/" .. name)
+      parts[#parts + 1] = name .. ":"
+        .. tostring(st and st.mtime.sec or 0) .. ":"
+        .. tostring(st and st.size or 0)
+    end
+  end
+  table.sort(parts)
+  return table.concat(parts, "|")
+end
+
 ---Walk a mailbox subdir and return one entry per message. Reads
 ---each file lightly to populate from/to/subject/kind for the
 ---viewer's middle pane. Sorted by mtime DESCending (newest first).
+---Cached per (mailbox, subdir) keyed on the directory signature —
+---an unchanged dir returns the prior entries with zero decodes.
 ---@param mailbox_id string
 ---@param subdir     "inbox"|"outbox"|"processing"|"archive"|"responses"
 ---@return AutoCoreMailboxMessageEntry[]
@@ -352,6 +401,23 @@ function M.list_entries(mailbox_id, subdir)
     dir = mb_path.subdir(mailbox_id, subdir)
   end
   if not dir or not fs_path.is_dir(dir) then return out end
+
+  local cache_key = mailbox_id .. ":" .. subdir
+  local sig = _dir_signature(dir)
+  local hit = _entry_cache[cache_key]
+  if hit and sig and hit.sig == sig and hit.dir == dir then
+    if subdir == "archive" then
+      -- Cross-directory state: re-derive cheaply on every call.
+      for _, e in ipairs(hit.entries) do
+        if e.correlation_id and e.from then
+          e.responded = M.response_exists(e.from, e.correlation_id)
+            and true or nil
+        end
+      end
+    end
+    return hit.entries
+  end
+
   local sd = vim.uv.fs_scandir(dir)
   if not sd then return out end
   while true do
@@ -371,12 +437,19 @@ function M.list_entries(mailbox_id, subdir)
       }
       local text = read_all(path)
       if text then
+        M._list_decode_count = M._list_decode_count + 1
         local msg = message.decode(text)
         if msg then
-          entry.from           = msg.from
-          entry.to             = msg.to
-          entry.subject        = msg.subject
-          entry.kind           = msg.kind
+          -- JSON `null` decodes to vim.NIL (a TRUTHY userdata) — a
+          -- message with `"subject": null` previously leaked userdata
+          -- onto the entry and crashed the viewer's renderer
+          -- (`e.subject:gsub` on userdata). Normalize at this
+          -- boundary so consumers only ever see string-or-nil
+          -- (ADR-0038 Batch B).
+          entry.from           = type(msg.from)    == "string" and msg.from    or nil
+          entry.to             = type(msg.to)      == "string" and msg.to      or nil
+          entry.subject        = type(msg.subject) == "string" and msg.subject or nil
+          entry.kind           = type(msg.kind)    == "string" and msg.kind    or nil
           if type(msg.correlation_id) == "string"
               and msg.correlation_id ~= ""
           then
@@ -390,9 +463,10 @@ function M.list_entries(mailbox_id, subdir)
           elseif subdir == "archive" then
             entry.state = (msg.status == "failed") and "failed" or "completed"
             -- Annotate with "responded" if a response exists at the
-            -- ORIGINAL sender's responses/<correlation_id>.
-            if entry.correlation_id
-                and M.response_exists(msg.from, entry.correlation_id)
+            -- ORIGINAL sender's responses/<correlation_id>. Use the
+            -- normalized entry.from (string-or-nil), not raw msg.from.
+            if entry.correlation_id and entry.from
+                and M.response_exists(entry.from, entry.correlation_id)
             then
               entry.responded = true
             end
@@ -411,6 +485,9 @@ function M.list_entries(mailbox_id, subdir)
   end
   -- Newest first.
   table.sort(out, function(a, b) return a.mtime > b.mtime end)
+  if sig then
+    _entry_cache[cache_key] = { sig = sig, dir = dir, entries = out }
+  end
   return out
 end
 

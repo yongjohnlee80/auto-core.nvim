@@ -82,6 +82,7 @@ local DEFAULT_POLL_INTERVAL  = 1000   -- ms; honored when any root falls back to
 ---@field seen       table<string, table<string, boolean>>  -- per-subdir-path id-sets
 ---@field debounce   table<string, integer>                 -- path → last-event-ms
 ---@field poll_timer userdata?                              -- single global timer for poll mode
+---@field poll_timer_interval integer?                      -- interval the live timer was armed with (re-arm detection)
 ---@field cfg        AutoCoreMailboxRouterConfig
 
 ---@class AutoCoreMailboxRouterRootEntry
@@ -522,9 +523,23 @@ local function execute_command(rec, mid, msg)
     message_id     = mid,
   })
   -- complete() handles the response envelope routing back to the
-  -- sender. Errors during complete are logged but don't propagate;
-  -- the executioner is fire-and-forget from the router's PoV.
-  transport.complete(rec.id, mid, response)
+  -- sender. Errors during complete are logged + published but don't
+  -- propagate; the executioner is fire-and-forget from the router's
+  -- PoV. Without this check a failed archive/response write (disk
+  -- full, permissions) was fully silent and the sender polled its
+  -- responses/ dir forever (ADR-0038 Batch A).
+  local cok, cerr = transport.complete(rec.id, mid, response)
+  if not cok then
+    log.error(LOG_COMPONENT, "response write failed: " .. tostring(cerr), {
+      event  = "auto-core.mailbox.router.response_write_failed",
+      fields = { mailbox = rec.bare_id, id = mid, error = tostring(cerr) },
+    })
+    events.publish("core.mailbox:response_write_failed", {
+      mailbox = rec.bare_id,
+      id      = mid,
+      error   = tostring(cerr),
+    })
+  end
 end
 
 ---@param rec AutoCoreMailboxRecord
@@ -803,14 +818,29 @@ local function _any_root_polls()
 end
 
 ---Internal: start/stop the global poll timer as needed.
+---
+---Re-arms when `poll_interval_ms` changed since the timer was
+---created — previously an armed timer was kept forever, so a
+---`configure({ poll_interval_ms = N })` while running silently kept
+---polling at the OLD interval until a full stop()/start() cycle
+---(ADR-0038 Batch A).
 local function _sync_poll_timer()
   local needs_poll = _any_root_polls()
   local interval   = _state.cfg.poll_interval_ms
   if needs_poll and interval and interval ~= false and interval > 0 then
-    if _state.poll_timer then return end
+    if _state.poll_timer then
+      if _state.poll_timer_interval == interval then return end
+      -- Interval changed: tear down and fall through to re-arm.
+      pcall(function()
+        _state.poll_timer:stop()
+        _state.poll_timer:close()
+      end)
+      _state.poll_timer = nil
+    end
     local timer = vim.uv.new_timer()
     if not timer then return end
     _state.poll_timer = timer
+    _state.poll_timer_interval = interval
     timer:start(interval, interval, vim.schedule_wrap(function()
       if _state.running then M.scan_now() end
     end))
@@ -895,6 +925,7 @@ function M.stop()
       _state.poll_timer:close()
     end)
     _state.poll_timer = nil
+    _state.poll_timer_interval = nil
   end
   _state.running = false
 end
@@ -919,6 +950,10 @@ function M.status()
     mode             = _state.cfg.mode,
     poll_interval_ms = _state.cfg.poll_interval_ms,
     poll_running     = _state.poll_timer ~= nil,
+    -- Interval the LIVE timer was armed with — may lag
+    -- cfg.poll_interval_ms until the next start()/refresh()
+    -- re-syncs (ADR-0038 Batch A re-arm observability).
+    poll_armed_interval_ms = _state.poll_timer and _state.poll_timer_interval or nil,
   }
 end
 

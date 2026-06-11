@@ -10,6 +10,71 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.57] — 2026-06-11 — ADR-0038 Batches A–C: correctness + performance pass
+
+Implements the first three batches of ADR-0038 (full v0.1.56 audit:
+3 confirmed bugs, 4 verified perf hotspots). Strictly additive —
+`api_version` stays `0.1`.
+
+**Batch A — correctness:**
+
+- **ADR-0028 sweep**: `ui/float/multi.lua` pane options
+  (`cursorline`/`wrap`/`winhighlight`) and `ui/panel.lua`
+  `with_unfixed_buf`'s `winfixbuf` toggle now write with explicit
+  local scope. The `with_unfixed_buf` restore leg previously mutated
+  the **global** `winfixbuf` default — every window created after a
+  section mount was born buffer-locked (the long-chased "winfixbuf
+  propagation" bug).
+- **Silent response loss fixed**: the mailbox executioner now checks
+  `transport.complete()`'s return; failures produce a `log.error` and
+  the new additive event `core.mailbox:response_write_failed`.
+  Previously a failed archive/response write (disk full, permissions)
+  was invisible and the sending agent polled its `responses/` dir
+  forever.
+- **Poll timer re-arm**: the fallback poll timer re-arms when
+  `poll_interval_ms` changes via `configure()` + `refresh()` (was
+  frozen at the first-armed interval until a full stop/start).
+  `router.status()` gains `poll_armed_interval_ms`.
+
+**Batch B — mailbox UI responsiveness:**
+
+- Viewer refresh is **coalesced** (250 ms): an event burst repaints
+  the three panes once, not once per event.
+- `transport.list_entries` gains a per-`(mailbox, subdir)` **entry
+  cache** keyed on a cheap scandir `name:mtime:size` signature — an
+  unchanged dir returns the prior entries with **zero** file reads or
+  JSON decodes. Archive entries' cross-directory `responded` flag is
+  re-derived per call (fs_stat-cheap), never cached stale.
+- Decoded message fields are normalized string-or-nil at the
+  boundary: JSON `null` → `vim.NIL` (truthy userdata) previously
+  leaked onto entries and crashed the viewer's list renderer.
+- Test hooks: `transport._invalidate_entry_cache()`,
+  `transport._list_decode_count`, `mailbox.ui._refresh_count`.
+
+**Batch C — todo I/O consolidation:**
+
+- `todo/paths.lua` gains the canonical `walk(td, on_file,
+  bucket_filter?)` and `find_task_file(td, id)`. The three
+  hand-rolled directory-walk copies in `todo/init.lua`
+  (`list`/`scan`/`walk_task_files`) and `todo/automation.lua`'s
+  private bucket scan all delegate to them — ending the duplication
+  class that shipped the v0.1.47 override-dir bug.
+- `todo.add(spec, internal?)`: new optional internal-only second
+  parameter lets auto-core-internal callers stamp the managed
+  `origin` field **inside** the create write. Automation's
+  clone-on-fire drops its post-create read/modify/write round-trip,
+  and the clone's backref is crash-durable from birth.
+
+Smoke: new section `[75]` (25 assertions) — fail-before/pass-after
+coverage for the winfixbuf leak, the response-write-failed event, the
+poll re-arm, cache-hit zero-decode, refresh coalescing, walker
+order/filter, archived find, and origin-at-birth. Suite: 1300 passed;
+the 4 failures on the dev machine pre-exist on `main` (macOS
+environment issues, tracked separately).
+
+Audit + remaining batches (D async git, E hygiene, F test split):
+ADR-0038 in the auto-agents KB.
+
 ## [v0.1.56] — 2026-06-04 — `fs.path.agent_workspace_root` — stable per-project identity
 
 **Need**: per-project state keyed on `sha256(core.workspace_root)` —

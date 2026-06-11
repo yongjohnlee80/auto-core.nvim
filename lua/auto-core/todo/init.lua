@@ -235,31 +235,10 @@ end
 ---@param id string
 ---@return string?
 local function find_task_path(td, id)
-  local fname = id .. ".md"
-  -- Flat buckets first (cheap). ADR-0035 expanded the flat set from
-  -- {open, completed, deferred} to include `in-progress` and
-  -- `automated`; iterate the canonical list from paths so we don't
-  -- duplicate the bucket inventory at every call site.
-  for _, bucket in ipairs(paths.FLAT_BUCKETS) do
-    local candidate = fs_path.join(td, bucket, fname)
-    if fs_path.is_file(candidate) then return candidate end
-  end
-  -- Archived bucket is partitioned by YYYY/MM — scan two levels.
-  local archived = fs_path.join(td, "archived")
-  if fs_path.is_dir(archived) then
-    local years = vim.fn.readdir(archived) or {}
-    for _, y in ipairs(years) do
-      local y_dir = fs_path.join(archived, y)
-      if fs_path.is_dir(y_dir) then
-        local months = vim.fn.readdir(y_dir) or {}
-        for _, m in ipairs(months) do
-          local candidate = fs_path.join(y_dir, m, fname)
-          if fs_path.is_file(candidate) then return candidate end
-        end
-      end
-    end
-  end
-  return nil
+  -- Canonical implementation lives in paths.find_task_file — shared
+  -- with todo.automation so the bucket inventory + archive layout
+  -- have exactly one source of truth (ADR-0038 Batch C).
+  return paths.find_task_file(td, id)
 end
 
 -- ─── public: add ──────────────────────────────────────────────
@@ -306,7 +285,7 @@ end
 ---or write failure.
 ---@param spec table
 ---@return string id
-function M.add(spec)
+function M.add(spec, internal)
   if type(spec) ~= "table" then
     error("auto-core.todo.add: spec must be a table, got " .. type(spec))
   end
@@ -330,6 +309,18 @@ function M.add(spec)
   -- Copy any other hand-editable fields the caller supplied.
   for k, v in pairs(spec) do
     if HAND_EDITABLE[k] then task[k] = v end
+  end
+
+  -- Managed-field injection for auto-core-INTERNAL callers (ADR-0038
+  -- Batch C): automation's clone-on-fire previously created the clone
+  -- and immediately re-read + re-wrote the whole file just to stamp
+  -- `origin`. Accepting it here folds the backref into this one
+  -- atomic write — one fewer round-trip per fire, and the backref is
+  -- crash-durable from birth. `internal` is NOT part of the
+  -- hand-editable surface; external callers (the `todos.add` mailbox
+  -- verb) never pass it.
+  if type(internal) == "table" and type(internal.origin) == "string" then
+    task.origin = internal.origin
   end
 
   -- Lifecycle-timestamp sanity for explicit non-open spawn (rare):
@@ -457,60 +448,13 @@ function M.list(opts)
     return task
   end
 
-  local function scan_flat(bucket)
-    local b_dir = fs_path.join(td, bucket)
-    if not fs_path.is_dir(b_dir) then return end
-    local files = vim.fn.readdir(b_dir) or {}
-    table.sort(files)
-    for _, f in ipairs(files) do
-      if f:match("%.md$") then
-        local t = load_and_filter(fs_path.join(b_dir, f))
-        if t then out[#out + 1] = t end
-      end
-    end
-  end
-
-  local function scan_archived()
-    local a_dir = fs_path.join(td, "archived")
-    if not fs_path.is_dir(a_dir) then return end
-    local years = vim.fn.readdir(a_dir) or {}
-    table.sort(years)
-    for _, y in ipairs(years) do
-      local y_dir = fs_path.join(a_dir, y)
-      if fs_path.is_dir(y_dir) then
-        local months = vim.fn.readdir(y_dir) or {}
-        table.sort(months)
-        for _, m in ipairs(months) do
-          local m_dir = fs_path.join(y_dir, m)
-          local files = vim.fn.readdir(m_dir) or {}
-          table.sort(files)
-          for _, f in ipairs(files) do
-            if f:match("%.md$") then
-              local t = load_and_filter(fs_path.join(m_dir, f))
-              if t then out[#out + 1] = t end
-            end
-          end
-        end
-      end
-    end
-  end
-
-  -- Status filter short-circuit: skip buckets we don't care about.
-  -- Bucket inventory comes from `paths.FLAT_BUCKETS` (ADR-0035) so
-  -- adding a future status only requires updating one source of
-  -- truth, not every scan site.
-  if opts.status then
-    if opts.status == "archived" then
-      scan_archived()
-    else
-      scan_flat(opts.status)
-    end
-  else
-    for _, b in ipairs(paths.FLAT_BUCKETS) do
-      scan_flat(b)
-    end
-    scan_archived()
-  end
+  -- Canonical walk via paths.walk (ADR-0038 Batch C). The status
+  -- filter doubles as the bucket filter — paths.walk visits only the
+  -- matching bucket dir, preserving the prior short-circuit.
+  paths.walk(td, function(file_path)
+    local t = load_and_filter(file_path)
+    if t then out[#out + 1] = t end
+  end, opts.status)
 
   return out
 end
@@ -603,46 +547,9 @@ function M.scan()
     tasks_out[#tasks_out + 1] = task
   end
 
-  local function scan_flat(bucket)
-    local b_dir = fs_path.join(td, bucket)
-    if not fs_path.is_dir(b_dir) then return end
-    local files = vim.fn.readdir(b_dir) or {}
-    table.sort(files)
-    for _, f in ipairs(files) do
-      if f:match("%.md$") then
-        load(fs_path.join(b_dir, f), bucket)
-      end
-    end
-  end
-
-  local function scan_archived()
-    local a_dir = fs_path.join(td, "archived")
-    if not fs_path.is_dir(a_dir) then return end
-    local years = vim.fn.readdir(a_dir) or {}
-    table.sort(years)
-    for _, y in ipairs(years) do
-      local y_dir = fs_path.join(a_dir, y)
-      if fs_path.is_dir(y_dir) then
-        local months = vim.fn.readdir(y_dir) or {}
-        table.sort(months)
-        for _, m in ipairs(months) do
-          local m_dir = fs_path.join(y_dir, m)
-          local files = vim.fn.readdir(m_dir) or {}
-          table.sort(files)
-          for _, f in ipairs(files) do
-            if f:match("%.md$") then
-              load(fs_path.join(m_dir, f), "archived")
-            end
-          end
-        end
-      end
-    end
-  end
-
-  for _, b in ipairs(paths.FLAT_BUCKETS) do
-    scan_flat(b)
-  end
-  scan_archived()
+  -- Canonical walk via paths.walk (ADR-0038 Batch C); `load`'s
+  -- (file_path, bucket) signature matches the walker callback.
+  paths.walk(td, load)
 
   return { tasks = tasks_out, malformed = malformed_out }
 end
@@ -745,35 +652,11 @@ end
 ---@param td string
 ---@return string[]
 local function walk_task_files(td)
+  -- Canonical walk via paths.walk (ADR-0038 Batch C).
   local out = {}
-  local function scan_flat_dir(dir)
-    if not fs_path.is_dir(dir) then return end
-    local files = vim.fn.readdir(dir) or {}
-    table.sort(files)
-    for _, f in ipairs(files) do
-      if f:match("%.md$") then
-        out[#out + 1] = fs_path.join(dir, f)
-      end
-    end
-  end
-  for _, b in ipairs(paths.FLAT_BUCKETS) do
-    scan_flat_dir(fs_path.join(td, b))
-  end
-  local a_dir = fs_path.join(td, "archived")
-  if fs_path.is_dir(a_dir) then
-    local years = vim.fn.readdir(a_dir) or {}
-    table.sort(years)
-    for _, y in ipairs(years) do
-      local y_dir = fs_path.join(a_dir, y)
-      if fs_path.is_dir(y_dir) then
-        local months = vim.fn.readdir(y_dir) or {}
-        table.sort(months)
-        for _, m in ipairs(months) do
-          scan_flat_dir(fs_path.join(y_dir, m))
-        end
-      end
-    end
-  end
+  paths.walk(td, function(file_path)
+    out[#out + 1] = file_path
+  end)
   return out
 end
 

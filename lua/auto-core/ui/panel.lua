@@ -331,11 +331,16 @@ end
 function Panel:with_unfixed_buf(fn)
   if not self:_is_open() then return pcall(fn) end
   local prev_buf = vim.api.nvim_win_get_buf(self.winid)
+  -- ADR 0028: the toggle writes MUST be scope-local. The bare
+  -- `vim.wo[winid].winfixbuf = v` form uses `:set` semantics — the
+  -- restore-to-true leg mutated the GLOBAL winfixbuf default, so every
+  -- window materialized after a section mount started buffer-locked
+  -- (the "winfixbuf propagation" family bug; ADR-0038 Batch A).
   local was = vim.wo[self.winid].winfixbuf
-  if was then vim.wo[self.winid].winfixbuf = false end
+  if was then set_winlocal(self.winid, "winfixbuf", false) end
   local ok, result = pcall(fn)
   if was and vim.api.nvim_win_is_valid(self.winid) then
-    vim.wo[self.winid].winfixbuf = true
+    set_winlocal(self.winid, "winfixbuf", true)
   end
   -- Whatever buffer the consumer just placed in the panel is now
   -- panel-owned. Stamping here is the only reliable hook: nvim

@@ -652,14 +652,11 @@ local function _write_managed_field(task_id, mutate)
   local td    = _todo().get_todo_dir()
   local md    = require("auto-core.todo.md")
 
-  -- Find the live file location. Mirror find_task_path's flat-
-  -- bucket scan without importing a private from init.lua.
-  local fs_path = require("auto-core.fs.path")
-  local file
-  for _, bucket in ipairs(paths.FLAT_BUCKETS) do
-    local candidate = fs_path.join(td, bucket, task_id .. ".md")
-    if fs_path.is_file(candidate) then file = candidate; break end
-  end
+  -- Find the live file location via the SHARED finder (ADR-0038
+  -- Batch C). This function previously mirrored init.lua's private
+  -- flat-bucket scan by hand — the duplication class that produced
+  -- the override-dir bug above in the first place.
+  local file = paths.find_task_file(td, task_id)
   if not file then return false, "task '" .. task_id .. "' not found" end
 
   local f = io.open(file, "r")
@@ -762,17 +759,15 @@ function M.fire(id, opts)
                     now_iso),
     description = description,
     tags        = clone_tags,
-    -- `origin:` set via direct frontmatter — todo.add doesn't
-    -- expose it (it's a managed field). We patch via the
-    -- _write_managed_field helper below.
+  }, {
+    -- ADR-0038 Batch C: `origin` is managed, so it can't ride the
+    -- hand-editable spec — but add()'s internal second parameter
+    -- stamps it INTO the create write. Previously we re-read +
+    -- re-wrote the whole clone file right after creating it, and a
+    -- crash between the two writes left a clone with no backref.
+    origin = id,
   })
   if aerr or not clone_id then return nil, aerr or "todo.add failed" end
-
-  -- Patch the origin field on the clone (managed). Lector F2: use
-  -- the shared managed-field helper.
-  _write_managed_field(clone_id, function(task)
-    task.origin = id
-  end)
 
   -- ── async step continuation chain ─────────────────────────────
   --

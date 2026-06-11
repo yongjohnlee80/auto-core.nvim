@@ -243,6 +243,13 @@ local M = {
     payload = "{ mailbox = string, reply_to = string, correlation_id = string, path = string, ok = boolean }",
     publishers = { "auto-core" },
   },
+  ["core.mailbox:response_write_failed"] = {
+    doc = "transport.complete failed after an executioner command ran — the sender will never "
+      .. "see a response file for this correlation_id. Observability surface for disk-full / "
+      .. "permission failures that previously vanished silently (ADR-0038 Batch A).",
+    payload = "{ mailbox = string, id = string, error = string }",
+    publishers = { "auto-core" },
+  },
   ["core.command:registered"] = {
     doc = "commands.register stored a new command handler.",
     payload = "{ name = string, owner = string, description = string? }",
