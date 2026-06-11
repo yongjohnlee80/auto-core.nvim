@@ -10,6 +10,66 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.58] — 2026-06-11 — ADR-0038 Batches D1 + E: async git show + structural hygiene
+
+Implements the remaining recommended batches of ADR-0038 (D2 and F
+stay deferred — see below). Strictly additive — `api_version` stays
+`0.1`.
+
+**Batch D1 — async git show:**
+
+- New `git.graph.show_stat_async(common_dir, hash, cb)` and
+  `show_diff_async(...)` — the same per-`(common_dir, hash)` caches
+  as the sync APIs, but the git invocation runs via `vim.system` off
+  the UI thread and `cb(lines)` is delivered on the main loop. The
+  100-500ms commit-preview hang becomes a placeholder-then-fill for
+  consumers that migrate. Concurrent requests for the same key
+  **coalesce into one subprocess** (rapid cursor moves); every
+  caller's callback still fires. Failure path delivers the same
+  banner shape as the sync APIs plus stderr detail. The sync
+  functions are unchanged; `worktree.nvim`'s graph dashboard can
+  migrate independently.
+
+**Batch E — structural hygiene:**
+
+- **`fs.atomic`** (new module, exposed on the `fs` facade): the
+  single canonical write-temp → best-effort-fsync → rename primitive,
+  `fs.atomic.write(path, text, { mkdir? })`. `mailbox/transport`,
+  `mailbox/bootstrap`, and `todo/init` now delegate — previously
+  three drifting inline copies (one required the parent dir, one
+  mkdir-p'd it, one never checked).
+- **`state`**: one memoized `events()` resolver replaces the four
+  inline `require("auto-core").events` facade round-trips (the
+  historical circular-require workaround). Resolution stays lazy, so
+  load order is unconstrained.
+- **Todo field catalog unified**: `todo/schema.lua` now owns
+  `FRONTMATTER_ORDER` next to `FIELDS`, with a **load-time drift
+  check** (a field added to one table without the other fails at
+  module load). `todo/md.lua` consumes the shared catalog instead of
+  carrying a hand-synced copy.
+- **Router bookkeeping bounded**: `refresh()` sweeps the
+  `seen`/`debounce` maps (seen ids whose message files left the
+  subdir; debounce stamps older than 1h). `router.status()` gains
+  `seen_total` / `debounce_total`.
+- **Log throttle map bounded**: size-gated opportunistic prune
+  (512-entry threshold, 1h TTL — the `fs/watch` debounce pattern).
+  `log._throttle_size()` test hook.
+- **ADR-0038 S5 decided document-only**: `todo.add`/`update` validate
+  shape, not reference existence; broken `adr:`/`review:`/`blocked:`
+  refs surface as `errors[]` on `refresh()`/`scan()`. The contract is
+  now stated in the `add()` docstring.
+
+Deferred: **D2** (async fan_out — workspace-switch latency not felt
+at current repo counts; ADR-0038 open question #2), **F** (test-suite
+split), todo `list()` TTL memoize.
+
+Smoke: new section `[76]` (19 assertions) — atomic-write semantics
+(existing dir / missing dir / mkdir / no tmp litter), async-show
+coalescing + shared-cache + failure banner, catalog export +
+roundtrip, seen-prune on refresh, throttle-map counting. Suite: 1319
+passed; same 4 pre-existing macOS environment failures as the
+v0.1.56/57 baselines.
+
 ## [v0.1.57] — 2026-06-11 — ADR-0038 Batches A–C: correctness + performance pass
 
 Implements the first three batches of ADR-0038 (full v0.1.56 audit:

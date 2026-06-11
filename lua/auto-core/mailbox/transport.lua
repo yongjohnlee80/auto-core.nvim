@@ -23,51 +23,26 @@
 ---
 ---@module 'auto-core.mailbox.transport'
 
-local events   = require("auto-core.events")
-local fs_path  = require("auto-core.fs.path")
-local mb_path  = require("auto-core.mailbox.path")
-local registry = require("auto-core.mailbox.registry")
-local message  = require("auto-core.mailbox.message")
+local events    = require("auto-core.events")
+local fs_path   = require("auto-core.fs.path")
+local fs_atomic = require("auto-core.fs.atomic")
+local mb_path   = require("auto-core.mailbox.path")
+local registry  = require("auto-core.mailbox.registry")
+local message   = require("auto-core.mailbox.message")
 
 local M = {}
 
 -- ── low-level atomic write ───────────────────────────────────
 
----Write `text` to `final_path` atomically by going through a temp
----file in the same directory and fsync-renaming. Returns ok, err?.
+---Write `text` to `final_path` atomically. Delegates to the shared
+---`fs.atomic.write` primitive (ADR-0038 Batch E — previously one of
+---three drifting inline copies). Target dir must exist (mailbox
+---layout is registry-managed).
 ---@param final_path string
 ---@param text string
 ---@return boolean ok, string? err
 local function atomic_write(final_path, text)
-  local dir = fs_path.parent(final_path)
-  if not fs_path.is_dir(dir) then
-    return false, "atomic_write: target dir missing: " .. tostring(dir)
-  end
-  local tmp = dir .. "/.tmp-" .. tostring(vim.uv.hrtime()) .. "-" .. tostring(math.random(1, 1e9))
-  -- Open with 0644. fs_open returns (fd, err) — guard both.
-  local fd, open_err = vim.uv.fs_open(tmp, "w", 420) -- 0644
-  if not fd then return false, "fs_open: " .. tostring(open_err) end
-  local _, write_err = vim.uv.fs_write(fd, text, 0)
-  if write_err then
-    pcall(vim.uv.fs_close, fd)
-    pcall(vim.uv.fs_unlink, tmp)
-    return false, "fs_write: " .. tostring(write_err)
-  end
-  -- Best-effort fsync; some filesystems / sandboxes refuse it
-  -- (e.g. tmpfs may return ENOSYS). Don't fail the write on that —
-  -- rename is the durable commit.
-  pcall(vim.uv.fs_fsync, fd)
-  local _, close_err = vim.uv.fs_close(fd)
-  if close_err then
-    pcall(vim.uv.fs_unlink, tmp)
-    return false, "fs_close: " .. tostring(close_err)
-  end
-  local rok, rename_err = vim.uv.fs_rename(tmp, final_path)
-  if not rok then
-    pcall(vim.uv.fs_unlink, tmp)
-    return false, "fs_rename: " .. tostring(rename_err)
-  end
-  return true
+  return fs_atomic.write(final_path, text)
 end
 
 ---@param path string

@@ -816,6 +816,40 @@ return {
   -- failures on the dev machine pre-exist on main (macOS env issues:
   -- max_handles cap, fan_out sort, prune ×2 — tracked in the KB todo
   -- 2026-05-26-fix-macos-symlink-resolution-failures-in-smoke-tests).
-  version     = "0.1.57",
+  -- v0.1.58 (2026-06-11): ADR-0038 Batches D1 + E. Strictly additive;
+  -- `api_version` stays at `0.1`.
+  --   Batch D1 (async git show):
+  --   - git/graph.lua: NEW `show_stat_async` / `show_diff_async` —
+  --     same per-(common_dir, hash) caches as the sync APIs, run via
+  --     vim.system off the UI thread, cb on the main loop. Concurrent
+  --     same-key requests coalesce into ONE subprocess. Sync APIs
+  --     unchanged; consumers (worktree.nvim graph) migrate at their
+  --     own pace. `_async_spawn_count` test hook.
+  --   Batch E (structural hygiene):
+  --   - NEW fs/atomic.lua — the single canonical write-temp→fsync→
+  --     rename primitive (`fs.atomic.write(path, text, {mkdir?})`),
+  --     exposed on the `fs` facade. transport / bootstrap / todo
+  --     delegate (previously three drifting inline copies).
+  --   - state/init.lua: one memoized events() resolver replaces the
+  --     four inline `require("auto-core").events` facade round-trips.
+  --   - todo/schema.lua now OWNS the frontmatter catalog: exports
+  --     FRONTMATTER_ORDER next to FIELDS with a load-time drift
+  --     check; todo/md.lua consumes it (previously a hand-synced
+  --     copy in each file).
+  --   - router: refresh() sweeps the seen/debounce bookkeeping maps
+  --     (seen ids whose files left the subdir; debounce stamps older
+  --     than 1h); `status()` gains seen_total / debounce_total.
+  --   - log: throttle map size-gated opportunistic prune (512-entry
+  --     threshold, 1h TTL, same pattern as fs/watch); `_throttle_size`
+  --     test hook.
+  --   - ADR-0038 S5 decided DOCUMENT-ONLY: todo.add/update validate
+  --     shape, not reference existence — broken adr/review/blocked
+  --     refs surface as errors[] on refresh/scan (contract now stated
+  --     in the add() docstring).
+  -- Deferred: D2 (async fan_out — latency not felt at current repo
+  -- counts), F (test-suite split), todo list() TTL memoize.
+  -- Smoke [76] added (19 assertions); suite at 1319 passed (same 4
+  -- pre-existing macOS env failures as the v0.1.56/57 baselines).
+  version     = "0.1.58",
   api_version = "0.1",
 }

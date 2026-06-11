@@ -9690,6 +9690,205 @@ end)()
   vim.fn.delete(tmp_root, "rf")
 end)()
 
+-- ─────────────── 76. ADR-0038 Batches D1 + E ─────────────
+print("\n[76] ADR-0038 — fs.atomic, async git show, shared field catalog, bookkeeping prune")
+
+-- ── (a) fs.atomic.write — the shared primitive.
+;(function()
+  local atomic = require("auto-core.fs.atomic")
+  local base = vim.fn.tempname() .. "_p76atomic"
+  vim.fn.mkdir(base, "p")
+
+  local f1 = base .. "/plain.txt"
+  local ok1 = atomic.write(f1, "p76 payload")
+  ok("p76(a): write into an existing dir succeeds",
+    ok1 == true and table.concat(vim.fn.readfile(f1), "\n") == "p76 payload")
+
+  local ok2, err2 = atomic.write(base .. "/missing/sub.txt", "x")
+  ok("p76(a): missing parent dir without mkdir → structured error",
+    ok2 == false and tostring(err2):find("target dir missing", 1, true) ~= nil,
+    tostring(err2))
+
+  local f3 = base .. "/made/sub.txt"
+  local ok3 = atomic.write(f3, "y", { mkdir = true })
+  ok("p76(a): mkdir=true creates the parent and writes",
+    ok3 == true and vim.fn.filereadable(f3) == 1)
+
+  ok("p76(a): no tmp litter left behind",
+    (function()
+      for _, f in ipairs(vim.fn.readdir(base)) do
+        if f:match("^%.tmp%-") then return false end
+      end
+      return true
+    end)())
+
+  ok("p76(a): facade exposes fs.atomic",
+    require("auto-core.fs").atomic == atomic)
+
+  vim.fn.delete(base, "rf")
+end)()
+
+-- ── (b) async git show — shared cache, in-flight coalescing.
+;(function()
+  local graph = require("auto-core.git.graph")
+  graph._reset_for_tests()
+
+  local repo = vim.fn.tempname() .. "_p76git"
+  vim.fn.mkdir(repo, "p")
+  vim.fn.system({ "git", "-C", repo, "init", "-q" })
+  vim.fn.writefile({ "hello p76" }, repo .. "/f.txt")
+  vim.fn.system({ "git", "-C", repo, "add", "." })
+  vim.fn.system({ "git", "-C", repo,
+    "-c", "user.email=t@t", "-c", "user.name=t",
+    "commit", "-q", "-m", "p76 commit subject" })
+  local hash = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "HEAD" }))
+  local common = repo .. "/.git"
+  if vim.v.shell_error ~= 0 or hash == "" then
+    ok("p76(b): git fixture creation", false, "git unavailable / commit failed")
+    vim.fn.delete(repo, "rf")
+    return
+  end
+
+  -- Two rapid requests for the SAME key: both callbacks fire, ONE
+  -- subprocess (in-flight coalescing).
+  local spawn0 = graph._async_spawn_count
+  local got1, got2
+  graph.show_stat_async(common, hash, function(lines) got1 = lines end)
+  graph.show_stat_async(common, hash, function(lines) got2 = lines end)
+  vim.wait(4000, function() return got1 ~= nil and got2 ~= nil end, 25)
+  ok("p76(b): both async callbacks delivered",
+    type(got1) == "table" and type(got2) == "table")
+  ok("p76(b): async stat lines carry the commit subject",
+    (function()
+      for _, l in ipairs(got1 or {}) do
+        if l:find("p76 commit subject", 1, true) then return true end
+      end
+      return false
+    end)(), vim.inspect(got1))
+  ok("p76(b): concurrent same-key requests coalesced into ONE subprocess",
+    graph._async_spawn_count == spawn0 + 1,
+    "spawns " .. tostring(spawn0) .. ">" .. tostring(graph._async_spawn_count))
+
+  -- The async result landed in the SHARED cache: the sync API now
+  -- returns identical lines without shelling out.
+  local sync_lines = graph.show_stat(common, hash)
+  ok("p76(b): sync show_stat hits the cache populated by the async path",
+    vim.deep_equal(sync_lines, got1))
+
+  -- Cache hit via the async API resolves without a new spawn.
+  local spawn1 = graph._async_spawn_count
+  local got3
+  graph.show_diff_async(common, hash, function(lines) got3 = lines end)
+  vim.wait(4000, function() return got3 ~= nil end, 25)
+  local spawn_after_diff = graph._async_spawn_count
+  local got4
+  graph.show_diff_async(common, hash, function(lines) got4 = lines end)
+  vim.wait(2000, function() return got4 ~= nil end, 25)
+  ok("p76(b): async diff delivered + repeat is a cache hit (no extra spawn)",
+    got3 ~= nil and got4 ~= nil
+      and spawn_after_diff == spawn1 + 1
+      and graph._async_spawn_count == spawn_after_diff,
+    string.format("spawns %d>%d>%d", spawn1, spawn_after_diff, graph._async_spawn_count))
+
+  -- Failure path: unknown hash → banner line, callback still fires.
+  local got_err
+  graph.show_diff_async(common, ("d"):rep(40), function(lines) got_err = lines end)
+  vim.wait(4000, function() return got_err ~= nil end, 25)
+  ok("p76(b): failed git show delivers the failure banner",
+    got_err ~= nil and tostring(got_err[1] or ""):find("failed", 1, true) ~= nil,
+    vim.inspect(got_err))
+
+  graph._reset_for_tests()
+  vim.fn.delete(repo, "rf")
+end)()
+
+-- ── (c) shared frontmatter catalog: schema owns the order; md
+--        consumes it; load-time drift check already ran (module
+--        loaded = invariant held).
+;(function()
+  local schema = require("auto-core.todo.schema")
+  local order = schema.FRONTMATTER_ORDER
+  ok("p76(c): schema exports FRONTMATTER_ORDER",
+    type(order) == "table" and #order >= 20)
+  ok("p76(c): identity first, errors last (emission convention intact)",
+    order[1] == "id" and order[#order] == "errors")
+  -- Encode/decode roundtrip through md still healthy (the emitter
+  -- consumes the shared order).
+  local md = require("auto-core.todo.md")
+  local task = require("auto-core.todo.schema").blank({
+    id = "2026-06-11-p76-roundtrip", created = "2026-06-11T00:00:00Z",
+    updated = "2026-06-11T00:00:00Z", status_changed = "2026-06-11T00:00:00Z",
+    status = "open", title = "p76", description = "body",
+  })
+  local enc = md.encode(task)
+  local dec = md.decode(enc)
+  ok("p76(c): md encode/decode roundtrip via the shared catalog",
+    dec.ok and dec.value and dec.value.id == "2026-06-11-p76-roundtrip",
+    vim.inspect(dec))
+end)()
+
+-- ── (d) router bookkeeping prune: seen ids whose files left the
+--        subdir are swept on refresh(); totals are observable.
+;(function()
+  local mb       = require("auto-core.mailbox")
+  local registry = require("auto-core.mailbox.registry")
+  local router   = mb.router
+  local commands = mb.commands
+  local events_m = require("auto-core.events")
+
+  mb.register("nvim")
+  mb.register("agent:p76-sender")
+  router.start()
+  commands.register("p76.echo", {
+    owner = "smoke",
+    handler = function(args) return { ok = true, value = { echoed = args.x } } end,
+    description = "p76 echo",
+  })
+
+  local completed = {}
+  local sub = events_m.subscribe("core.mailbox:message_completed", function(p)
+    completed[#completed + 1] = p
+  end)
+
+  local cmd_msg = mb.message.build({
+    from = "agent:p76-sender", to = "nvim",
+    kind = "command", command = "p76.echo", args = { x = 2 },
+    correlation_id = "cor-p76-" .. tostring(vim.uv.hrtime()),
+  })
+  local srec = registry.get("agent:p76-sender")
+  vim.fn.writefile({ vim.json.encode(cmd_msg) },
+    srec.subs.outbox .. "/" .. cmd_msg.id .. ".json")
+  router.scan_now()
+  vim.wait(600, function() return #completed >= 1 end, 25)
+  events_m.unsubscribe(sub)
+
+  local t1 = router.status().seen_total
+  ok("p76(d): seen_total counts the dispatched message", t1 >= 1,
+    "seen_total=" .. tostring(t1))
+  -- The command completed → its inbox file was claimed away; the
+  -- prune on refresh() must drop the orphaned seen id.
+  router.refresh()
+  local t2 = router.status().seen_total
+  ok("p76(d): refresh() prunes seen ids whose files are gone (ADR-0038 E)",
+    t2 < t1, string.format("seen_total %d>%d", t1, t2))
+  ok("p76(d): debounce_total is observable",
+    type(router.status().debounce_total) == "number")
+end)()
+
+-- ── (e) log throttle map: counted + repeat keys don't grow it.
+;(function()
+  local log = require("auto-core.log")
+  local s0 = log._throttle_size()
+  log.info_throttled("p76-throttle-key-a", 60000, "smoke", "a")
+  log.info_throttled("p76-throttle-key-b", 60000, "smoke", "b")
+  local s1 = log._throttle_size()
+  ok("p76(e): new throttle keys are counted", s1 == s0 + 2,
+    string.format("size %d>%d", s0, s1))
+  log.info_throttled("p76-throttle-key-a", 60000, "smoke", "a-again")
+  ok("p76(e): repeat key within window does not grow the map",
+    log._throttle_size() == s1)
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

@@ -898,9 +898,38 @@ function M.start()
   end
 end
 
+---Internal: bounded-bookkeeping sweep (ADR-0038 Batch E). Without it
+---both maps grow for the life of the session:
+---  * `_state.debounce` (path → last-event-ms): entries older than an
+---    hour can never influence a coalescing decision again (windows
+---    are ~25ms), so drop them.
+---  * `_state.seen` (subdir-path → id-set): drop ids whose message
+---    file no longer exists in that subdir. Safe — the seen-set
+---    dedupes re-dispatch of files STILL present; a routed/claimed/
+---    archived file can't be re-dispatched from here, and message ids
+---    are never reused.
+local PRUNE_DEBOUNCE_TTL_MS = 60 * 60 * 1000
+local function _prune_bookkeeping()
+  local now = vim.uv.now()
+  for path, stamp in pairs(_state.debounce) do
+    if (now - stamp) > PRUNE_DEBOUNCE_TTL_MS then
+      _state.debounce[path] = nil
+    end
+  end
+  for subdir_path, ids in pairs(_state.seen) do
+    for id in pairs(ids) do
+      if not fs_path.is_file(subdir_path .. "/" .. id .. ".json") then
+        ids[id] = nil
+      end
+    end
+    if next(ids) == nil then _state.seen[subdir_path] = nil end
+  end
+end
+
 ---Re-scan the registry. Opens watchers for any newly-registered
 ---root and closes watchers for roots that no longer have a mailbox.
 ---Safe to call frequently; opening an already-open root is a no-op.
+---Also sweeps the seen/debounce bookkeeping maps (ADR-0038 Batch E).
 function M.refresh()
   if not _state.running then return end
   local active = {}
@@ -912,6 +941,7 @@ function M.refresh()
     if not active[root] then close_root(root) end
   end
   _sync_poll_timer()
+  _prune_bookkeeping()
 end
 
 ---Stop the router. Closes every open watcher + the poll timer.
@@ -954,6 +984,19 @@ function M.status()
     -- cfg.poll_interval_ms until the next start()/refresh()
     -- re-syncs (ADR-0038 Batch A re-arm observability).
     poll_armed_interval_ms = _state.poll_timer and _state.poll_timer_interval or nil,
+    -- Bookkeeping-map sizes (ADR-0038 Batch E prune observability).
+    seen_total     = (function()
+      local n = 0
+      for _, ids in pairs(_state.seen) do
+        for _ in pairs(ids) do n = n + 1 end
+      end
+      return n
+    end)(),
+    debounce_total = (function()
+      local n = 0
+      for _ in pairs(_state.debounce) do n = n + 1 end
+      return n
+    end)(),
   }
 end
 

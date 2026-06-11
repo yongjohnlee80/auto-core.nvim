@@ -126,6 +126,83 @@ local FIELDS = {
   -- consumes only the frontmatter for panel rendering.
 }
 
+-- ── canonical frontmatter field order (ADR-0038 Batch E) ───────
+--
+-- Hand-editable + content-required first (humans skim the top of
+-- the file); managed fields second; auto-managed errors[] last.
+-- Purely an emission convention — decoders accept any ordering.
+--
+-- Lives HERE (next to FIELDS) so the field catalog has one home:
+-- previously `todo/md.lua` carried its own copy and adding a field
+-- required updating both files with nothing enforcing sync. The
+-- load-time check below makes drift fail loudly instead of silently.
+-- `description` is deliberately absent — it renders as the markdown
+-- BODY, not as frontmatter.
+
+M.FRONTMATTER_ORDER = {
+  -- Hand-editable: identity + status / lifecycle
+  "id",
+  "version",
+  "status",
+  "title",
+  "due",
+  "priority",
+  "assignee",
+  "tags",
+
+  -- Hand-editable: references
+  "adr",
+  "review",
+  "blocked",
+
+  -- Hand-editable: automation (ADR-0035 Phase 1 — required-iff-automated).
+  -- Placed BEFORE the managed timestamp block so a template author
+  -- sees `condition:` / `execute:` near the top of the file where
+  -- they live operationally, not buried below the lifecycle TS.
+  "condition",
+  "execute",
+
+  -- Managed: timestamps
+  "created",
+  "updated",
+  "status_changed",
+  "completed_at",
+  "archived_at",
+
+  -- Managed: automation (ADR-0035 Phase 1). `origin` is set on
+  -- clones; `last_fired_at` is set on templates. `exit_code`
+  -- (2026-06-01) is set on clones whose fire ran a captured bash
+  -- step (`bash` / `bash:<sec>`); terminal-routed `bash -t=N`
+  -- records none.
+  "origin",
+  "last_fired_at",
+  "exit_code",
+
+  -- Auto-managed
+  "errors",
+}
+
+-- Load-time drift check: FRONTMATTER_ORDER must cover exactly the
+-- FIELDS catalog minus `description` (body, not frontmatter). A new
+-- field added to one table without the other fails HERE, at module
+-- load, instead of silently dropping the field from emitted files.
+do
+  local in_order = {}
+  for _, k in ipairs(M.FRONTMATTER_ORDER) do
+    assert(not in_order[k],
+      "todo.schema: duplicate FRONTMATTER_ORDER entry '" .. k .. "'")
+    in_order[k] = true
+    assert(FIELDS[k] ~= nil,
+      "todo.schema: FRONTMATTER_ORDER entry '" .. k .. "' missing from FIELDS")
+  end
+  for k in pairs(FIELDS) do
+    if k ~= "description" then
+      assert(in_order[k],
+        "todo.schema: FIELDS entry '" .. k .. "' missing from FRONTMATTER_ORDER")
+    end
+  end
+end
+
 -- ── kind validators ───────────────────────────────────────────
 
 ---@param v any

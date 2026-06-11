@@ -34,6 +34,20 @@
 
 local persist = require("auto-core.state.persist")
 
+-- ── events access (ADR-0038 Batch E) ───────────────────────────
+-- One memoized resolver replaces the four inline
+-- `require("auto-core").events` round-trips through the auto-core
+-- facade (the historical circular-require workaround). Resolved on
+-- FIRST USE, not at module load — `auto-core.events` is a leaf with
+-- no dependency back onto state, but keeping the resolution lazy
+-- means this module stays loadable in any order regardless of what
+-- events grows later.
+local _events
+local function events()
+  if not _events then _events = require("auto-core.events") end
+  return _events
+end
+
 local M = {}
 
 -- ── module config (set by setup) ───────────────────────────────
@@ -200,7 +214,7 @@ function Namespace:set(key, value)
   if not self:_values_equal(old, value) then
     self._dirty = true
     self:_schedule_flush()
-    require("auto-core").events.publish(self:_topic(key), {
+    events().publish(self:_topic(key), {
       namespace = self.name,
       key       = key,
       new       = value,
@@ -238,7 +252,7 @@ function Namespace:clear(key)
   if old ~= nil then
     self._dirty = true
     self:_schedule_flush()
-    require("auto-core").events.publish(self:_topic(key), {
+    events().publish(self:_topic(key), {
       namespace = self.name,
       key       = key,
       new       = nil,
@@ -254,12 +268,12 @@ end
 ---@param callback fun(payload: { namespace: string, key: string, new: any, old: any })
 ---@return AutoCoreSubHandle
 function Namespace:watch(key, callback)
-  return require("auto-core").events.subscribe(self:_topic(key), callback)
+  return events().subscribe(self:_topic(key), callback)
 end
 
 ---@param handle AutoCoreSubHandle
 function Namespace:unwatch(handle)
-  require("auto-core").events.unsubscribe(handle)
+  events().unsubscribe(handle)
 end
 
 ---Force a synchronous disk flush. Normally writes are coalesced via

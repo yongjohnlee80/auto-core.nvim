@@ -75,42 +75,15 @@ end
 
 -- ─── filesystem helpers ───────────────────────────────────────
 
----Atomic write — temp file in target dir + fsync + rename. Mirror of
----`auto-core.mailbox.transport.atomic_write`. Returns `(ok, err?)`.
----Creates the parent directory if missing.
+---Atomic write — delegates to the shared `fs.atomic.write` primitive
+---(ADR-0038 Batch E — previously one of three drifting inline
+---copies). Creates the parent directory if missing (bucket dirs are
+---created lazily on first write).
 ---@param final_path string
 ---@param text string
 ---@return boolean ok, string? err
 local function atomic_write(final_path, text)
-  local dir = fs_path.parent(final_path)
-  if not fs_path.is_dir(dir) then
-    local mkok, mkerr = pcall(vim.fn.mkdir, dir, "p")
-    if not mkok then
-      return false, "mkdir: " .. tostring(mkerr)
-    end
-  end
-  local tmp = dir .. "/.tmp-" .. tostring(vim.uv.hrtime())
-    .. "-" .. tostring(math.random(1, 1e9))
-  local fd, open_err = vim.uv.fs_open(tmp, "w", 420) -- 0644
-  if not fd then return false, "fs_open: " .. tostring(open_err) end
-  local _, write_err = vim.uv.fs_write(fd, text, 0)
-  if write_err then
-    pcall(vim.uv.fs_close, fd)
-    pcall(vim.uv.fs_unlink, tmp)
-    return false, "fs_write: " .. tostring(write_err)
-  end
-  pcall(vim.uv.fs_fsync, fd)
-  local _, close_err = vim.uv.fs_close(fd)
-  if close_err then
-    pcall(vim.uv.fs_unlink, tmp)
-    return false, "fs_close: " .. tostring(close_err)
-  end
-  local rok, rename_err = vim.uv.fs_rename(tmp, final_path)
-  if not rok then
-    pcall(vim.uv.fs_unlink, tmp)
-    return false, "fs_rename: " .. tostring(rename_err)
-  end
-  return true
+  return require("auto-core.fs.atomic").write(final_path, text, { mkdir = true })
 end
 
 ---Read a UTF-8 file into a string. Returns `(text, nil)` on success,
@@ -283,7 +256,17 @@ end
 ---
 ---Returns the generated id on success. Errors loudly on validation
 ---or write failure.
+---
+---**Reference-validation contract (ADR-0038 S5, decided
+---document-only):** `add` validates SHAPE (schema) but NOT reference
+---EXISTENCE — `adr:` / `review:` paths and `blocked:` ids that don't
+---resolve are accepted here and surfaced later as `errors[]` entries
+---by `refresh()` / `scan()` (read-side validation). This is
+---deliberate: writes stay cheap, and broken refs are a render-time
+---concern the panel reports without blocking task capture.
+---
 ---@param spec table
+---@param internal { origin: string? }?  -- auto-core-INTERNAL managed-field injection (ADR-0038 Batch C); external callers omit
 ---@return string id
 function M.add(spec, internal)
   if type(spec) ~= "table" then

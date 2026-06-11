@@ -36,56 +36,16 @@ local M = {}
 
 -- ─── canonical frontmatter field order ────────────────────────
 --
--- Hand-editable + content-required first (humans skim the top of
--- the file); managed fields second; auto-managed errors[] last.
--- This is purely an emission convention — decoders accept any
--- ordering because YAML mappings are unordered.
-
-local FRONTMATTER_ORDER = {
-  -- Hand-editable: identity + status / lifecycle
-  "id",
-  "version",
-  "status",
-  "title",
-  "due",
-  "priority",
-  "assignee",
-  "tags",
-
-  -- Hand-editable: references
-  "adr",
-  "review",
-  "blocked",
-
-  -- Hand-editable: automation (ADR-0035 Phase 1 — required-iff-automated).
-  -- Placed BEFORE the managed timestamp block so a template author
-  -- sees `condition:` / `execute:` near the top of the file where
-  -- they live operationally, not buried below the lifecycle TS.
-  "condition",
-  "execute",
-
-  -- Managed: timestamps
-  "created",
-  "updated",
-  "status_changed",
-  "completed_at",
-  "archived_at",
-
-  -- Managed: automation (ADR-0035 Phase 1). `origin` is set on
-  -- clones; `last_fired_at` is set on templates. `exit_code`
-  -- (2026-06-01) is set on clones whose fire ran a captured bash
-  -- step (`bash` / `bash:<sec>`); terminal-routed `bash -t=N`
-  -- records none.
-  "origin",
-  "last_fired_at",
-  "exit_code",
-
-  -- Auto-managed
-  "errors",
-}
-
+-- The catalog lives in `todo/schema.lua` next to FIELDS (ADR-0038
+-- Batch E) so adding a field touches ONE file — schema's load-time
+-- check fails loudly when the two drift. This module keeps a local
+-- alias; the emission convention (hand-editable first, managed
+-- second, errors[] last) is documented at the definition.
+--
 -- (FRONTMATTER_ORDER doubles as the membership check via the
 -- ordered_frontmatter_pairs walker — no separate set needed.)
+
+local FRONTMATTER_ORDER = require("auto-core.todo.schema").FRONTMATTER_ORDER
 
 -- ─── decode ───────────────────────────────────────────────────
 

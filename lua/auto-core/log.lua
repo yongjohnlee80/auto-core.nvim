@@ -324,6 +324,33 @@ function M.trace(component, ...) level_call(M.levels.TRACE, component, ...) end
 
 ---@type table<string, integer>
 local _throttle_last = {}
+local _throttle_count = 0
+
+-- Opportunistic prune (ADR-0038 Batch E — same size-gated pattern as
+-- fs/watch's debounce map). Callers that ignore the bounded-key rule
+-- below (e.g. throttling on file paths) previously leaked one map
+-- entry per distinct key for the life of the session. When the map
+-- exceeds the threshold, sweep entries idle longer than the TTL. A
+-- pruned entry's only consequence is one extra (non-dropped) emission
+-- on its next use — throttling is best-effort QoS, not correctness.
+local THROTTLE_PRUNE_THRESHOLD = 512
+local THROTTLE_PRUNE_TTL_MS    = 60 * 60 * 1000
+
+local function _prune_throttle(now)
+  for k, stamp in pairs(_throttle_last) do
+    if (now - stamp) > THROTTLE_PRUNE_TTL_MS then
+      _throttle_last[k] = nil
+    end
+  end
+  local n = 0
+  for _ in pairs(_throttle_last) do n = n + 1 end
+  _throttle_count = n
+end
+
+---Test observability: current throttle-map entry count.
+function M._throttle_size()
+  return _throttle_count
+end
 
 ---Emit at most once per `every_ms` window, bucketed by `key`. Within
 ---the window subsequent calls are silently dropped — no ring write,
@@ -344,6 +371,12 @@ local function _throttled_call(level, key, every_ms, component, ...)
   local last = _throttle_last[key]
   if last and (now - last) < every_ms then
     return
+  end
+  if last == nil then
+    _throttle_count = _throttle_count + 1
+    if _throttle_count > THROTTLE_PRUNE_THRESHOLD then
+      _prune_throttle(now)
+    end
   end
   _throttle_last[key] = now
   level_call(level, component, ...)

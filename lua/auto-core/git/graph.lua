@@ -240,6 +240,113 @@ function M.show_diff(common_dir, hash)
   return lines
 end
 
+-- ── async show (ADR-0038 Batch D1) ───────────────────────────
+--
+-- The sync show_stat/show_diff above block the UI thread on a cache
+-- miss — 100-500ms for a large commit, felt as a hang when the
+-- cursor lands on a new commit in a graph view. These ADDITIVE async
+-- variants run the same git invocation via vim.system and deliver
+-- the lines to `cb` on the main loop. Results land in the SAME
+-- per-(common_dir, hash) caches, so any subsequent sync call is a
+-- free hit. Concurrent requests for the same key coalesce into ONE
+-- subprocess (rapid cursor moves re-previewing the same commit);
+-- every caller's cb still fires. The sync functions are unchanged —
+-- consumers migrate at their own pace (additive-only rule).
+
+---@type table<string, fun(lines: string[])[]>  -- key → waiting callbacks
+local _show_inflight = {}
+
+---Test observability: subprocesses spawned by the async show paths.
+M._async_spawn_count = 0
+
+---Current cache table for `kind` — resolved at WRITE time so a
+---clear_cache() that rebinds the module-local between spawn and
+---completion doesn't resurrect results into an orphaned table.
+---@param kind "stat"|"diff"
+local function _cache_for(kind)
+  if kind == "stat" then return _stat_cache end
+  return _diff_cache
+end
+
+---@param kind "stat"|"diff"
+---@param args string[]
+---@param fail_banner string
+---@param key string
+---@param cb fun(lines: string[])
+local function _show_async(kind, args, fail_banner, key, cb)
+  local hit = _cache_for(kind)[key]
+  if hit then
+    vim.schedule(function() cb(hit) end)
+    return
+  end
+  local waiters = _show_inflight[key]
+  if waiters then
+    waiters[#waiters + 1] = cb
+    return
+  end
+  _show_inflight[key] = { cb }
+  M._async_spawn_count = M._async_spawn_count + 1
+  vim.system(args, { text = true }, function(res)
+    local lines = vim.split(res.stdout or "", "\n", { plain = true })
+    if lines[#lines] == "" then table.remove(lines) end  -- trailing-\n artifact
+    if res.code ~= 0 then
+      local out = lines
+      lines = { fail_banner, "" }
+      vim.list_extend(lines, out)
+      for _, l in ipairs(vim.split(res.stderr or "", "\n", { plain = true })) do
+        if l ~= "" then lines[#lines + 1] = l end
+      end
+    end
+    vim.schedule(function()
+      -- Cache BEFORE callbacks so a cb that re-queries (sync or
+      -- async) gets an immediate hit.
+      _cache_for(kind)[key] = lines
+      local cbs = _show_inflight[key] or {}
+      _show_inflight[key] = nil
+      for _, fn in ipairs(cbs) do pcall(fn, lines) end
+    end)
+  end)
+end
+
+---Async `git show --stat` — same cache + line shape as `show_stat`,
+---without blocking the UI thread on a cache miss. `cb(lines)` runs
+---on the main loop (vim.schedule), including for immediate cache
+---hits (consistent re-entrancy for the caller).
+---@param common_dir string
+---@param hash string
+---@param cb fun(lines: string[])
+function M.show_stat_async(common_dir, hash, cb)
+  if type(cb) ~= "function" then return end
+  if not common_dir or not hash or hash == "" then
+    vim.schedule(function() cb({}) end)
+    return
+  end
+  _show_async("stat", {
+    "git", "--git-dir=" .. common_dir,
+    "show", "--stat", "--no-color", "--format=fuller", hash,
+  }, "(auto-core.git.graph: git show --stat failed)",
+    _cache_key(common_dir, hash), cb)
+end
+
+---Async `git show -p` — same cache + line shape as `show_diff`,
+---without blocking the UI thread on a cache miss. `cb(lines)` runs
+---on the main loop.
+---@param common_dir string
+---@param hash string
+---@param cb fun(lines: string[])
+function M.show_diff_async(common_dir, hash, cb)
+  if type(cb) ~= "function" then return end
+  if not common_dir or not hash or hash == "" then
+    vim.schedule(function() cb({}) end)
+    return
+  end
+  _show_async("diff", {
+    "git", "--git-dir=" .. common_dir,
+    "show", "-p", "--no-color", hash,
+  }, "(auto-core.git.graph: git show -p failed)",
+    _cache_key(common_dir, hash), cb)
+end
+
 -- ── cache management ─────────────────────────────────────────
 
 ---Drop every cache. Use sparingly — typically the subscriber-driven

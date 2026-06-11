@@ -140,27 +140,11 @@ end
 ---@param text string
 ---@return boolean ok, string? err
 local function atomic_write(path, text)
-  -- Same primitive as transport — write to a sibling tmp, fsync,
-  -- rename. Inlined here so this module doesn't depend on transport
-  -- (transport would otherwise be a circular peer of registry).
-  local dir = vim.fn.fnamemodify(path, ":h")
-  local tmp = dir .. "/.tmp-bootstrap-" .. tostring(vim.uv.hrtime())
-  local fd, oerr = vim.uv.fs_open(tmp, "w", 420)
-  if not fd then return false, "fs_open: " .. tostring(oerr) end
-  local _, werr = vim.uv.fs_write(fd, text, 0)
-  if werr then
-    pcall(vim.uv.fs_close, fd)
-    pcall(vim.uv.fs_unlink, tmp)
-    return false, "fs_write: " .. tostring(werr)
-  end
-  pcall(vim.uv.fs_fsync, fd)
-  pcall(vim.uv.fs_close, fd)
-  local rok, rerr = vim.uv.fs_rename(tmp, path)
-  if not rok then
-    pcall(vim.uv.fs_unlink, tmp)
-    return false, "fs_rename: " .. tostring(rerr)
-  end
-  return true
+  -- Delegates to the shared `fs.atomic.write` primitive (ADR-0038
+  -- Batch E). Historically inlined here to avoid depending on
+  -- transport (a circular peer of registry); fs.atomic has no
+  -- mailbox dependencies, so the cycle concern is gone.
+  return require("auto-core.fs.atomic").write(path, text)
 end
 
 ---Read the `revision:` value from an existing bootstrap doc's
