@@ -1059,6 +1059,127 @@ watch.stop_all()
 events_mod._reset_for_tests()
 pcall(vim.fn.delete, tmp_root, "rf")
 
+-- ──────────── 26b. fs.watch — self-extending recursion (ADR 0042) ────────────
+-- The Linux walker grows its handle set as directories appear at runtime
+-- (fresh worktree / git clone / mkdir). Darwin's FSEvents watch is already
+-- recursive, so this whole suite is Linux-gated.
+print("\n[26b] fs.watch — self-extending recursion (runtime-created subtrees)")
+do
+  local se_is_darwin = (function()
+    local ok_u, u = pcall(vim.uv.os_uname)
+    return (ok_u and u and u.sysname == "Darwin") or false
+  end)()
+
+  if se_is_darwin then
+    ok("self-extension suite skipped on Darwin (FSEvents already recursive)", true)
+  else
+    events_mod._reset_for_tests()
+    watch._reset_for_tests()
+
+    local se_root = vim.fn.tempname() .. "-fs-watch-selfext"
+    vim.fn.mkdir(se_root, "p")
+
+    local se_seen = {}
+    events_mod.subscribe("core.file:*", function(payload)
+      se_seen[#se_seen + 1] = { path = payload.path, change = payload.change }
+    end)
+
+    local function se_saw(suffix)
+      for _, e in ipairs(se_seen) do
+        if e.path:sub(-#suffix) == suffix then return true end
+      end
+      return false
+    end
+    local function se_active()
+      local l = watch.list()
+      return (l[1] and #l[1].fs_events) or 0
+    end
+
+    local se_handle = watch.start(se_root)
+    ok("self-ext: watch.start on fresh root", se_handle ~= nil, tostring(se_handle))
+
+    -- Test 1 — fail-before / pass-after. A directory created AFTER start,
+    -- with a file written two levels deep, must surface a file event with
+    -- no manual rescan. (This is the reported bug; fails on pre-ADR-0042.)
+    vim.fn.mkdir(se_root .. "/a/b/c", "p")
+    vim.wait(300)  -- let the create event + self-extension open the handles
+    vim.fn.writefile({ "deep" }, se_root .. "/a/b/c/file.txt")
+    vim.wait(800, function() return se_saw("/a/b/c/file.txt") end)
+    ok("self-ext: file in a runtime-created nested dir fires an event",
+      se_saw("/a/b/c/file.txt"), vim.inspect(se_seen))
+
+    -- Test 2 — catch-up (C6). Create the whole subtree AND write a file in
+    -- one synchronous burst, so the file already exists when the extension
+    -- walk runs (the main loop only processes the scheduled extend during
+    -- the wait below). The catch-up walk must surface it.
+    local pre_catchup = #se_seen
+    vim.fn.mkdir(se_root .. "/x/y/z", "p")
+    vim.fn.writefile({ "pre" }, se_root .. "/x/y/z/pre.txt")
+    vim.wait(800, function() return se_saw("/x/y/z/pre.txt") end)
+    ok("self-ext: catch-up surfaces a file that predated the new handle",
+      se_saw("/x/y/z/pre.txt"), vim.inspect({ added = #se_seen - pre_catchup }))
+
+    -- Test 3 — runtime ignore (C3). A node_modules subtree created at
+    -- runtime must NOT be watched: no events for any path UNDER it.
+    local pre_ignore = #se_seen
+    vim.fn.mkdir(se_root .. "/proj/node_modules/pkg", "p")
+    vim.wait(300)
+    vim.fn.writefile({ "x" }, se_root .. "/proj/node_modules/pkg/index.js")
+    vim.wait(400)
+    local saw_under_nm = false
+    for i = pre_ignore + 1, #se_seen do
+      if se_seen[i].path:find("/node_modules/") then saw_under_nm = true end
+    end
+    ok("self-ext: no events under a runtime-created node_modules/",
+      not saw_under_nm, vim.inspect({ added = #se_seen - pre_ignore }))
+
+    -- Test 5 — deletion cleanup (C5). A runtime dir adds a handle; deleting
+    -- it reclaims the handle so the count returns to baseline (honest cap
+    -- accounting under churn).
+    local base_handles = se_active()
+    vim.fn.mkdir(se_root .. "/churn", "p")
+    vim.wait(400, function() return se_active() > base_handles end)
+    ok("self-ext: a runtime dir adds a watch handle",
+      se_active() > base_handles, "base=" .. base_handles .. " now=" .. se_active())
+    vim.wait(150)  -- clear the debounce window so the delete event isn't coalesced with the create
+    vim.fn.delete(se_root .. "/churn", "d")
+    vim.wait(500, function() return se_active() <= base_handles end)
+    ok("self-ext: deleting a runtime dir reclaims its handle",
+      se_active() <= base_handles, "base=" .. base_handles .. " now=" .. se_active())
+
+    watch.stop_all()
+    events_mod._reset_for_tests()
+
+    -- Test 4 — dynamic cap (C4). Start on an empty root with max_handles=1
+    -- (the root consumes the only slot). A runtime subtree must be refused
+    -- with a `core.fs.watch:partial` signal and must not exceed the cap.
+    watch._reset_for_tests()
+    local cap_partials = {}
+    events_mod.subscribe("core.fs.watch:partial", function(payload)
+      cap_partials[#cap_partials + 1] = payload
+    end)
+    local cap_root = vim.fn.tempname() .. "-fs-watch-cap"
+    vim.fn.mkdir(cap_root, "p")
+    local cap_handle = watch.start(cap_root, { max_handles = 1 })
+    ok("self-ext: capped watch starts (root only)", cap_handle ~= nil)
+    local cap_before = (cap_handle and #cap_handle.fs_events) or 0
+    vim.fn.mkdir(cap_root .. "/newdir", "p")
+    vim.wait(600, function() return #cap_partials > 0 end)
+    ok("self-ext: dynamic cap publishes core.fs.watch:partial with dropped>=1",
+      #cap_partials >= 1 and (cap_partials[1].dropped or 0) >= 1,
+      vim.inspect(cap_partials))
+    ok("self-ext: dynamic cap does not exceed max_handles",
+      cap_handle ~= nil and #cap_handle.fs_events == cap_before,
+      "before=" .. cap_before .. " after=" .. ((cap_handle and #cap_handle.fs_events) or -1))
+
+    -- Cleanup.
+    watch.stop_all()
+    events_mod._reset_for_tests()
+    pcall(vim.fn.delete, se_root, "rf")
+    pcall(vim.fn.delete, cap_root, "rf")
+  end
+end
+
 -- ─────────────────────── 27. git.status — cached porcelain ──────────────
 print("\n[27] git.status — cache, parse, invalidate-on-event")
 local status_mod = require("auto-core.git.status")

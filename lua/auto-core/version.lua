@@ -850,6 +850,35 @@ return {
   -- counts), F (test-suite split), todo list() TTL memoize.
   -- Smoke [76] added (19 assertions); suite at 1319 passed (same 4
   -- pre-existing macOS env failures as the v0.1.56/57 baselines).
-  version     = "0.1.58",
+  -- v0.1.59: ADR 0042 — fs.watch self-extending recursion (Linux
+  -- walker). The Linux walker previously opened one fs_event handle
+  -- per subdir that existed at start() and never extended to dirs
+  -- created later; inotify being non-recursive, files written into a
+  -- runtime-created subtree (fresh worktree / git clone / mkdir) fired
+  -- no `core.file:*` event until a full rescan. Fixed the reported
+  -- auto-finder files-panel blindness to new worktrees/repos. Now the
+  -- fs_event callback detects directory-creation events and grows the
+  -- watch set: walks the new subtree (C2), opens a handle per
+  -- not-yet-watched, non-ignored dir (directory-form ignore match, C3)
+  -- within `max_handles` (C4), catch-up-emits entries that predated the
+  -- handle (C6), and reclaims handles when a watched dir is deleted (C5).
+  -- Strictly additive:
+  --   - `events/topics.lua` registers NEW `core.fs.watch:partial`
+  --     payload `{ root, path, active, attempted, dropped, max }` —
+  --     emitted (with a warn log) when the cap stops self-extension
+  --     mid-subtree, so consumers can surface degraded live refresh.
+  --   - `fs/watch.lua` AutoCoreWatchOpts gains `self_extend` (default
+  --     true); set false to keep the start-time-only baseline.
+  --   - AutoCoreWatchHandle gains `_watched_dirs` (dir → handle).
+  -- The Darwin handler is untouched — its single recursive FSEvents
+  -- watch already covered runtime subtrees; the whole fix and its
+  -- smoke section [26b] are Linux-gated. No removals, no break-shape;
+  -- consumers that never create dirs under a watch pay nothing.
+  -- Lector-reviewed (approved_with_amendments, all 6 folded in).
+  -- Smoke [26b] added (9 assertions, Linux); suite 1329 passed / 3
+  -- pre-existing todo-archive failures (identical on the v0.1.58 main
+  -- baseline — unrelated to fs.watch). Patch within the v0.1.x line
+  -- per `auto-core-maintenance`; `api_version` stays at `0.1`.
+  version     = "0.1.59",
   api_version = "0.1",
 }

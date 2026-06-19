@@ -21,11 +21,12 @@
 ---Implementation notes:
 ---  - libuv's `fs_event` is NOT recursive on Linux. We walk the tree
 ---    once at start time and open one handle per subdir (skipping
----    ignored ones). Subdirs created AFTER the watch starts are NOT
----    auto-watched in this baseline — a Phase 5+ refinement can add
----    "self-extending" recursion by listening for our own
----    `core.file:created` and starting a new handle when the path is
----    a directory.
+---    ignored ones). Subdirs created AFTER the watch starts are
+---    auto-watched via self-extending recursion (ADR 0042): the
+---    fs_event callback detects directory-creation events, walks the
+---    new subtree, opens handles for it, and catch-up-emits any
+---    entries that predated the handle. Deletion of a watched dir
+---    reclaims its handles. Disable with `opts.self_extend = false`.
 ---  - **Darwin uses a separate handler** (`_darwin_start` below) that
 ---    opens one root fs_event with `{ recursive = true }`. macOS's
 ---    per-process fd ceiling exhausts the walked approach around
@@ -227,6 +228,65 @@ local function publish_event(full_path, change_kind)
   })
 end
 
+-- ── Linux self-extending recursion (ADR 0042) ────────────────
+--
+-- libuv's `fs_event` is non-recursive on Linux: a handle on `dir`
+-- only reports changes to `dir`'s DIRECT children, and subdirs that
+-- appear after `start()` get no handle. That left files created in a
+-- runtime-created subtree (a fresh worktree, `git clone`, `mkdir`)
+-- invisible to subscribers until a full rescan. The helpers below
+-- close that gap by growing the watch set as directories appear.
+--
+-- Contract (per ADR 0042, lector-reviewed):
+--   C1 — implemented in the fs_event callback path, per watch state;
+--        NOT a module-level `core.file:created` subscription (that
+--        would couple lifecycles — see auto-core-events-subscription-lifecycle).
+--   C2 — walk the whole new subtree, not just the event path (a
+--        `mkdir -p a/b/c` can surface as one event for `a`).
+--   C3 — directory-form ignore match (`full .. "/"`) so runtime
+--        `node_modules`/`.git`/… are not watched.
+--   C4 — never exceed `max_handles` after start(); signal degraded
+--        coverage via a warn log + the additive `core.fs.watch:partial`
+--        event when the cap stops us mid-subtree.
+--   C5 — reclaim handles when a watched dir is deleted, so cap
+--        accounting stays honest under directory churn.
+--   C6 — catch-up walk: synthetic `core.file:created` for entries that
+--        existed before the new handle opened.
+--   C7 — handle work runs on the main loop (the callback already hops
+--        via vim.schedule); symlink loops are avoided because
+--        `collect_dirs` only recurses real directories (fs_scandir
+--        reports symlinks as type "link", never "directory").
+--
+-- The Darwin handler is untouched: its single recursive FSEvents watch
+-- already covers runtime subtrees, so it never calls these.
+
+-- Defined after `start_one_dir` (they open handles via it); the
+-- callback only invokes them at event time, by which point the
+-- upvalues are assigned.
+local extend_for_new_dir
+local cleanup_dynamic_subtree
+
+-- C6 — emit a synthetic `core.file:created` for each entry already
+-- present in a directory we just started watching. Runs on the main
+-- loop (caller is inside vim.schedule), so publishes directly.
+-- Debounce-gated to dedupe against the live handle that may also fire.
+---@param dir string
+---@param state AutoCoreWatchHandle
+local function catchup_emit(dir, state)
+  local sd = vim.uv.fs_scandir(dir)
+  if not sd then return end
+  while true do
+    local name, type_ = vim.uv.fs_scandir_next(sd)
+    if not name then break end
+    local full = dir .. "/" .. name
+    local ignored = should_ignore(full, state.opts.ignore)
+        or (type_ == "directory" and should_ignore(full .. "/", state.opts.ignore))
+    if not ignored and debounce_check(state, full) then
+      publish_event(full, "created")
+    end
+  end
+end
+
 -- Start a single fs_event handle on one directory. Wires it to the
 -- shared state's debounce + ignore + classification logic.
 ---@param dir string
@@ -244,8 +304,19 @@ local function start_one_dir(dir, state)
       if not debounce_check(state, full) then return end
       -- Hop to the main loop before publishing — events.publish
       -- runs subscriber callbacks synchronously and many of them
-      -- will touch nvim API.
-      vim.schedule(function() publish_event(full, kind) end)
+      -- will touch nvim API. Self-extension + deletion cleanup also
+      -- touch libuv handle APIs and MUST run on the main loop, never
+      -- the libuv callback thread (C1/C7).
+      vim.schedule(function()
+        publish_event(full, kind)
+        if state.opts.self_extend then
+          if kind == "created" then
+            extend_for_new_dir(state, full)
+          elseif kind == "deleted" and state._watched_dirs[full] then
+            cleanup_dynamic_subtree(state, full)
+          end
+        end
+      end)
     end)
   end)
   if not ok then
@@ -253,6 +324,85 @@ local function start_one_dir(dir, state)
     return nil, err
   end
   return fs_event
+end
+
+-- C2/C3/C4/C6 — grow the watch set for a runtime-created directory.
+-- No-op unless `full` is a non-ignored directory. Walks the new
+-- subtree, opens a handle per not-yet-watched dir (within the cap),
+-- then catch-up-emits pre-existing entries under the dirs we opened.
+---@param state AutoCoreWatchHandle
+---@param full string  the created path
+extend_for_new_dir = function(state, full)
+  local stat = vim.uv.fs_stat(full)
+  if not stat or stat.type ~= "directory" then return end
+  -- C3 — dir patterns are slash-anchored; match the directory form.
+  if should_ignore(full .. "/", state.opts.ignore) then return end
+
+  -- C2 — the whole new subtree, not just `full`.
+  local new_dirs = collect_dirs(full, state.opts.ignore)
+  local opened    = {}
+  local attempted = 0
+  local dropped   = 0
+  for _, d in ipairs(new_dirs) do
+    if not state._watched_dirs[d] then
+      attempted = attempted + 1
+      -- C4 — dynamic cap: refuse before exceeding max_handles.
+      if _count_active_handles() + 1 > state.opts.max_handles then
+        dropped = dropped + 1
+      else
+        local h = start_one_dir(d, state)
+        if h then
+          state.fs_events[#state.fs_events + 1] = h
+          state._watched_dirs[d] = h
+          opened[#opened + 1] = d
+        end
+      end
+    end
+  end
+
+  -- C6 — surface content that predates the handles we just opened.
+  for _, d in ipairs(opened) do
+    catchup_emit(d, state)
+  end
+
+  -- C4 — signal degraded live coverage if the cap stopped us.
+  if dropped > 0 then
+    pcall(function()
+      require("auto-core.log").warn("fs.watch", string.format(
+        "self-extension hit max_handles cap under %s: %d/%d new dir(s) left unwatched (cap %d)",
+        full, dropped, attempted, state.opts.max_handles))
+    end)
+    events.publish("core.fs.watch:partial", {
+      root      = state.root,
+      path      = full,
+      active    = _count_active_handles(),
+      attempted = attempted,
+      dropped   = dropped,
+      max       = state.opts.max_handles,
+    })
+  end
+end
+
+-- C5 — a watched directory was deleted. inotify auto-removes the kernel
+-- watch; reclaim the Lua-side bookkeeping for it and every watched
+-- descendant so `_count_active_handles()` stays honest under churn.
+---@param state AutoCoreWatchHandle
+---@param dir string  the deleted directory path
+cleanup_dynamic_subtree = function(state, dir)
+  local prefix = dir .. "/"
+  for watched, h in pairs(state._watched_dirs) do
+    if watched == dir or watched:sub(1, #prefix) == prefix then
+      pcall(h.stop, h)
+      pcall(h.close, h)
+      state._watched_dirs[watched] = nil
+      for i = #state.fs_events, 1, -1 do
+        if state.fs_events[i] == h then
+          table.remove(state.fs_events, i)
+          break
+        end
+      end
+    end
+  end
 end
 
 -- ── darwin: native recursive handler ─────────────────────────
@@ -330,6 +480,7 @@ local function _darwin_start(root, opts)
     root           = root,
     opts           = opts,
     fs_events      = {},
+    _watched_dirs  = {},  -- unused on Darwin (FSEvents is recursive); kept for shape parity
     _debounce      = {},
     _debounce_size = 0,
   }
@@ -352,12 +503,14 @@ end
 ---@field debounce_ms integer?    -- default 100
 ---@field ignore      string[]?   -- default DEFAULT_IGNORE
 ---@field max_handles integer?    -- default 131072
+---@field self_extend boolean?    -- default true; grow the watch set as dirs appear (Linux walker only)
 
 ---@class AutoCoreWatchHandle
 ---@field id             integer
 ---@field root           string
 ---@field opts           AutoCoreWatchOpts
 ---@field fs_events      userdata[]
+---@field _watched_dirs  table<string, userdata>  -- dir → handle; dedupe + deletion cleanup (ADR 0042)
 ---@field _debounce      table<string, integer>
 ---@field _debounce_size integer
 
@@ -372,6 +525,9 @@ function M.start(path, opts)
   if opts.debounce_ms == nil then opts.debounce_ms = DEFAULT_DEBOUNCE_MS end
   if opts.ignore      == nil then opts.ignore      = DEFAULT_IGNORE end
   if opts.max_handles == nil then opts.max_handles = DEFAULT_MAX_HANDLES end
+  -- ADR 0042 — grow the watch set as dirs appear at runtime (Linux
+  -- walker only; the Darwin recursive watch already covers subtrees).
+  if opts.self_extend == nil then opts.self_extend = true end
 
   local root = path_mod.normalize(path)
   if not path_mod.is_dir(root) then
@@ -398,13 +554,17 @@ function M.start(path, opts)
     root           = root,
     opts           = opts,
     fs_events      = {},
+    _watched_dirs  = {},
     _debounce      = {},
     _debounce_size = 0,
   }
 
   for _, d in ipairs(dirs) do
     local h = start_one_dir(d, state)
-    if h then state.fs_events[#state.fs_events + 1] = h end
+    if h then
+      state.fs_events[#state.fs_events + 1] = h
+      state._watched_dirs[d] = h
+    end
   end
 
   if #state.fs_events == 0 then

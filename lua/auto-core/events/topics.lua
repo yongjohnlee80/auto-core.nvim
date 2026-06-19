@@ -82,6 +82,13 @@ local M = {
     payload = "{ path = string, change = 'deleted', buf = integer? }",
     publishers = { "auto-core" },
   },
+  ["core.fs.watch:partial"] = {
+    doc = "fs.watch self-extension (ADR 0042, Linux walker) could not fully cover a "
+      .. "runtime-created subtree because the max_handles cap was reached. Live refresh "
+      .. "under `path` is partial until handles free up; a manual rescan still sees everything.",
+    payload = "{ root = string, path = string, active = integer, attempted = integer, dropped = integer, max = integer }",
+    publishers = { "auto-core" },
+  },
 
   -- ── agent task queue + channel + status (Phase 5) ─────────────
   ["agent.task:queued"] = {

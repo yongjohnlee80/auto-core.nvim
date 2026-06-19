@@ -10,6 +10,41 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.59] — 2026-06-19 — ADR-0042: fs.watch self-extending recursion (Linux)
+
+Fixes the reported auto-finder files-panel blindness to files created in a
+worktree/repository that comes into existence **after** the panel
+initialized. Strictly additive — `api_version` stays `0.1`.
+
+**The bug (Linux only):** `fs.watch`'s Linux walker opened one libuv
+`fs_event` handle per subdirectory that existed at `start()` time and never
+extended to subdirectories created later. Because inotify is non-recursive,
+a file written into a runtime-created subtree (a fresh worktree, a
+`git clone`, a plain `mkdir -p`) fired no `core.file:*` event — so the files
+panel never refreshed until a manual rescan / restart. macOS was unaffected
+(its single FSEvents watch is already recursive).
+
+**The fix — self-extending recursion:**
+
+- The `fs_event` callback now detects directory-creation events and grows
+  the watch set: it walks the new subtree (not just the event path, so
+  `mkdir -p a/b/c` is fully covered), opens a handle per not-yet-watched,
+  non-ignored directory (directory-form ignore match, so runtime
+  `node_modules`/`.git`/… are skipped), and **catch-up-emits** synthetic
+  `core.file:created` for entries that already existed before the handle
+  opened. Deleting a watched directory reclaims its handles, keeping the
+  `max_handles` accounting honest under directory churn.
+- New event topic **`core.fs.watch:partial`** (payload
+  `{ root, path, active, attempted, dropped, max }`): emitted, with a warn
+  log, when the `max_handles` cap stops self-extension mid-subtree, so
+  consumers can surface a "live refresh limited" state.
+- New opt **`self_extend`** (default `true`) on `watch.start` — set `false`
+  to keep the prior start-time-only behavior.
+- The Darwin handler is untouched; the fix and its smoke coverage are
+  Linux-gated. Reviewed by lector (approved with amendments, all applied).
+- Smoke `[26b]` adds 9 assertions (Linux): fail-before/pass-after,
+  catch-up, runtime ignore, dynamic-cap signal, and deletion cleanup.
+
 ## [v0.1.58] — 2026-06-11 — ADR-0038 Batches D1 + E: async git show + structural hygiene
 
 Implements the remaining recommended batches of ADR-0038 (D2 and F
