@@ -676,6 +676,117 @@ registry:dispose()
 Panel._reset_for_tests()
 events._reset_for_tests()
 
+-- ─────────── 21b. ui.section — section_did_remount (ADR-0033) ──
+-- Regression coverage for the dbase winbar/keymap remount bug
+-- ([[2026-05-20-auto-finder-dbase-winbar-remount-bug-analysis]]).
+-- The public hook repairs the three side-effects an async-mount
+-- view loses when it swaps its placeholder for the real buffer
+-- outside the registry's focus() window: cache reseat, keymap
+-- rebind, winbar refresh. This unit drives the hook directly on a
+-- stub two-section registry (no dbee required) — see ADR-0033 §2.1.
+print("\n[21b] ui.section — Registry:section_did_remount (ADR-0033)")
+do
+  local panelR = Panel.new({
+    name  = "test-remount",
+    side  = "left",
+    width = { default = 30, min = 20, max = 80 },
+  })
+  panelR:open(true)
+
+  local regR = Section.attach(panelR, {
+    { number = 0, name = "alpha", get_buffer = mk_buf("alpha") },
+    { number = 1, name = "beta",  get_buffer = mk_buf("beta")  },
+  }, { default = 0 })
+  regR:focus(0)
+
+  -- Window-independent keymap inspection: does `bufnr` carry a
+  -- buffer-local normal-mode map for `lhs` whose desc contains
+  -- `needle`? (section_did_remount does NOT swap the panel window,
+  -- so maparg-on-current-buffer would not see the real buffer.)
+  local function has_map(bufnr, lhs, needle)
+    if not (bufnr and vim.api.nvim_buf_is_valid(bufnr)) then return false end
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(bufnr, "n")) do
+      if m.lhs == lhs and (m.desc or ""):find(needle, 1, true) then
+        return true
+      end
+    end
+    return false
+  end
+  local function count_map(bufnr, lhs)
+    local n = 0
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(bufnr, "n")) do
+      if m.lhs == lhs then n = n + 1 end
+    end
+    return n
+  end
+
+  ok("[21b] precondition: section 0 active", regR.active == 0)
+
+  -- Fresh "real" buffer — mirrors dbase swapping the loading
+  -- placeholder for the dbee drawer — then notify the registry.
+  local realA = vim.api.nvim_create_buf(false, true)
+  vim.bo[realA].buftype = "nofile"
+  regR:section_did_remount(0, realA)
+
+  -- (1) cache reseat
+  ok("[21b] _bufs[0] reseated to the real buffer",
+    regR._bufs[0] == realA,
+    "got=" .. tostring(regR._bufs[0]) .. " want=" .. tostring(realA))
+
+  -- (2) keymaps rebound on the real buffer (active section)
+  ok("[21b] q rebound buffer-locally on the real buffer",
+    has_map(realA, "q", "close panel"))
+  ok("[21b] 0 rebound buffer-locally on the real buffer",
+    has_map(realA, "0", "focus section 0"))
+  ok("[21b] 9 rebound buffer-locally on the real buffer",
+    has_map(realA, "9", "focus section 9"))
+
+  -- (3) winbar refreshed with the active section's name
+  local wb = vim.api.nvim_get_option_value("winbar", { win = panelR.winid })
+  ok("[21b] winbar shows the active section after remount",
+    type(wb) == "string" and wb:find("alpha", 1, true) ~= nil,
+    "winbar=" .. tostring(wb))
+
+  -- (4) idempotency: second call with the same buffer is a no-op,
+  --     does not error, and does not duplicate keymaps.
+  regR:section_did_remount(0, realA)
+  ok("[21b] idempotent: _bufs[0] still the real buffer",
+    regR._bufs[0] == realA)
+  ok("[21b] idempotent: exactly one q map (no duplicate)",
+    count_map(realA, "q") == 1, "count=" .. count_map(realA, "q"))
+
+  -- (5) inactive-section guard: remount section 1 while 0 is active.
+  --     Cache reseats unconditionally, but the buffer-local keymap
+  --     surface + winbar belong to the active section only — they
+  --     must NOT change (ui/section.lua active-section guard).
+  local wb_before = vim.api.nvim_get_option_value("winbar", { win = panelR.winid })
+  local realB = vim.api.nvim_create_buf(false, true)
+  vim.bo[realB].buftype = "nofile"
+  regR:section_did_remount(1, realB)
+  ok("[21b] inactive guard: _bufs[1] still reseated",
+    regR._bufs[1] == realB)
+  ok("[21b] inactive guard: no q map bound on inactive buffer",
+    not has_map(realB, "q", "close panel"))
+  ok("[21b] inactive guard: winbar unchanged for inactive remount",
+    vim.api.nvim_get_option_value("winbar", { win = panelR.winid }) == wb_before)
+
+  -- (6) invalid-bufnr guard: nil + wiped bufnr are no-ops.
+  local keep = regR._bufs[0]
+  regR:section_did_remount(0, nil)
+  ok("[21b] invalid guard: nil bufnr leaves _bufs[0] unchanged",
+    regR._bufs[0] == keep)
+  local wiped = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_delete(wiped, { force = true })
+  regR:section_did_remount(0, wiped)
+  ok("[21b] invalid guard: wiped bufnr leaves _bufs[0] unchanged",
+    regR._bufs[0] == keep)
+
+  panelR:close()
+  regR:dispose()
+  Panel._reset_for_tests()
+  events._reset_for_tests()
+end
+
 -- ─────────────────────── 22. fs.path normalize/join/parent ───────
 print("\n[22] fs.path — normalize, join, parent, basename, relative")
 local p = core.fs.path

@@ -879,6 +879,6 @@ return {
   -- pre-existing todo-archive failures (identical on the v0.1.58 main
   -- baseline — unrelated to fs.watch). Patch within the v0.1.x line
   -- per `auto-core-maintenance`; `api_version` stays at `0.1`.
-  version     = "0.1.59",
+  version     = "0.1.60",
   api_version = "0.1",
 }

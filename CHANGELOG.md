@@ -10,6 +10,32 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.60] — 2026-06-20 — ADR-0033: section_did_remount regression smoke
+
+Test-only patch — **no production code change**; `api_version` stays `0.1`.
+
+Adds regression coverage for `Registry:section_did_remount`, the public
+async-mount hook (shipped in `v0.1.25`) that repairs the dbase
+winbar/keymap remount bug — the registry's buffer cache, buffer-local
+`0..9`/`q` keymaps, and winbar all went stale when an async-mount section
+swapped its loading placeholder for the real buffer outside the
+`Registry:focus` window. Per ADR-0033 the shared hook gets **one** auto-core
+unit smoke; each consumer adds its own integration smoke.
+
+- **`tests/smoke.lua` `[21b]`** drives `section_did_remount` directly on a
+  stub two-section registry (no dbee / no consumer required) and pins all
+  three public outcomes plus the guards:
+  - `_bufs[N]` cache reseat to the real buffer;
+  - buffer-local `0..9` / `q` rebind on the real buffer (active section);
+  - winbar refresh showing the active section;
+  - idempotency (a second call is a no-op and does not duplicate keymaps);
+  - inactive-section guard (cache reseats, but keymaps + winbar are left
+    untouched when the remounted section is not active);
+  - invalid-bufnr guard (nil / wiped bufnr is a no-op).
+
+13 new assertions. Suite: 1342 passed / 3 failed — the 3 failures are
+pre-existing todo auto-archive cases, unrelated to this change.
+
 ## [v0.1.59] — 2026-06-19 — ADR-0042: fs.watch self-extending recursion (Linux)
 
 Fixes the reported auto-finder files-panel blindness to files created in a
