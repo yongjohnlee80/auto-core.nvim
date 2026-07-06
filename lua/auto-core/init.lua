@@ -97,6 +97,7 @@ M.lsp    = require("auto-core.lsp")
 M.files  = require("auto-core.files")
 M.debug  = require("auto-core.debug")
 M.mailbox = require("auto-core.mailbox")
+M.trust   = require("auto-core.trust")
 
 ---Initialize auto-core. Idempotent — re-calling re-applies opts and
 ---propagates the relevant subset to each subsystem.

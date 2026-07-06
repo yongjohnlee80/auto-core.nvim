@@ -879,6 +879,31 @@ return {
   -- pre-existing todo-archive failures (identical on the v0.1.58 main
   -- baseline — unrelated to fs.watch). Patch within the v0.1.x line
   -- per `auto-core-maintenance`; `api_version` stays at `0.1`.
-  version     = "0.1.60",
+  -- v0.1.61: ADR-0048 Phase 1 — two generic APIs auto-run depends on.
+  -- Strictly additive:
+  --   - `events.register_topics(plugin, specs)` — out-of-core plugins
+  --     register topic namespaces at setup; strict mode + trace/health
+  --     introspection know them. Ownership rule mirrors the mailbox
+  --     command registry (same-owner re-registration replaces;
+  --     different-owner clobber and static-registry shadowing error).
+  --     Plus `events.topic_spec(topic)` and `events.registered_topics()`
+  --     (merged static+dynamic snapshot; health.lua now counts both).
+  --   - `auto-core.trust` — the ADR-0035 bash trust model promoted to
+  --     a generic workspace-scoped capability store (`check` / `state`
+  --     / `set` / `acknowledge_first_run` / `has_state`). Capability
+  --     records live under `state.namespace("auto-core.trust")` key
+  --     `caps` (whole-table writes; capability names may contain
+  --     dots). `todo/automation.lua` keeps its exact public trust
+  --     surface as a compat shim over capability `todo.bash`, with a
+  --     one-time lazy migration of legacy-namespace values; legacy ns
+  --     is read-only from here on. Feature-detect via
+  --     `require("auto-core").trust ~= nil`.
+  -- Smoke [77] (10 assertions) + [78] (19 assertions); also fixed the
+  -- long-standing "3 pre-existing todo-archive failures" noted since
+  -- v0.1.58 — section [60]'s hardcoded completed_at fixtures rotted
+  -- past the 28-day auto-archive window on 2026-07-06; recent fixtures
+  -- now compute relative to NOW. Suite 1375 passed / 0 failed. Patch
+  -- within the v0.1.x line; `api_version` stays at `0.1`.
+  version     = "0.1.61",
   api_version = "0.1",
 }

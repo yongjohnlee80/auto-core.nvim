@@ -67,7 +67,9 @@ local function check_events_bus()
 end
 
 local function check_topic_registry()
-  local topics = require("auto-core.events.topics")
+  -- Merged view: static registry + runtime-registered plugin topics
+  -- (auto-core.events.register_topics, ADR-0048 §12).
+  local topics = require("auto-core.events").registered_topics()
   local n = 0
   for _ in pairs(topics) do n = n + 1 end
   if n >= 10 then

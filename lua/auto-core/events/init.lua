@@ -53,6 +53,16 @@ local _exact = {}
 ---@type AutoCoreSubHandle[]
 local _patterns = {}
 
+---Dynamically-registered topics (ADR-0048 §12). Out-of-core plugins
+---(auto-run, …) register their topic namespaces here at setup time so
+---strict mode and the trace/health introspection surfaces know them.
+---The static `events/topics.lua` registry stays the canonical home
+---for auto-core's own topics; this table extends it at runtime.
+---Entries carry `registered_by` for ownership (same clobber rule as
+---the mailbox command registry: a different owner can't overwrite).
+---@type table<string, AutoCoreTopicSpec|{ registered_by: string }>
+local _dynamic_topics = {}
+
 -- Reentrancy guard. Tracks publish-call depth GLOBALLY so a runaway
 -- A→B→A loop is capped regardless of which topics are involved.
 local _depth = 0
@@ -105,7 +115,7 @@ end
 ---Warn about an unregistered topic when strict mode is on.
 local function maybe_warn_unregistered(topic)
   if not _strict_topics then return end
-  if topics_registry[topic] then return end
+  if topics_registry[topic] or _dynamic_topics[topic] then return end
   -- Don't error — just notify. The publish proceeds.
   vim.schedule(function()
     vim.notify(
@@ -292,6 +302,79 @@ function M.publish_async(topic, payload)
   vim.schedule(function() M.publish(topic, payload) end)
 end
 
+-- ── topic registration (ADR-0048 §12) ──────────────────────────
+
+---Register event topics for an out-of-core plugin. Additive-only:
+---the static registry (`events/topics.lua`) can never be shadowed,
+---and a topic registered by one plugin can't be clobbered by another.
+---Re-registering the same topics from the same plugin is idempotent
+---(specs are replaced), so calling this from a plugin's `setup()` on
+---every re-setup is safe.
+---
+---Spec shape matches `AutoCoreTopicSpec`: `doc` (one-line
+---description, required), `payload` (pseudo-typedef string,
+---required), `publishers` (informational list, defaults to
+---`{ plugin }`).
+---@param plugin string             -- owning plugin, e.g. "auto-run.nvim"
+---@param specs table<string, { doc: string, payload: string, publishers: string[]? }>
+---@return integer registered       -- number of topics registered
+function M.register_topics(plugin, specs)
+  assert(type(plugin) == "string" and #plugin > 0,
+    "auto-core.events.register_topics: plugin must be a non-empty string")
+  assert(type(specs) == "table",
+    "auto-core.events.register_topics: specs must be a table")
+
+  local registered = 0
+  for topic, spec in pairs(specs) do
+    if type(topic) ~= "string" or #topic == 0 then
+      error("auto-core.events.register_topics: topic names must be non-empty strings")
+    end
+    if topics_registry[topic] then
+      error("auto-core.events.register_topics: '" .. topic ..
+        "' is already in the static registry (events/topics.lua)")
+    end
+    local prior = _dynamic_topics[topic]
+    if prior and prior.registered_by ~= plugin then
+      error("auto-core.events.register_topics: '" .. topic ..
+        "' is already registered by '" .. prior.registered_by .. "'")
+    end
+    if type(spec) ~= "table"
+        or type(spec.doc) ~= "string" or #spec.doc == 0
+        or type(spec.payload) ~= "string" or #spec.payload == 0
+    then
+      error("auto-core.events.register_topics: spec for '" .. topic ..
+        "' must be { doc = string, payload = string, publishers = string[]? }")
+    end
+    _dynamic_topics[topic] = {
+      doc           = spec.doc,
+      payload       = spec.payload,
+      publishers    = spec.publishers or { plugin },
+      registered_by = plugin,
+    }
+    registered = registered + 1
+  end
+  return registered
+end
+
+---Look up the spec for a topic — static registry first, then
+---dynamically-registered. nil for unknown topics.
+---@param topic string
+---@return AutoCoreTopicSpec|nil
+function M.topic_spec(topic)
+  return topics_registry[topic] or _dynamic_topics[topic]
+end
+
+---Merged snapshot of every known topic (static + dynamic), for
+---introspection surfaces (`:checkhealth`, `:AutoCoreEventTrace`).
+---Returns a copy — mutating it does not affect the registries.
+---@return table<string, AutoCoreTopicSpec>
+function M.registered_topics()
+  local out = {}
+  for topic, spec in pairs(topics_registry) do out[topic] = spec end
+  for topic, spec in pairs(_dynamic_topics) do out[topic] = spec end
+  return out
+end
+
 -- ── inspection helpers (test + diagnostic surface) ─────────────
 
 ---Number of currently-registered subscribers for a given topic
@@ -316,6 +399,7 @@ end
 function M._reset_for_tests()
   _exact = {}
   _patterns = {}
+  _dynamic_topics = {}
   _depth = 0
   _next_id = 1
   trace.clear()

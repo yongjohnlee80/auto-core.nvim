@@ -7391,6 +7391,13 @@ print("\n[60] todo.refresh — bucket reconciliation + auto-archive")
   -- Plant a misplaced task directly: write a file with
   -- status:completed into the open/ bucket. Refresh should detect
   -- the mismatch and move it to completed/.
+  -- Timestamps that must read as "recent" are computed relative to
+  -- NOW. Hardcoded dates rot: the originals ("2026-05-20", 5 days
+  -- before the day this section was written) crossed the 28-day
+  -- auto-archive window with the passage of time and flipped three
+  -- assertions red on 2026-07-06. Only the AGED fixture (id2) may
+  -- stay literal — aging further is exactly what it asserts.
+  local recent_iso = os.date("%Y-%m-%dT10:00:00-07:00", os.time() - 5 * 86400)
   local id1 = "2026-05-25-misplaced-completed"
   local src_file = td .. "/open/" .. id1 .. ".md"
   vim.fn.mkdir(td .. "/open", "p")
@@ -7400,10 +7407,10 @@ print("\n[60] todo.refresh — bucket reconciliation + auto-archive")
     "version: 1",
     "status: completed",
     "title: Misplaced completed",
-    'created: "2026-05-25T10:00:00-07:00"',
-    'updated: "2026-05-25T10:00:00-07:00"',
-    'status_changed: "2026-05-25T10:00:00-07:00"',
-    'completed_at: "2026-05-20T10:00:00-07:00"',
+    'created: "' .. recent_iso .. '"',
+    'updated: "' .. recent_iso .. '"',
+    'status_changed: "' .. recent_iso .. '"',
+    'completed_at: "' .. recent_iso .. '"',
     "---",
     "",
     "# Misplaced completed",
@@ -7469,7 +7476,7 @@ print("\n[60] todo.refresh — bucket reconciliation + auto-archive")
     id           = id3,
     title        = "Recent completed",
     status       = "completed",
-    completed_at = "2026-05-20T10:00:00-07:00",  -- 5 days before today
+    completed_at = recent_iso,  -- always 5 days before NOW (rot-proof)
   })
   local s3 = todo.refresh()
   ok("refresh did NOT archive a recent completed task",
@@ -10119,6 +10126,177 @@ end)()
   log.info_throttled("p76-throttle-key-a", 60000, "smoke", "a-again")
   ok("p76(e): repeat key within window does not grow the map",
     log._throttle_size() == s1)
+end)()
+
+print("\n[77] ADR-0048 Phase 1 — events.register_topics (dynamic plugin topics)")
+
+;(function()
+  local events = require("auto-core.events")
+
+  -- (a) register: valid specs land in the merged registry + spec lookup.
+  local n = events.register_topics("auto-run.nvim", {
+    ["run.job:started"] = {
+      doc = "smoke: an auto-run job started",
+      payload = "{ config = string, run_id = string }",
+    },
+    ["run.job:exited"] = {
+      doc = "smoke: an auto-run job exited",
+      payload = "{ run_id = string, code = integer }",
+      publishers = { "auto-run.nvim" },
+    },
+  })
+  ok("p77(a): register_topics returns count", n == 2)
+  local spec = events.topic_spec("run.job:started")
+  ok("p77(a): topic_spec resolves a dynamic topic",
+    spec ~= nil and spec.doc:find("job started") ~= nil)
+  ok("p77(a): registered_topics merges static + dynamic",
+    events.registered_topics()["run.job:exited"] ~= nil
+    and events.registered_topics()["core.cwd:changed"] ~= nil)
+  ok("p77(a): default publishers stamp the owning plugin",
+    events.topic_spec("run.job:started").publishers[1] == "auto-run.nvim")
+
+  -- (b) idempotent re-registration by the same owner replaces the spec.
+  events.register_topics("auto-run.nvim", {
+    ["run.job:started"] = {
+      doc = "smoke: re-registered doc",
+      payload = "{ config = string }",
+    },
+  })
+  ok("p77(b): same-owner re-registration replaces the spec",
+    events.topic_spec("run.job:started").doc:find("re%-registered") ~= nil)
+
+  -- (c) ownership: a different plugin cannot clobber.
+  local clobber_ok = pcall(events.register_topics, "other.nvim", {
+    ["run.job:started"] = { doc = "clobber", payload = "{}" },
+  })
+  ok("p77(c): different-owner clobber is rejected", clobber_ok == false)
+
+  -- (d) static registry can never be shadowed.
+  local shadow_ok = pcall(events.register_topics, "auto-run.nvim", {
+    ["core.cwd:changed"] = { doc = "shadow", payload = "{}" },
+  })
+  ok("p77(d): static-registry shadowing is rejected", shadow_ok == false)
+
+  -- (e) malformed specs are rejected.
+  local bad_ok = pcall(events.register_topics, "auto-run.nvim", {
+    ["run.bad:topic"] = { doc = "missing payload" },
+  })
+  ok("p77(e): spec without payload is rejected", bad_ok == false)
+
+  -- (f) strict mode: dynamic topics publish without the unregistered
+  -- warn (observable via publish proceeding + spec presence; the warn
+  -- itself is vim.schedule'd notify, asserted structurally here).
+  events.configure({ strict_topics = true })
+  local fired = 0
+  local h = events.subscribe("run.job:started", function() fired = fired + 1 end)
+  local invoked = events.publish("run.job:started", { config = "smoke" })
+  ok("p77(f): dynamic topic publishes under strict mode",
+    invoked == 1 and fired == 1)
+  events.unsubscribe(h)
+  events.configure({ strict_topics = false })
+
+  -- (g) _reset_for_tests clears dynamic topics (registry hygiene
+  -- between suite sections).
+  events._reset_for_tests()
+  ok("p77(g): reset clears dynamic topics",
+    events.topic_spec("run.job:started") == nil)
+end)()
+
+print("\n[78] ADR-0048 Phase 1 — auto-core.trust + todo.bash legacy migration")
+
+;(function()
+  local trust = require("auto-core.trust")
+  local automation = require("auto-core.todo.automation")
+  trust._reset_for_tests()
+  automation._reset_trust_migration_for_tests()
+
+  -- (a) defaults: unwritten capability is fully off.
+  local s = trust.state("run.exec")
+  ok("p78(a): capability defaults all-off",
+    s.enabled == false and s.first_run_acknowledged == false
+    and s.allowlist == nil)
+  ok("p78(a): has_state false before any write",
+    trust.has_state("run.exec") == false)
+
+  -- (b) enable without ack refused; mailbox-shaped call can't force.
+  local ok_set, err_set = trust.set("run.exec", { enabled = true })
+  ok("p78(b): enable refused without ack",
+    ok_set == false and err_set == "trust_not_acknowledged")
+
+  -- (c) ack → enable → check passes.
+  trust.acknowledge_first_run("run.exec")
+  ok("p78(c): enable succeeds after ack",
+    trust.set("run.exec", { enabled = true }) == true)
+  ok("p78(c): check passes when enabled", trust.check("run.exec") == true)
+
+  -- (d) allowlist: subject gating semantics.
+  trust.set("run.exec", { allowlist = { "^gold%-", "^lm%-http$" } })
+  ok("p78(d): allowlisted subject passes",
+    trust.check("run.exec", "gold-http") == true)
+  local ok_rej, why = trust.check("run.exec", "rm-rf-everything")
+  ok("p78(d): non-matching subject rejected",
+    ok_rej == false and why == "allowlist_rejected")
+  ok("p78(d): no-subject check passes (call-site contract)",
+    trust.check("run.exec") == true)
+  local ok_bad, err_bad = trust.set("run.exec", { allowlist = { 42 } })
+  ok("p78(d): non-string allowlist entries rejected",
+    ok_bad == false and err_bad == "allowlist entries must be strings")
+
+  -- (e) capabilities are isolated from one another.
+  ok("p78(e): sibling capability unaffected",
+    trust.state("run.command_env").enabled == false)
+  local ok_dis, why_dis = trust.check("run.command_env")
+  ok("p78(e): disabled capability check returns 'disabled'",
+    ok_dis == false and why_dis == "disabled")
+
+  -- (f) legacy migration: pre-promotion state persisted under the
+  -- automation namespace seeds capability todo.bash exactly once.
+  trust._reset_for_tests()
+  automation._reset_trust_migration_for_tests()
+  local legacy = require("auto-core.state").namespace(
+    "auto-core.todo.automation", { persist = "json" })
+  legacy:set("bash_enabled", true)
+  legacy:set("bash_allowlist", { "^echo " })
+  legacy:set("bash_first_run_acknowledged", true)
+  local ts = automation.trust_state()
+  ok("p78(f): legacy bash_enabled migrates", ts.bash_enabled == true)
+  ok("p78(f): legacy allowlist migrates",
+    type(ts.bash_allowlist) == "table" and ts.bash_allowlist[1] == "^echo ")
+  ok("p78(f): legacy ack migrates", ts.bash_first_run_acknowledged == true)
+  ok("p78(f): migration lands in trust store",
+    trust.state("todo.bash").enabled == true)
+
+  -- (g) post-migration: automation API round-trips through the trust
+  -- store, legacy ns is no longer consulted.
+  legacy:set("bash_enabled", false)  -- direct legacy write → must be inert now
+  ok("p78(g): legacy ns writes are inert post-migration",
+    automation.trust_state().bash_enabled == true)
+  automation.set_trust({ bash_enabled = false, bash_allowlist = false })
+  ok("p78(g): set_trust round-trips via trust store",
+    automation.trust_state().bash_enabled == false
+    and trust.state("todo.bash").enabled == false
+    and trust.state("todo.bash").allowlist == nil)
+  local ok_bad2, err_bad2 = automation.set_trust({ bash_allowlist = "nope" })
+  ok("p78(g): automation error strings preserved",
+    ok_bad2 == false and err_bad2 == "bash_allowlist must be a list of strings or nil")
+
+  -- (h) fresh state (no legacy values) does NOT phantom-migrate:
+  -- defaults stay all-off and enable still requires ack.
+  trust._reset_for_tests()
+  automation._reset_trust_migration_for_tests()
+  legacy:set("bash_enabled", false)
+  legacy:set("bash_allowlist", nil)
+  legacy:set("bash_first_run_acknowledged", false)
+  local ts2 = automation.trust_state()
+  ok("p78(h): clean legacy state → no phantom migration",
+    ts2.bash_enabled == false and ts2.bash_first_run_acknowledged == false)
+  local ok3, err3 = automation.set_trust({ bash_enabled = true })
+  ok("p78(h): ack gate still enforced through the shim",
+    ok3 == false and err3 == "trust_not_acknowledged")
+
+  -- teardown: leave both stores clean for any later section.
+  trust._reset_for_tests()
+  automation._reset_trust_migration_for_tests()
 end)()
 
 -- ─────────────────────── summary ─────────────────────────

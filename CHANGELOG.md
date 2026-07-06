@@ -10,6 +10,50 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.61] — 2026-07-06 — ADR-0048 Phase 1: events.register_topics + auto-core.trust
+
+Strictly additive patch; `api_version` stays `0.1`. Ships the two
+generic APIs the accepted ADR-0048 (auto-run plugin) names as its
+Phase 1 auto-core dependencies.
+
+### Added
+
+- **`events.register_topics(plugin, specs)`** — out-of-core plugins
+  register their event-topic namespaces at setup time so strict mode
+  and the trace/health introspection surfaces recognize them.
+  Ownership mirrors the mailbox command registry: same-owner
+  re-registration replaces the spec; different-owner clobber and
+  static-registry shadowing raise. Companions:
+  `events.topic_spec(topic)` (static-then-dynamic lookup) and
+  `events.registered_topics()` (merged snapshot; `:checkhealth
+  auto-core` now counts both). `events._reset_for_tests()` clears
+  dynamic registrations.
+- **`auto-core.trust`** — the ADR-0035 bash trust model promoted to a
+  generic workspace-scoped capability store: `check(capability,
+  subject?)`, `state(capability)`, `set(capability, {enabled,
+  allowlist, force})`, `acknowledge_first_run(capability)`,
+  `has_state(capability)`. Enable-without-ack refuses with
+  `"trust_not_acknowledged"`; allowlists are Lua-pattern lists gating
+  an optional subject. Mailbox wiring must never pass `force=true`.
+
+### Changed
+
+- `todo/automation.lua` trust surface (`trust_state` / `set_trust` /
+  `acknowledge_first_run`) now delegates to `auto-core.trust`
+  capability `todo.bash` — signatures and error strings unchanged.
+  Pre-promotion state persisted under the legacy
+  `auto-core.todo.automation` namespace migrates lazily (one-time,
+  only when the trust store has never seen `todo.bash`); the legacy
+  namespace is read-only from this release on.
+
+### Fixed
+
+- Smoke section [60]'s "recent completed" fixtures used hardcoded
+  `completed_at` dates that rotted past the 28-day auto-archive window
+  (the "3 pre-existing todo-archive failures" noted since v0.1.58).
+  Recent fixtures now compute timestamps relative to NOW. Suite:
+  1375 passed / 0 failed.
+
 ## [v0.1.60] — 2026-06-20 — ADR-0033: section_did_remount regression smoke
 
 Test-only patch — **no production code change**; `api_version` stays `0.1`.

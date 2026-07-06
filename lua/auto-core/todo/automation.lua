@@ -46,10 +46,21 @@ local function _log()
 end
 
 -- ── trust state ───────────────────────────────────────────────────
+--
+-- ADR-0048 §12: the trust model that originated here is promoted to
+-- the generic `auto-core.trust` capability store. This module keeps
+-- its public trust surface (`trust_state` / `set_trust` /
+-- `acknowledge_first_run` — unchanged signatures + error strings per
+-- [[auto-core-maintenance]] #1) as a compat shim delegating to
+-- capability `todo.bash`, with a one-time lazy migration of any
+-- pre-promotion state persisted under the legacy namespace.
 
-local STATE_NS = "auto-core.todo.automation"
+local TRUST_CAP = "todo.bash"
+local STATE_NS = "auto-core.todo.automation"  -- legacy trust namespace (read-only since ADR-0048)
 
-local function _ns()
+local function _trust() return require("auto-core.trust") end
+
+local function _legacy_ns()
   return _state().namespace(STATE_NS, {
     schema = {
       bash_enabled               = { kind = "boolean",  default = false },
@@ -60,13 +71,48 @@ local function _ns()
   })
 end
 
+-- One-time per session: if the trust store has never seen `todo.bash`
+-- but the legacy namespace carries non-default values (a workspace
+-- that enabled bash before the promotion), seed the capability from
+-- them. Legacy values are left in place (harmless; nothing writes
+-- them anymore) so a rollback to an older auto-core keeps working.
+local _legacy_checked = false
+local function _ensure_legacy_migration()
+  if _legacy_checked then return end
+  _legacy_checked = true
+  local trust = _trust()
+  if trust.has_state(TRUST_CAP) then return end
+  local ns = _legacy_ns()
+  local enabled = ns:get("bash_enabled") == true
+  local allow   = ns:get("bash_allowlist")
+  local acked   = ns:get("bash_first_run_acknowledged") == true
+  local has_allow = type(allow) == "table" and #allow > 0
+  if not (enabled or acked or has_allow) then return end
+  if acked then trust.acknowledge_first_run(TRUST_CAP) end
+  -- force=true: this is a local state migration, not a remote enable;
+  -- the legacy ack (or its absence) was already enforced when the
+  -- legacy value was written.
+  trust.set(TRUST_CAP, {
+    enabled   = enabled,
+    allowlist = has_allow and allow or nil,
+    force     = true,
+  })
+end
+
+---Test-only: re-arm the legacy-migration probe (paired with
+---`trust._reset_for_tests()` in smoke fixtures).
+function M._reset_trust_migration_for_tests()
+  _legacy_checked = false
+end
+
 ---@return { bash_enabled: boolean, bash_allowlist: string[]?, bash_first_run_acknowledged: boolean }
 function M.trust_state()
-  local ns = _ns()
+  _ensure_legacy_migration()
+  local s = _trust().state(TRUST_CAP)
   return {
-    bash_enabled                = ns:get("bash_enabled")    == true,
-    bash_allowlist              = ns:get("bash_allowlist"),
-    bash_first_run_acknowledged = ns:get("bash_first_run_acknowledged") == true,
+    bash_enabled                = s.enabled,
+    bash_allowlist              = s.allowlist,
+    bash_first_run_acknowledged = s.first_run_acknowledged,
   }
 end
 
@@ -84,44 +130,37 @@ end
 ---@return boolean ok, string? err
 function M.set_trust(opts)
   opts = opts or {}
-  local ns = _ns()
+  _ensure_legacy_migration()
 
-  if opts.bash_enabled ~= nil then
-    if opts.bash_enabled == true
-        and ns:get("bash_first_run_acknowledged") ~= true
-        and opts.force ~= true
-    then
-      return false, "trust_not_acknowledged"
-    end
-    ns:set("bash_enabled", opts.bash_enabled == true)
-  end
-
-  -- `bash_allowlist` accepts a list of strings or nil to clear.
-  if opts.bash_allowlist ~= nil then
-    if opts.bash_allowlist == false or opts.bash_allowlist == "" then
-      ns:set("bash_allowlist", nil)
-    elseif type(opts.bash_allowlist) == "table" then
+  -- Validate allowlist here (before delegating) so the error strings
+  -- this function has always returned stay byte-identical.
+  if opts.bash_allowlist ~= nil
+      and opts.bash_allowlist ~= false and opts.bash_allowlist ~= ""
+  then
+    if type(opts.bash_allowlist) == "table" then
       for _, pat in ipairs(opts.bash_allowlist) do
         if type(pat) ~= "string" then
           return false, "bash_allowlist entries must be strings"
         end
       end
-      ns:set("bash_allowlist", opts.bash_allowlist)
-    elseif opts.bash_allowlist == nil then
-      ns:set("bash_allowlist", nil)
     else
       return false, "bash_allowlist must be a list of strings or nil"
     end
   end
 
-  return true, nil
+  return _trust().set(TRUST_CAP, {
+    enabled   = opts.bash_enabled,
+    allowlist = opts.bash_allowlist,
+    force     = opts.force,
+  })
 end
 
 ---Acknowledge the first-run trust prompt. Called by the interactive
 ---auto-finder user command path. ADR §4.5: this is the ONLY way
 ---`bash_enabled` ever becomes settable; mailbox cannot reach this.
 function M.acknowledge_first_run()
-  _ns():set("bash_first_run_acknowledged", true)
+  _ensure_legacy_migration()
+  _trust().acknowledge_first_run(TRUST_CAP)
 end
 
 -- ── hook + executor registry ──────────────────────────────────────
