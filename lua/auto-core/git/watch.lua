@@ -42,8 +42,8 @@
 ---    those produce.
 ---
 ---Linked-worktree note: `auto-core.git.repo.git_dir(repo_root)` returns
----`<common_dir>/worktrees/<name>/` for a linked worktree. HEAD, index,
----logs/HEAD all live PER-WORKTREE under that path, so the watcher
+---`<common_dir>/worktrees/<name>/` for a linked worktree. HEAD and
+---logs/HEAD live PER-WORKTREE under that path, so the watcher
 ---naturally scopes to one worktree and doesn't cross-fire on siblings.
 ---@module 'auto-core.git.watch'
 
