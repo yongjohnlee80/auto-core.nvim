@@ -1,6 +1,6 @@
 ---libuv fs_event watcher for a repo's `.git/` plumbing, publishing
----`core.git.state:changed` whenever HEAD / index / merge markers /
----reflog tip mutates. The narrow companion to `auto-core.fs.watch`,
+---`core.git.state:changed` whenever HEAD / merge markers / reflog tip
+---mutates. The narrow companion to `auto-core.fs.watch`,
 ---which deliberately ignores `/.git/` (its `DEFAULT_IGNORE` would
 ---otherwise drown subscribers in object/refs/reflog churn).
 ---
@@ -22,7 +22,6 @@
 ---
 ---Watched files (the only ones whose mutation matters for UI):
 ---  git_dir/HEAD          → kind = "head"
----  git_dir/index         → kind = "index"
 ---  git_dir/ORIG_HEAD     → kind = "merge"
 ---  git_dir/MERGE_HEAD    → kind = "merge"
 ---  git_dir/logs/HEAD     → kind = "reflog"   (reflog tip — every
@@ -61,9 +60,20 @@ local DEFAULT_MAX_HANDLES = 64
 
 -- Filename → kind. Anything not in this table that slips through a
 -- handle (shouldn't, but be defensive) is classified "other".
+--
+-- ADR-0050 §2.2: `index` is deliberately NOT watched. `git status`
+-- (which panel decorators run constantly) opportunistically rewrites
+-- `git_dir/index` to refresh its stat cache, so an `index` mutation
+-- is indistinguishable from a real staging change and fires far more
+-- often than any genuine state transition. Every real transition a
+-- panel cares about — commit, checkout, reset, merge, branch switch —
+-- moves HEAD and is caught by `HEAD` / `logs/HEAD` / `ORIG_HEAD` /
+-- `MERGE_HEAD`. Watching `index` only added noise and, combined with
+-- a full-tree refresh downstream, a self-sustaining feedback loop.
+-- Staging-only changes (`git add` with no HEAD movement) no longer
+-- live-update decorators; a manual refresh still picks them up.
 local FILENAME_KINDS = {
   ["HEAD"]       = "head",
-  ["index"]      = "index",
   ["ORIG_HEAD"]  = "merge",
   ["MERGE_HEAD"] = "merge",
 }

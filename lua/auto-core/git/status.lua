@@ -58,8 +58,15 @@ end
 ---@param root string
 ---@return AutoCoreGitStatusEntry[]?, string?
 local function shell_status(root)
+  -- `--no-optional-locks` (GIT_OPTIONAL_LOCKS=0) keeps `git status`
+  -- from taking `index.lock` to rewrite the on-disk index stat cache.
+  -- Without it, a status against a freshly-checked-out worktree
+  -- rewrites `git_dir/index` as a side effect — which `git.watch`
+  -- observes as an `index` mutation, feeding the refresh loop ADR-0050
+  -- documents. Portable since git 2.14; behaves identically on
+  -- Linux/macOS/Windows. See ADR-0050 §2.1.
   local result = vim.system(
-    { "git", "-C", root, "status", "--porcelain=v1" },
+    { "git", "--no-optional-locks", "-C", root, "status", "--porcelain=v1" },
     { text = true }
   ):wait()
   if result.code ~= 0 then

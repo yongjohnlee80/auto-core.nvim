@@ -5822,21 +5822,23 @@ ok("handle.repo_root + git_dir are normalized strings",
     and handle.git_dir:find("/%.git$") ~= nil,
   vim.inspect({ repo_root = handle.repo_root, git_dir = handle.git_dir }))
 
--- ── Kind = "index" via `git add` ────────────────────────────
+-- ── ADR-0050 §2.2: `index` is no longer watched ─────────────
+-- A pure `git add` (stages the index, no HEAD/reflog movement) must
+-- NOT publish core.git.state:changed. `index` was dropped from
+-- FILENAME_KINDS because `git status` rewrites it constantly, forming
+-- the refresh feedback loop ADR-0050 documents.
 local before = #seen
 vim.fn.writefile({ "abc" }, repo .. "/a.txt")
 gsh({ "git", "add", "a.txt" })
-vim.wait(800, function()
-  for i = before + 1, #seen do
-    if seen[i].kind == "index" then return true end
-  end
-  return false
-end)
+vim.wait(500)
 local saw_index = false
 for i = before + 1, #seen do
-  if seen[i].kind == "index" then saw_index = true end
+  if seen[i].kind == "index"
+      or (seen[i].path and seen[i].path:sub(-#"/index") == "/index") then
+    saw_index = true
+  end
 end
-ok("git add fires kind='index'", saw_index,
+ok("git add does NOT fire an index event (§2.2)", not saw_index,
   vim.inspect({ before = before, total = #seen, slice = { unpack(seen, before + 1) } }))
 
 -- ── Kind = "reflog" + index via `git commit` ────────────────
@@ -5947,18 +5949,20 @@ ok("status cache survives publish for unrelated repo",
   status_mod.is_cached(repo) == true)
 
 -- ── debounce coalescing on the SAME file ───────────────────
--- Three rapid writes to .git/index within the 200ms debounce window
--- should produce at most one publish. CORRUPTS the index — keep this
--- test last among the repo-dependent assertions.
+-- Three rapid writes to a watched file (HEAD) within the 200ms
+-- debounce window should produce at most one publish. Uses HEAD
+-- (still watched) rather than index (dropped per §2.2); writes keep
+-- valid ref content so the repo stays usable for the assertions below.
 before = #seen
 vim.wait(300)
-for i = 1, 3 do
-  vim.fn.writefile({ string.rep("X", i) }, repo .. "/.git/index")
+for _ = 1, 3 do
+  vim.fn.writefile({ "ref: refs/heads/branch2" }, repo .. "/.git/HEAD")
 end
 vim.wait(400)
 local burst_count = 0
 for i = before + 1, #seen do
-  if seen[i].path and seen[i].path:sub(-#"/index") == "/index" then
+  if seen[i].path and seen[i].path:sub(-#"/HEAD") == "/HEAD"
+      and seen[i].kind == "head" then
     burst_count = burst_count + 1
   end
 end
@@ -5966,7 +5970,7 @@ end
 -- fire multiple events per writefile on Linux, so 1–2 publishes for
 -- a burst of 3 is the realistic coalescing outcome. 3 (no coalescing)
 -- would fail.
-ok("debounce coalesces burst of 3 index writes to ≤2 publishes",
+ok("debounce coalesces burst of 3 HEAD writes to ≤2 publishes",
   burst_count >= 1 and burst_count <= 2,
   "got " .. tostring(burst_count))
 
@@ -5992,9 +5996,9 @@ ok("stop_all clears every handle", #gwatch.list() == 0)
 -- ── default constants are exposed ──────────────────────────
 ok("DEFAULT_DEBOUNCE_MS = 200", gwatch.DEFAULT_DEBOUNCE_MS == 200)
 ok("DEFAULT_MAX_HANDLES = 64",  gwatch.DEFAULT_MAX_HANDLES == 64)
-ok("FILENAME_KINDS includes HEAD/index/ORIG_HEAD/MERGE_HEAD",
+ok("FILENAME_KINDS includes HEAD/ORIG_HEAD/MERGE_HEAD, excludes index (§2.2)",
   gwatch.FILENAME_KINDS.HEAD == "head"
-    and gwatch.FILENAME_KINDS.index == "index"
+    and gwatch.FILENAME_KINDS.index == nil
     and gwatch.FILENAME_KINDS.ORIG_HEAD == "merge"
     and gwatch.FILENAME_KINDS.MERGE_HEAD == "merge")
 
@@ -10297,6 +10301,104 @@ print("\n[78] ADR-0048 Phase 1 — auto-core.trust + todo.bash legacy migration"
   -- teardown: leave both stores clean for any later section.
   trust._reset_for_tests()
   automation._reset_trust_migration_for_tests()
+end)()
+
+print("\n[79] ADR-0050 — git.watch drops `index`; git.status uses --no-optional-locks")
+;(function()
+  local watch  = require("auto-core.git.watch")
+  local status = require("auto-core.git.status")
+
+  -- ── (a) FILENAME_KINDS no longer watches `index` (§2.2). Real
+  -- state transitions stay covered by HEAD / ORIG_HEAD / MERGE_HEAD.
+  ok("p79(a): git.watch does NOT watch `index`",
+    watch.FILENAME_KINDS["index"] == nil,
+    vim.inspect(watch.FILENAME_KINDS))
+  ok("p79(a): git.watch still watches HEAD / ORIG_HEAD / MERGE_HEAD",
+    watch.FILENAME_KINDS["HEAD"] == "head"
+      and watch.FILENAME_KINDS["ORIG_HEAD"] == "merge"
+      and watch.FILENAME_KINDS["MERGE_HEAD"] == "merge")
+
+  -- Real repo fixture with one commit (so git_dir/index exists).
+  local repo = vim.fn.tempname() .. "_p79git"
+  vim.fn.mkdir(repo, "p")
+  vim.fn.system({ "git", "-C", repo, "init", "-q" })
+  vim.fn.writefile({ "hello p79" }, repo .. "/f.txt")
+  vim.fn.system({ "git", "-C", repo, "add", "." })
+  vim.fn.system({ "git", "-C", repo,
+    "-c", "user.email=t@t", "-c", "user.name=t",
+    "commit", "-q", "-m", "p79 commit" })
+  local git_dir = repo .. "/.git"
+  if vim.v.shell_error ~= 0 or vim.fn.isdirectory(git_dir) ~= 1 then
+    ok("p79: git fixture creation", false, "git unavailable / init failed")
+    vim.fn.delete(repo, "rf")
+  else
+    local index_path = git_dir .. "/index"
+
+    -- ── (b) §2.1: git.status.get must NOT rewrite git_dir/index.
+    -- Make the tracked file's stat cache stale (bump its mtime into
+    -- the future) so a status WOULD refresh + rewrite the index if
+    -- optional locks were enabled. With --no-optional-locks it must
+    -- leave the index byte-for-byte alone.
+    status.invalidate(repo)
+    local pre = vim.uv.fs_stat(index_path) or {}
+    local future = os.time() + 120
+    vim.uv.fs_utime(repo .. "/f.txt", future, future)
+    local entries = status.get(repo)
+    local post = vim.uv.fs_stat(index_path) or {}
+    ok("p79(b): git.status.get returns entries on the fixture",
+      type(entries) == "table")
+    ok("p79(b): git.status.get did NOT rewrite git_dir/index (§2.1)",
+      pre.mtime and post.mtime
+        and pre.mtime.sec == post.mtime.sec
+        and pre.mtime.nsec == post.mtime.nsec
+        and pre.size == post.size,
+      string.format("pre=%s post=%s",
+        vim.inspect(pre.mtime), vim.inspect(post.mtime)))
+
+    -- ── (c) §2.2: arming the watch and mutating git_dir/index must
+    -- NOT publish core.git.state:changed; a HEAD mutation still must.
+    watch._reset_for_tests()
+    local hits = {}
+    local sub = events_mod.subscribe("core.git.state:changed", function(p)
+      hits[#hits + 1] = { kind = p.kind, path = p.path }
+    end)
+    local handle, werr = watch.start(repo)
+    ok("p79(c): watch.start succeeds on the fixture",
+      handle ~= nil, tostring(werr))
+
+    -- Mutate index (rewrite bytes) — must be filtered out.
+    vim.fn.writefile({ "not-a-real-index" }, index_path)
+    vim.wait(300)
+    local index_hits = 0
+    for _, h in ipairs(hits) do
+      if h.kind == "index" or (h.path and h.path:sub(-#"/index") == "/index") then
+        index_hits = index_hits + 1
+      end
+    end
+    ok("p79(c): index mutation does NOT publish core.git.state:changed",
+      index_hits == 0, vim.inspect(hits))
+
+    -- Mutate HEAD — must still publish (proves the watch is live).
+    vim.wait(250)  -- clear any per-path debounce window
+    vim.fn.writefile({ "ref: refs/heads/p79" }, git_dir .. "/HEAD")
+    vim.wait(300, function()
+      for _, h in ipairs(hits) do
+        if h.kind == "head" then return true end
+      end
+      return false
+    end)
+    local head_hit = false
+    for _, h in ipairs(hits) do
+      if h.kind == "head" then head_hit = true break end
+    end
+    ok("p79(c): HEAD mutation still publishes core.git.state:changed",
+      head_hit, vim.inspect(hits))
+
+    events_mod.unsubscribe(sub)
+    watch.stop_all()
+    status.invalidate(repo)
+    vim.fn.delete(repo, "rf")
+  end
 end)()
 
 -- ─────────────────────── summary ─────────────────────────
