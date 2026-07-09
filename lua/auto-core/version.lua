@@ -902,8 +902,8 @@ return {
   -- long-standing "3 pre-existing todo-archive failures" noted since
   -- v0.1.58 — section [60]'s hardcoded completed_at fixtures rotted
   -- past the 28-day auto-archive window on 2026-07-06; recent fixtures
-  -- now compute relative to NOW. Suite 1375 passed / 0 failed. Patch
+  -- now compute relative to NOW. Suite 1382 passed / 0 failed. Patch
   -- within the v0.1.x line; `api_version` stays at `0.1`.
-  version     = "0.1.61",
+  version     = "0.1.62",
   api_version = "0.1",
 }
