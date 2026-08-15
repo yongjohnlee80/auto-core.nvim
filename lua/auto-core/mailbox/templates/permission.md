@@ -66,10 +66,16 @@ Agents differ by the permission capability their CLI offers. Apply the
 section matching your bucket; **unknown kinds fail closed** — document
 the requirement and report it; never self-provision.
 
-- **Persistent allowlist** (e.g. `claude`): needs Read/Write path rules
-  in the user's Claude settings:
+- **Persistent allowlist** (e.g. `claude`): needs Read/Edit path rules
+  in the user's Claude settings. ⚠️ **Rule-verb note (2026-08-16):** the
+  write-side rule uses the **`Edit(…)`** verb, NOT `Write(…)`. Claude Code
+  no longer consults `Write(path)` rules for file-permission checks — only
+  `Edit(path)` rules are, and an `Edit(path)` rule transparently covers
+  **all** file-editing tools (Write, Edit, NotebookEdit). A `Write(…)` rule
+  here is inert and emits a TUI warning; you still use the **Write tool**
+  to write — it is authorized by the `Edit(…)` rule.
   - `Read(//<workspace>/.auto-agents/mailbox/**)` — inbox/clone/seen-revision
-  - `Write(//<workspace>/.auto-agents/mailbox/**)` — outbox writes
+  - `Edit(//<workspace>/.auto-agents/mailbox/**)` — outbox writes (Write/Edit tools)
   - `Read(//<kb-root>/**)` — KB / `.todo-list`
   - `Read(//<home>/.local/share/nvim/auto-agents/**)` — runtime-identity sidecar
 
