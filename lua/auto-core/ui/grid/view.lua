@@ -14,10 +14,12 @@
 ---     window's current `leftcol` on every refresh.
 ---  2. `WinScrolled` — not `CursorMoved` — is the horizontal signal. It
 ---     fires on horizontal-only motion, carries `leftcol` in
----     `v:event[winid]`, and fires on `zH` when the cursor has not moved
----     at all. CAVEAT: it does NOT fire in a headless Neovim, because
----     with no UI there is no redraw to trigger it. Headless tests
----     therefore drive `refresh_header()` directly.
+---     `v:event[winid]`, and fires when the VIEWPORT moves with the
+---     cursor untouched, which `CursorMoved` cannot see at all.
+---     CAVEAT: it does NOT fire in a headless Neovim, because with no
+---     UI there is no redraw to trigger it. Headless tests therefore
+---     drive `refresh_header()` directly; `tests/ui/grid_scroll.lua`
+---     covers the event wiring under a real pty.
 ---  3. A winbar is evaluated AS A STATUSLINE. A literal `"100%s done"`
 ---     renders as `"100 done"` — the `%s` is consumed as an item. Every
 ---     column name is escaped before it goes in.
@@ -281,7 +283,9 @@ end
 function View:header_text()
   local m = self._model
   if self._json_mode or m:kind() ~= "rows" then return "" end
-  return m:header_line(self._widths or m:widths({ max = self._max_width }))
+  -- Parenthesized: header_line also returns cell ranges, which callers
+  -- of header_text must not receive as a second return value.
+  return (m:header_line(self._widths or m:widths({ max = self._max_width })))
 end
 
 ---refresh_header re-clips the header to the window's current leftcol.
