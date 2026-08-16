@@ -10401,6 +10401,211 @@ print("\n[79] ADR-0050 — git.watch drops `index`; git.status uses --no-optiona
   end
 end)()
 
+print("\n[80] ADR-0058 — ui.grid.model (pure tabular data rules)")
+;(function()
+  local ui = require("auto-core.ui")
+  ok("p80: ui.grid is aggregated", type(ui.grid) == "table", type(ui.grid))
+  ok("p80: ui.grid.model is a constructor", type(ui.grid.model) == "function", type(ui.grid.model))
+  local grid = ui.grid
+
+  -- ── raw value vs display text ──────────────────────────────
+  -- The model must keep BOTH: a yank has to reproduce what the
+  -- database returned, while the grid shows one line per row.
+  -- Column indexes are named so an assertion can never quietly target
+  -- the wrong cell; column 3 repeats the name "id" on purpose, to pin
+  -- the duplicate-name rule.
+  local C_ID, C_TITLE, C_DUP = 1, 2, 3
+  local m = grid.model({
+    columns = { { name = "id", type = "integer" }, "title", { name = "id" } },
+    rows = {
+      { 1, "alpha", "x" },
+      { 2, vim.NIL, "y" },
+      { 3, "has,comma", 'has"quote' },
+      { 4, "line1\nline2", "tab\there" },
+      { 5, "\255\254bin", "日本語" },
+    },
+  })
+
+  ok("p80: nrows/ncols", m:nrows() == 5 and m:ncols() == 3,
+    m:nrows() .. "x" .. m:ncols())
+  ok("p80: kind inferred as rows", m:kind() == "rows", m:kind())
+
+  local c = m:cell(1, C_ID)
+  ok("p80: cell keeps the RAW value", c.value == 1 and c.text == "1" and not c.null,
+    vim.inspect(c))
+
+  -- ── NULL: not the string "NULL" ────────────────────────────
+  local n = m:cell(2, C_TITLE)
+  ok("p80: vim.NIL is null with display text", n.null == true and n.text == "NULL",
+    vim.inspect(n))
+  ok("p80: NULL is an EMPTY csv field (not \"NULL\")",
+    m:csv(2) == "2,,y", m:csv(2))
+  ok("p80: NULL encodes as json null", grid.json_value(vim.NIL) == "null",
+    grid.json_value(vim.NIL))
+
+  local hole = grid.model({ columns = { "a", "b" }, rows = { { 1 } } })
+  ok("p80: a missing (nil) trailing value is null too",
+    hole:cell(1, 2).null == true and hole:cell(1, 2).text == "NULL",
+    vim.inspect(hole:cell(1, 2)))
+  ok("p80: null text is configurable", grid.model({
+    columns = { "a" }, rows = { { vim.NIL } }, null = "∅",
+  }):cell(1, 1).text == "∅")
+
+  -- ── binary: non-UTF-8 renders as hex, never as raw bytes ────
+  local b = m:cell(5, C_TITLE)
+  ok("p80: non-UTF-8 bytes render as 0x hex", b.text == "0xfffe62696e" and b.binary == true,
+    vim.inspect(b))
+  ok("p80: valid UTF-8 is NOT treated as binary",
+    m:cell(5, C_DUP).binary == false and m:cell(5, C_DUP).text == "日本語",
+    vim.inspect(m:cell(5, C_DUP)))
+  ok("p80: is_printable rejects overlong encodings",
+    grid.is_printable("\192\175") == false)
+  ok("p80: is_printable rejects lone continuation bytes",
+    grid.is_printable("\128") == false)
+  ok("p80: is_printable rejects truncated sequences",
+    grid.is_printable("\228\184") == false)
+  ok("p80: is_printable rejects surrogates",
+    grid.is_printable("\237\160\128") == false)
+  ok("p80: is_printable accepts tab/newline",
+    grid.is_printable("a\tb\nc") == true)
+  ok("p80: is_printable rejects other control bytes",
+    grid.is_printable("a\1b") == false)
+  -- A 16-byte id with embedded NULs is binary, so it never reaches the
+  -- buffer as raw bytes (which is what produced the decimal-int display).
+  local uuid = string.char(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 255)
+  ok("p80: 16-byte id renders as hex, not integers",
+    grid.display_text(uuid, "NULL") == "0x000102030405060708090a0b0c0d0eff",
+    grid.display_text(uuid, "NULL"))
+
+  -- ── newlines: flattened on screen, verbatim in yanks ────────
+  local nl = m:cell(4, 2)
+  ok("p80: embedded newline shows as ␤ (row stays one line)",
+    nl.text == "line1␤line2" and not nl.text:find("\n"), vim.inspect(nl.text))
+  ok("p80: csv keeps the REAL newline and quotes the field",
+    m:csv(4) == '4,"line1\nline2",tab\there', vim.inspect(m:csv(4)))
+
+  -- ── RFC 4180 ───────────────────────────────────────────────
+  ok("p80: csv quotes a field containing a comma", m:csv(3):find('"has,comma"', 1, true) ~= nil, m:csv(3))
+  ok("p80: csv doubles inner quotes", m:csv(3):find('"has""quote"', 1, true) ~= nil, m:csv(3))
+  ok("p80: csv leaves plain fields unquoted", m:csv(1) == "1,alpha,x", m:csv(1))
+  ok("p80: csv_field of a plain value is bare", grid.csv_field("plain") == "plain")
+  local csv_all = m:csv_rows()
+  ok("p80: csv_rows emits a header record first",
+    vim.split(csv_all, "\n")[1] == "id,title,id", vim.split(csv_all, "\n")[1])
+  ok("p80: csv_rows honours an explicit row subset",
+    m:csv_rows({ 1 }) == "id,title,id\n1,alpha,x", vim.inspect(m:csv_rows({ 1 })))
+
+  -- ── duplicate column names survive both serializations ──────
+  local cols = m:columns()
+  ok("p80: duplicate column keeps its name", cols[3].name == "id", cols[3].name)
+  ok("p80: duplicate column gets a unique key", cols[3].key == "id#2", cols[3].key)
+  ok("p80: columns() returns a copy (not the model's own table)",
+    (function() cols[1].name = "mutated"; return m:columns()[1].name == "id" end)())
+
+  local obj = vim.json.decode(m:json(1))
+  ok("p80: json object carries BOTH duplicate columns",
+    obj["id"] == 1 and obj["id#2"] == "x", vim.inspect(obj))
+  ok("p80: json object preserves the raw number type", type(obj["id"]) == "number", type(obj["id"]))
+  local obj2 = vim.json.decode(m:json(2))
+  ok("p80: json object encodes NULL as json null", obj2["title"] == vim.NIL, vim.inspect(obj2))
+  local obj5 = vim.json.decode(m:json(5))
+  ok("p80: json object carries binary as its hex text (valid UTF-8)",
+    obj5["title"] == "0xfffe62696e", vim.inspect(obj5))
+  ok("p80: json object keeps a real newline in the value",
+    vim.json.decode(m:json(4))["title"] == "line1\nline2",
+    vim.inspect(vim.json.decode(m:json(4))["title"]))
+
+  local all = vim.json.decode(m:json_all())
+  ok("p80: json_all keeps duplicate columns POSITIONALLY",
+    #all.columns == 3 and all.columns[1].name == "id" and all.columns[3].name == "id"
+    and all.columns[3].key == "id#2", vim.inspect(all.columns))
+  ok("p80: json_all rows are positional arrays", #all.rows == 5 and all.rows[1][2] == "alpha",
+    vim.inspect(all.rows[1]))
+  ok("p80: json_all row keeps NULL as null", all.rows[2][2] == vim.NIL, vim.inspect(all.rows[2]))
+  local rows_json = vim.json.decode(m:json_rows())
+  ok("p80: json_rows decodes to one object per row",
+    #rows_json == 5 and rows_json[1]["title"] == "alpha", vim.inspect(rows_json[1]))
+  ok("p80: json_rows of an empty result is []",
+    grid.model({ columns = { "a" }, rows = {} }):json_rows() == "[]")
+
+  -- ── widths measured in DISPLAY cells, not bytes ─────────────
+  local w = m:widths()
+  -- Isolated fixture: 日本語 is 9 BYTES but 6 display cells. Byte-width
+  -- padding (string.format("%-Ns")) is what mis-aligns every existing
+  -- columnar view in this plugin; the grid must not repeat it.
+  local wide = grid.model({ columns = { "c" }, rows = { { "日本語" } } })
+  ok("p80: width counts display cells for multibyte (日本語 = 6, not 9)",
+    wide:widths()[1] == 6, vim.inspect(wide:widths()))
+  ok("p80: a tab is expanded (it would otherwise break alignment)",
+    m:cell(4, C_DUP).text == "tab    here", vim.inspect(m:cell(4, C_DUP).text))
+  ok("p80: widths take the widest cell in the column",
+    w[C_TITLE] == 12, vim.inspect(w))
+  ok("p80: width includes the header", grid.model({
+    columns = { "a_long_header" }, rows = { { "x" } },
+  }):widths()[1] == #"a_long_header")
+  ok("p80: width is clamped by opts.max", grid.model({
+    columns = { "a" }, rows = { { string.rep("x", 500) } },
+  }):widths({ max = 12 })[1] == 12)
+  ok("p80: width has a floor of 1", grid.model({
+    columns = { "" }, rows = { { vim.NIL } },
+  }):widths()[1] >= 1)
+
+  -- ── truncation is multibyte-safe ───────────────────────────
+  ok("p80: truncate appends … and fits the budget",
+    grid.truncate("abcdefgh", 5) == "abcd…", grid.truncate("abcdefgh", 5))
+  ok("p80: truncate leaves a short string alone", grid.truncate("ab", 5) == "ab")
+  ok("p80: truncate never splits a multibyte char",
+    vim.fn.strdisplaywidth(grid.truncate("日本語テスト", 5)) <= 5,
+    grid.truncate("日本語テスト", 5))
+
+  -- ── line + cell ranges (what the view highlights) ───────────
+  local line, ranges = m:line(1, w)
+  ok("p80: line has no trailing padding", line == line:gsub("%s+$", ""), vim.inspect(line))
+  ok("p80: one range per column", #ranges == 3, #ranges)
+  local within = true
+  for _, rg in ipairs(ranges) do
+    if rg.start > #line or rg.stop > #line or rg.start > rg.stop then within = false end
+  end
+  ok("p80: every range is INSIDE the line (extmark-safe)", within,
+    vim.inspect({ line = line, len = #line, ranges = ranges }))
+  ok("p80: range 1 spans the first cell's text",
+    line:sub(ranges[1].start + 1, ranges[1].stop):match("^1"), vim.inspect(ranges[1]))
+  ok("p80: column_at maps a byte column back to its cell",
+    grid.column_at(ranges, ranges[2].start) == 2
+    and grid.column_at(ranges, ranges[1].start) == 1, "ranges=" .. vim.inspect(ranges))
+  ok("p80: column_at past the end clamps to the last column",
+    grid.column_at(ranges, 10000) == 3)
+  local hline, hranges = m:header_line(w)
+  ok("p80: header aligns on the same grid as rows",
+    hranges[2].start == ranges[2].start, hline .. " | " .. line)
+  ok("p80: line() of a missing row is nil", m:line(99, w) == nil)
+
+  -- ── non-row results ────────────────────────────────────────
+  local wr = grid.model({ verb = "update", affected = 3, duration_ms = 12 })
+  ok("p80: a result with no columns is a write", wr:kind() == "write", wr:kind())
+  ok("p80: write summary reports rows affected",
+    wr:summary() == "UPDATE — 3 row(s) affected in 12ms", wr:summary())
+  local er = grid.model({ error = "syntax error near \"slect\"" })
+  ok("p80: an error result is kind=error", er:kind() == "error", er:kind())
+  ok("p80: error summary carries the message",
+    er:summary():find("slect", 1, true) ~= nil, er:summary())
+  local mt = grid.model({ columns = { "a" }, rows = {} })
+  ok("p80: columns with no rows is kind=empty", mt:kind() == "empty" and mt:is_empty(), mt:kind())
+  ok("p80: truncation is reported in the summary",
+    grid.model({ columns = { "a" }, rows = { { 1 } }, verb = "select", more = true })
+      :summary():find("more truncated", 1, true) ~= nil)
+
+  -- ── row() returns raw values, and the model stays immutable ─
+  local r4 = m:row(4)
+  ok("p80: row() returns RAW values (real newline, not ␤)",
+    r4[2] == "line1\nline2", vim.inspect(r4[2]))
+  r4[2] = "clobbered"
+  ok("p80: mutating a returned row does not affect the model",
+    m:row(4)[2] == "line1\nline2", vim.inspect(m:row(4)[2]))
+  ok("p80: row() of a missing row is nil", m:row(99) == nil)
+  ok("p80: cell() out of range is nil", m:cell(1, 99) == nil and m:cell(99, 1) == nil)
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
