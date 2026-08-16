@@ -10606,6 +10606,220 @@ print("\n[80] ADR-0058 — ui.grid.model (pure tabular data rules)")
   ok("p80: cell() out of range is nil", m:cell(1, 99) == nil and m:cell(99, 1) == nil)
 end)()
 
+print("\n[81] ADR-0058 — ui.grid.attach (window ownership, cell cursor, header)")
+;(function()
+  local grid = require("auto-core.ui").grid
+  ok("p81: ui.grid.attach is exposed", type(grid.attach) == "function", type(grid.attach))
+
+  -- ── statusline escaping (winbar is evaluated AS a statusline) ──
+  -- Measured: a literal "100%s done" renders as "100 done" — the %s is
+  -- consumed as an item. Column names must be escaped or a header like
+  -- "pct%" silently mangles the whole bar.
+  ok("p81: escape_statusline doubles %", grid.escape_statusline("100%s done") == "100%%s done",
+    grid.escape_statusline("100%s done"))
+  ok("p81: escaped header renders literally", vim.api.nvim_eval_statusline(
+    grid.escape_statusline("100%s done"), {}).str == "100%s done",
+    vim.api.nvim_eval_statusline(grid.escape_statusline("100%s done"), {}).str)
+  ok("p81: UNescaped text really is eaten (the bug this prevents)",
+    vim.api.nvim_eval_statusline("100%s done", {}).str == "100 done",
+    vim.api.nvim_eval_statusline("100%s done", {}).str)
+  ok("p81: escaping leaves ordinary text alone",
+    grid.escape_statusline("id  title") == "id  title")
+
+  -- ── header clipping (the horizontal-scroll half of R2-3) ───────
+  -- WinScrolled cannot be observed headlessly (no UI, no redraw), so
+  -- the pure computation is what the suite pins.
+  ok("p81: clip_header at leftcol 0 is unchanged", grid.clip_header("id  title", 0) == "id  title")
+  ok("p81: clip_header shifts by leftcol", grid.clip_header("id  title", 4) == "title",
+    vim.inspect(grid.clip_header("id  title", 4)))
+  ok("p81: clip_header past the end is empty", grid.clip_header("id", 99) == "")
+  ok("p81: clip_header keeps multibyte glyphs whole",
+    grid.clip_header("日本語x", 2) == "本語x", vim.inspect(grid.clip_header("日本語x", 2)))
+  ok("p81: a wide glyph straddling the cut becomes a space (no drift)",
+    grid.clip_header("日本語x", 1) == " 本語x", vim.inspect(grid.clip_header("日本語x", 1)))
+  ok("p81: clipped header keeps its display width",
+    vim.fn.strdisplaywidth(grid.clip_header("日本語x", 1)) == 6,
+    vim.fn.strdisplaywidth(grid.clip_header("日本語x", 1)))
+
+  -- ── ORDER: clip the RAW header, escape the RESULT ──────────────
+  -- Escaping first adds a cell for every literal %, so clipping the
+  -- escaped string measures cells the winbar never renders — labels
+  -- after a % shift, and a cut landing inside a %% pair leaves a live
+  -- statusline item that eats the rest of the line. The assertion that
+  -- matters is what the winbar actually RENDERS.
+  local raw_pct = "a%b  c"
+  local function rendered(s) return vim.api.nvim_eval_statusline(s, {}).str end
+  ok("p81: render_header clips in RAW cells, not escaped ones",
+    rendered(grid.render_header(raw_pct, 2)) == "b  c",
+    vim.inspect(rendered(grid.render_header(raw_pct, 2))))
+  ok("p81: render_header at leftcol 0 renders the header verbatim",
+    rendered(grid.render_header(raw_pct, 0)) == raw_pct,
+    vim.inspect(rendered(grid.render_header(raw_pct, 0))))
+  ok("p81: render_header never leaves a live statusline item",
+    rendered(grid.render_header(raw_pct, 1)) == "%b  c",
+    vim.inspect(rendered(grid.render_header(raw_pct, 1))))
+  -- The wrong order, kept as an executable record of the bug: clipping
+  -- the escaped string by 2 cuts the %% pair in half.
+  ok("p81: escape-then-clip really does corrupt (the bug this prevents)",
+    rendered(grid.clip_header(grid.escape_statusline(raw_pct), 2)) ~= "b  c",
+    vim.inspect(rendered(grid.clip_header(grid.escape_statusline(raw_pct), 2))))
+
+  -- ── attach / render / dispose against a real window ────────────
+  vim.cmd("new")
+  local win = vim.api.nvim_get_current_win()
+  local prior_buf = vim.api.nvim_win_get_buf(win)
+  vim.api.nvim_set_option_value("winbar", "PRE-EXISTING", { win = win, scope = "local" })
+
+  local m = grid.model({
+    columns = { "id", "name" },
+    rows = { { 1, "alpha" }, { 2, "beta" }, { 3, vim.NIL } },
+  })
+  local v = grid.attach(m, { win = win })
+
+  ok("p81: view owns its OWN buffer (not the window's prior one)",
+    v:buf() ~= prior_buf and vim.api.nvim_win_get_buf(win) == v:buf(),
+    tostring(v:buf()) .. " vs " .. tostring(prior_buf))
+  ok("p81: buffer is an unmodifiable scratch",
+    vim.bo[v:buf()].modifiable == false and vim.bo[v:buf()].buftype == "nofile")
+  local lines = vim.api.nvim_buf_get_lines(v:buf(), 0, -1, false)
+  ok("p81: one buffer line per row (header is NOT a line in winbar mode)",
+    #lines == 3, vim.inspect(lines))
+  ok("p81: row content is rendered", lines[1]:match("^1%s+alpha") ~= nil, vim.inspect(lines[1]))
+  ok("p81: NULL renders in the row", lines[3]:find("NULL", 1, true) ~= nil, vim.inspect(lines[3]))
+
+  local wb = vim.api.nvim_get_option_value("winbar", { win = win, scope = "local" })
+  ok("p81: header is written to the window-local winbar",
+    wb:find("id", 1, true) ~= nil and wb:find("name", 1, true) ~= nil, vim.inspect(wb))
+
+  -- ── the cell cursor is DERIVED from the real cursor ────────────
+  vim.api.nvim_win_set_cursor(win, { 1, 0 })
+  local cur = v:cell()
+  ok("p81: cursor at col 0 is cell (1,1)", cur.row == 1 and cur.col == 1, vim.inspect(cur))
+  ok("p81: cell carries the raw value", cur.cell.value == 1, vim.inspect(cur.cell))
+  local name_col = lines[1]:find("alpha", 1, true) - 1
+  vim.api.nvim_win_set_cursor(win, { 1, name_col })
+  ok("p81: moving the real cursor changes the cell", v:cell().col == 2, vim.inspect(v:cell()))
+  ok("p81: native motion is not trapped — cursor really moved",
+    vim.api.nvim_win_get_cursor(win)[2] == name_col)
+
+  v:move_cell(0, -1)
+  ok("p81: move_cell steps by whole cells", v:cell().col == 1, vim.inspect(v:cell()))
+  v:move_cell(1, 0)
+  ok("p81: move_cell moves rows", v:cell().row == 2, vim.inspect(v:cell()))
+  v:move_cell(0, 99)
+  ok("p81: move_cell clamps to the last column", v:cell().col == 2, vim.inspect(v:cell()))
+  v:move_cell(-99, 0)
+  ok("p81: move_cell clamps to the first row", v:cell().row == 1, vim.inspect(v:cell()))
+
+  local marks = vim.api.nvim_buf_get_extmarks(v:buf(), -1, 0, -1, { details = true })
+  ok("p81: the current cell is highlighted with an extmark", #marks >= 1, vim.inspect(#marks))
+
+  -- ── yanks use the MODEL's rules, not the rendered line ─────────
+  vim.api.nvim_win_set_cursor(win, { 2, 0 })
+  ok("p81: yank_row csv is RFC-4180", v:yank_row("csv") == "2,beta", vim.inspect(v:yank_row("csv")))
+  ok("p81: yank_row json is an object",
+    vim.json.decode(v:yank_row("json")).name == "beta", v:yank_row("json"))
+  ok("p81: yank_cell copies the raw cell", v:yank_cell() == "2", vim.inspect(v:yank_cell()))
+  ok("p81: yank populates the unnamed register", vim.fn.getreg('"') == "2", vim.fn.getreg('"'))
+  vim.api.nvim_win_set_cursor(win, { 3, 0 })
+  v:move_cell(0, 1)
+  ok("p81: yanking a NULL cell yields empty, not \"NULL\"", v:yank_cell() == "", vim.inspect(v:yank_cell()))
+
+  -- ── keymaps are bound buffer-locally to public methods ─────────
+  local maps = {}
+  for _, mp in ipairs(vim.api.nvim_buf_get_keymap(v:buf(), "n")) do maps[mp.lhs] = true end
+  ok("p81: default yank/toggle/inspect keymaps are bound",
+    maps["y"] and maps["Y"] and maps["gy"] and maps["J"], vim.inspect(vim.tbl_keys(maps)))
+
+  -- ── JSON layout toggle ─────────────────────────────────────────
+  ok("p81: toggle_view switches to JSON", v:toggle_view() == true and v:is_json() == true)
+  local jlines = vim.api.nvim_buf_get_lines(v:buf(), 0, -1, false)
+  ok("p81: JSON layout decodes back to the rows",
+    #vim.json.decode(table.concat(jlines, "\n")) == 3, vim.inspect(jlines[1]))
+  ok("p81: the winbar header is cleared in JSON mode",
+    vim.api.nvim_get_option_value("winbar", { win = win, scope = "local" }) == "",
+    vim.inspect(vim.api.nvim_get_option_value("winbar", { win = win, scope = "local" })))
+  v:toggle_view()
+  ok("p81: toggling back restores the table header",
+    vim.api.nvim_get_option_value("winbar", { win = win, scope = "local" }):find("id", 1, true) ~= nil)
+
+  -- ── non-row results are explicit states ────────────────────────
+  v:set_model(grid.model({ verb = "update", affected = 7 }))
+  ok("p81: a write result renders its summary",
+    vim.api.nvim_buf_get_lines(v:buf(), 0, -1, false)[1] == "UPDATE — 7 row(s) affected",
+    vim.inspect(vim.api.nvim_buf_get_lines(v:buf(), 0, -1, false)[1]))
+  ok("p81: there is no cell in a non-row result", v:cell() == nil)
+  v:set_model(m)
+
+  -- ── dispose gives everything back ──────────────────────────────
+  local buf_before = v:buf()
+  v:dispose()
+  ok("p81: dispose is marked", v:disposed() == true)
+  -- The window belongs to the CONSUMER. Deleting the view's own buffer
+  -- while the window still showed it used to take the window down too,
+  -- which would collapse a docked result split on every dispose.
+  ok("p81: dispose leaves the WINDOW alive", vim.api.nvim_win_is_valid(win))
+  ok("p81: dispose puts the window's prior buffer back",
+    vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == prior_buf,
+    vim.api.nvim_win_is_valid(win) and tostring(vim.api.nvim_win_get_buf(win)) or "win gone")
+  ok("p81: dispose restores the PRE-EXISTING winbar",
+    vim.api.nvim_get_option_value("winbar", { win = win, scope = "local" }) == "PRE-EXISTING",
+    vim.inspect(vim.api.nvim_get_option_value("winbar", { win = win, scope = "local" })))
+  ok("p81: dispose deletes the view's own buffer",
+    not vim.api.nvim_buf_is_valid(buf_before))
+  local ok_twice = pcall(function() v:dispose() end)
+  ok("p81: dispose is idempotent", ok_twice)
+
+  -- ── a view must NOT clobber a winbar someone else took over ────
+  vim.cmd("new")
+  local win2 = vim.api.nvim_get_current_win()
+  vim.api.nvim_set_option_value("winbar", "ORIGINAL", { win = win2, scope = "local" })
+  local v2 = grid.attach(grid.model({ columns = { "a" }, rows = { { 1 } } }), { win = win2 })
+  vim.api.nvim_set_option_value("winbar", "SOMEONE-ELSE", { win = win2, scope = "local" })
+  v2:dispose()
+  -- This also pins a measured Neovim behaviour: swapping a window's
+  -- buffer restores the window-local options remembered for THAT
+  -- buffer, so dispose's buffer restore would silently reinstate the
+  -- pre-attach winbar unless the ownership decision is applied AFTER
+  -- the swap. Without that ordering this assertion reads "ORIGINAL".
+  ok("p81: dispose leaves a winbar taken over by someone else alone",
+    vim.api.nvim_get_option_value("winbar", { win = win2, scope = "local" }) == "SOMEONE-ELSE",
+    vim.inspect(vim.api.nvim_get_option_value("winbar", { win = win2, scope = "local" })))
+  pcall(vim.api.nvim_win_close, win2, true)
+
+  -- ── header = "line" mode (what a headless consumer uses) ───────
+  vim.cmd("new")
+  local win3 = vim.api.nvim_get_current_win()
+  local v3 = grid.attach(m, { win = win3, header = "line" })
+  local l3 = vim.api.nvim_buf_get_lines(v3:buf(), 0, -1, false)
+  ok("p81: header = 'line' puts the header in buffer line 1",
+    l3[1]:match("^id") ~= nil and #l3 == 4, vim.inspect(l3))
+  ok("p81: header = 'line' does not touch the winbar",
+    vim.api.nvim_get_option_value("winbar", { win = win3, scope = "local" }) == "")
+  vim.api.nvim_win_set_cursor(win3, { 2, 0 })
+  ok("p81: row offset accounts for the header line", v3:cell().row == 1, vim.inspect(v3:cell()))
+  vim.api.nvim_win_set_cursor(win3, { 1, 0 })
+  ok("p81: the header line itself is not a cell", v3:cell() == nil, vim.inspect(v3:cell()))
+  v3:dispose()
+  pcall(vim.api.nvim_win_close, win3, true)
+
+  -- ── two views over one model stay isolated ─────────────────────
+  vim.cmd("new")
+  local wa = vim.api.nvim_get_current_win()
+  vim.cmd("new")
+  local wbn = vim.api.nvim_get_current_win()
+  local va = grid.attach(m, { win = wa })
+  local vb = grid.attach(m, { win = wbn })
+  ok("p81: two views over one model own different buffers", va:buf() ~= vb:buf())
+  va:dispose()
+  ok("p81: disposing one view leaves the other alive",
+    not vb:disposed() and vim.api.nvim_buf_is_valid(vb:buf()))
+  vb:dispose()
+  pcall(vim.api.nvim_win_close, wa, true)
+  pcall(vim.api.nvim_win_close, wbn, true)
+  pcall(vim.api.nvim_win_close, win, true)
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

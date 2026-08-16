@@ -14,11 +14,21 @@
 ---@module 'auto-core.ui.grid'
 
 local model = require("auto-core.ui.grid.model")
+local view = require("auto-core.ui.grid.view")
 
 local M = {}
 
 ---model builds a grid data model. See `auto-core.ui.grid.model`.
 M.model = model.new
+
+---attach binds a model to a window. See `auto-core.ui.grid.view`.
+M.attach = view.attach
+
+-- Pure helpers from the view half, exposed for testing and for
+-- consumers rendering a header somewhere the view does not own.
+M.render_header     = view.render_header
+M.clip_header       = view.clip_header
+M.escape_statusline = view.escape_statusline
 
 ---NULL is the sentinel for a missing value when `vim.NIL` is awkward.
 M.NULL = model.NULL
