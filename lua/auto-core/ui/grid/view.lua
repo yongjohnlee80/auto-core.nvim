@@ -171,6 +171,9 @@ function M.attach(model, opts)
   self._prior_cursorline = vim.api.nvim_get_option_value("cursorline", { win = self._win, scope = "local" })
 
   vim.api.nvim_win_set_buf(self._win, self._buf)
+  -- Remember what we WROTE, not just what was there: dispose restores an
+  -- option only while the window still carries this view's value.
+  self._owned_wrap, self._owned_cursorline = false, false
   vim.api.nvim_set_option_value("wrap", false, { win = self._win, scope = "local" })
   vim.api.nvim_set_option_value("cursorline", false, { win = self._win, scope = "local" })
 
@@ -412,26 +415,47 @@ function View:dispose()
     -- to leave a third party's value alone. So: read first, swap, then
     -- write the intended value explicitly in BOTH branches. Nothing
     -- here may rely on an option surviving the swap.
-    local now = vim.api.nvim_get_option_value("winbar", { win = self._win, scope = "local" })
-    local ours = (now == self._owned_winbar)
+    -- Ownership is per-OPTION and per-BUFFER, decided before anything is
+    -- touched. If another component has taken the window over, disposal
+    -- must remove this view's own resources WITHOUT mutating whatever
+    -- replaced it — a window we no longer own is not ours to restore.
+    local owns_buf = vim.api.nvim_win_get_buf(self._win) == self._buf
+    local function get(opt)
+      return vim.api.nvim_get_option_value(opt, { win = self._win, scope = "local" })
+    end
 
-    -- Put a buffer back BEFORE deleting ours, and only if the window is
-    -- still showing ours (someone may have swapped it since). A scratch
-    -- stands in when the original is gone — the window survives either
-    -- way, which is the invariant the consumer depends on.
-    if vim.api.nvim_win_get_buf(self._win) == self._buf then
+    if owns_buf then
+      -- Read every option BEFORE the swap: swapping a window's buffer
+      -- also restores the window-local options Neovim remembers for THAT
+      -- buffer, so anything not written explicitly afterwards is decided
+      -- by that implicit restore rather than by us.
+      local observed = { winbar = get("winbar"), wrap = get("wrap"),
+        cursorline = get("cursorline") }
+      local prior = { winbar = self._prior_winbar, wrap = self._prior_wrap,
+        cursorline = self._prior_cursorline }
+      local written = { winbar = self._owned_winbar, wrap = self._owned_wrap,
+        cursorline = self._owned_cursorline }
+
       local restore = self._prior_buf
       if not (restore and vim.api.nvim_buf_is_valid(restore)) then
         restore = vim.api.nvim_create_buf(false, true)
       end
       pcall(vim.api.nvim_win_set_buf, self._win, restore)
-    end
 
-    vim.api.nvim_set_option_value("winbar", ours and self._prior_winbar or now,
-      { win = self._win, scope = "local" })
-    vim.api.nvim_set_option_value("wrap", self._prior_wrap, { win = self._win, scope = "local" })
-    vim.api.nvim_set_option_value("cursorline", self._prior_cursorline,
-      { win = self._win, scope = "local" })
+      -- Per option: give back OUR value only where the window still
+      -- carried what this view wrote. Where a third party changed it,
+      -- write their value back — the buffer swap above would otherwise
+      -- silently discard it. Either way the net effect on someone
+      -- else's choice is zero.
+      for _, opt in ipairs({ "winbar", "wrap", "cursorline" }) do
+        local ours = observed[opt] == written[opt]
+        vim.api.nvim_set_option_value(opt, ours and prior[opt] or observed[opt],
+          { win = self._win, scope = "local" })
+      end
+    end
+    -- If the buffer is no longer ours the window belongs to something
+    -- else entirely: remove this view's private resources and touch
+    -- nothing in the window (R4-4).
   end
   if vim.api.nvim_buf_is_valid(self._buf) then
     pcall(vim.api.nvim_buf_clear_namespace, self._buf, self._ns, 0, -1)

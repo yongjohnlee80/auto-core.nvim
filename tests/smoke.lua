@@ -10595,6 +10595,39 @@ print("\n[80] ADR-0058 — ui.grid.model (pure tabular data rules)")
     grid.model({ columns = { "a" }, rows = { { 1 } }, verb = "select", more = true })
       :summary():find("more truncated", 1, true) ~= nil)
 
+  -- ── column names: raw identity vs display label (R4-3) ─────
+  -- A quoted database column may legally contain a newline or a tab.
+  -- Rendering that raw breaks the buffer write (a line may not contain a
+  -- newline) and leaves a tab whose width depends on where it lands.
+  local weird = grid.model({
+    columns = { "has\nnewline", "has\ttab", "\255\254bin" },
+    rows = { { 1, 2, 3 } },
+  })
+  local wc = weird:columns()
+  ok("p80: column keeps its RAW name for identity",
+    wc[1].name == "has\nnewline", vim.inspect(wc[1].name))
+  ok("p80: column gains a single-line display LABEL",
+    wc[1].label == "has␤newline" and not wc[1].label:find("\n"), vim.inspect(wc[1].label))
+  ok("p80: a tab in a column name is expanded in the label",
+    wc[2].label == "has    tab", vim.inspect(wc[2].label))
+  ok("p80: a non-UTF-8 column name renders as hex",
+    wc[3].label == "0xfffe62696e", vim.inspect(wc[3].label))
+  local hline_weird = weird:header_line(weird:widths())
+  ok("p80: the rendered header has no control characters",
+    not hline_weird:find("[\n\r\t]"), vim.inspect(hline_weird))
+  -- The rule that makes character-by-character width measurement exact.
+  ok("p80: the header is safe to write as a buffer line",
+    pcall(vim.api.nvim_buf_set_lines, vim.api.nvim_create_buf(false, true), 0, -1, false,
+      { hline_weird }))
+  ok("p80: widths measure the LABEL, not the raw name",
+    weird:widths()[1] == vim.fn.strdisplaywidth("has␤newline"), vim.inspect(weird:widths()))
+  ok("p80: CSV header still carries the RAW name",
+    weird:csv_rows({}):find('"has\nnewline"', 1, true) ~= nil,
+    vim.inspect(weird:csv_rows({})))
+  ok("p80: json_all still carries the RAW name",
+    vim.json.decode(weird:json_all()).columns[1].name == "has\nnewline",
+    vim.inspect(vim.json.decode(weird:json_all()).columns[1]))
+
   -- ── row() returns raw values, and the model stays immutable ─
   local r4 = m:row(4)
   ok("p80: row() returns RAW values (real newline, not ␤)",
@@ -10609,37 +10642,46 @@ end)()
 print("\n[81] ADR-0058 — ui.grid.attach (window ownership, cell cursor, header)")
 ;(function()
   local grid = require("auto-core.ui").grid
+  -- clip_header/escape_statusline are INTERNAL: publishing them beside
+  -- render_header invites the wrong composition (R4-3), so the public
+  -- facade exposes only render_header and tests reach the primitives
+  -- through the view module.
+  local grid_view = require("auto-core.ui.grid.view")
+  ok("p81: only render_header is public (clip/escape are internal)",
+    type(grid.render_header) == "function" and grid.clip_header == nil
+    and grid.escape_statusline == nil,
+    vim.inspect({ clip = grid.clip_header, escape = grid.escape_statusline }))
   ok("p81: ui.grid.attach is exposed", type(grid.attach) == "function", type(grid.attach))
 
   -- ── statusline escaping (winbar is evaluated AS a statusline) ──
   -- Measured: a literal "100%s done" renders as "100 done" — the %s is
   -- consumed as an item. Column names must be escaped or a header like
   -- "pct%" silently mangles the whole bar.
-  ok("p81: escape_statusline doubles %", grid.escape_statusline("100%s done") == "100%%s done",
-    grid.escape_statusline("100%s done"))
+  ok("p81: escape_statusline doubles %", grid_view.escape_statusline("100%s done") == "100%%s done",
+    grid_view.escape_statusline("100%s done"))
   ok("p81: escaped header renders literally", vim.api.nvim_eval_statusline(
-    grid.escape_statusline("100%s done"), {}).str == "100%s done",
-    vim.api.nvim_eval_statusline(grid.escape_statusline("100%s done"), {}).str)
+    grid_view.escape_statusline("100%s done"), {}).str == "100%s done",
+    vim.api.nvim_eval_statusline(grid_view.escape_statusline("100%s done"), {}).str)
   ok("p81: UNescaped text really is eaten (the bug this prevents)",
     vim.api.nvim_eval_statusline("100%s done", {}).str == "100 done",
     vim.api.nvim_eval_statusline("100%s done", {}).str)
   ok("p81: escaping leaves ordinary text alone",
-    grid.escape_statusline("id  title") == "id  title")
+    grid_view.escape_statusline("id  title") == "id  title")
 
   -- ── header clipping (the horizontal-scroll half of R2-3) ───────
   -- WinScrolled cannot be observed headlessly (no UI, no redraw), so
   -- the pure computation is what the suite pins.
-  ok("p81: clip_header at leftcol 0 is unchanged", grid.clip_header("id  title", 0) == "id  title")
-  ok("p81: clip_header shifts by leftcol", grid.clip_header("id  title", 4) == "title",
-    vim.inspect(grid.clip_header("id  title", 4)))
-  ok("p81: clip_header past the end is empty", grid.clip_header("id", 99) == "")
+  ok("p81: clip_header at leftcol 0 is unchanged", grid_view.clip_header("id  title", 0) == "id  title")
+  ok("p81: clip_header shifts by leftcol", grid_view.clip_header("id  title", 4) == "title",
+    vim.inspect(grid_view.clip_header("id  title", 4)))
+  ok("p81: clip_header past the end is empty", grid_view.clip_header("id", 99) == "")
   ok("p81: clip_header keeps multibyte glyphs whole",
-    grid.clip_header("日本語x", 2) == "本語x", vim.inspect(grid.clip_header("日本語x", 2)))
+    grid_view.clip_header("日本語x", 2) == "本語x", vim.inspect(grid_view.clip_header("日本語x", 2)))
   ok("p81: a wide glyph straddling the cut becomes a space (no drift)",
-    grid.clip_header("日本語x", 1) == " 本語x", vim.inspect(grid.clip_header("日本語x", 1)))
+    grid_view.clip_header("日本語x", 1) == " 本語x", vim.inspect(grid_view.clip_header("日本語x", 1)))
   ok("p81: clipped header keeps its display width",
-    vim.fn.strdisplaywidth(grid.clip_header("日本語x", 1)) == 6,
-    vim.fn.strdisplaywidth(grid.clip_header("日本語x", 1)))
+    vim.fn.strdisplaywidth(grid_view.clip_header("日本語x", 1)) == 6,
+    vim.fn.strdisplaywidth(grid_view.clip_header("日本語x", 1)))
 
   -- ── ORDER: clip the RAW header, escape the RESULT ──────────────
   -- Escaping first adds a cell for every literal %, so clipping the
@@ -10661,8 +10703,8 @@ print("\n[81] ADR-0058 — ui.grid.attach (window ownership, cell cursor, header
   -- The wrong order, kept as an executable record of the bug: clipping
   -- the escaped string by 2 cuts the %% pair in half.
   ok("p81: escape-then-clip really does corrupt (the bug this prevents)",
-    rendered(grid.clip_header(grid.escape_statusline(raw_pct), 2)) ~= "b  c",
-    vim.inspect(rendered(grid.clip_header(grid.escape_statusline(raw_pct), 2))))
+    rendered(grid_view.clip_header(grid_view.escape_statusline(raw_pct), 2)) ~= "b  c",
+    vim.inspect(rendered(grid_view.clip_header(grid_view.escape_statusline(raw_pct), 2))))
 
   -- ── attach / render / dispose against a real window ────────────
   vim.cmd("new")
@@ -10787,6 +10829,43 @@ print("\n[81] ADR-0058 — ui.grid.attach (window ownership, cell cursor, header
     vim.inspect(vim.api.nvim_get_option_value("winbar", { win = win2, scope = "local" })))
   pcall(vim.api.nvim_win_close, win2, true)
 
+  -- ── dispose must not mutate a window it no longer owns (R4-4) ──
+  -- Ownership is per option AND per buffer: the guard that protects the
+  -- replacement buffer has to protect wrap/cursorline too, or disposal
+  -- reaches into someone else's window and changes their display.
+  vim.cmd("new")
+  local win4 = vim.api.nvim_get_current_win()
+  vim.api.nvim_set_option_value("wrap", true, { win = win4, scope = "local" })
+  vim.api.nvim_set_option_value("cursorline", true, { win = win4, scope = "local" })
+  local v4 = grid.attach(grid.model({ columns = { "a" }, rows = { { 1 } } }), { win = win4 })
+  -- A third party takes the window over completely.
+  local foreign = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_win_set_buf(win4, foreign)
+  vim.api.nvim_set_option_value("wrap", false, { win = win4, scope = "local" })
+  vim.api.nvim_set_option_value("cursorline", false, { win = win4, scope = "local" })
+  v4:dispose()
+  ok("p81: dispose does not restore wrap into a window it lost",
+    vim.api.nvim_get_option_value("wrap", { win = win4, scope = "local" }) == false,
+    vim.inspect(vim.api.nvim_get_option_value("wrap", { win = win4, scope = "local" })))
+  ok("p81: dispose does not restore cursorline into a window it lost",
+    vim.api.nvim_get_option_value("cursorline", { win = win4, scope = "local" }) == false)
+  ok("p81: dispose leaves the third party's buffer in place",
+    vim.api.nvim_win_get_buf(win4) == foreign)
+  pcall(vim.api.nvim_win_close, win4, true)
+
+  -- Still-owned window: our own values ARE given back.
+  vim.cmd("new")
+  local win5 = vim.api.nvim_get_current_win()
+  vim.api.nvim_set_option_value("wrap", true, { win = win5, scope = "local" })
+  local v5 = grid.attach(grid.model({ columns = { "a" }, rows = { { 1 } } }), { win = win5 })
+  ok("p81: attach turns wrap off while it owns the window",
+    vim.api.nvim_get_option_value("wrap", { win = win5, scope = "local" }) == false)
+  v5:dispose()
+  ok("p81: dispose restores wrap when it still owned the window",
+    vim.api.nvim_get_option_value("wrap", { win = win5, scope = "local" }) == true,
+    vim.inspect(vim.api.nvim_get_option_value("wrap", { win = win5, scope = "local" })))
+  pcall(vim.api.nvim_win_close, win5, true)
+
   -- ── header = "line" mode (what a headless consumer uses) ───────
   vim.cmd("new")
   local win3 = vim.api.nvim_get_current_win()
@@ -10818,6 +10897,144 @@ print("\n[81] ADR-0058 — ui.grid.attach (window ownership, cell cursor, header
   pcall(vim.api.nvim_win_close, wa, true)
   pcall(vim.api.nvim_win_close, wbn, true)
   pcall(vim.api.nvim_win_close, win, true)
+end)()
+
+print("\n[82] ADR-0058 — rpc.frame (incremental msgpack framing + budgets)")
+;(function()
+  -- INTERNAL module: the auto-core.rpc facade is not published yet, and
+  -- this is the security boundary in front of it, so it is tested
+  -- directly rather than through a surface that does not exist.
+  local frame = require("auto-core.rpc.frame")
+  local enc = vim.mpack.encode
+
+  -- ── channel byte convention is LOSSLESS ────────────────────────
+  -- :h channel-lines — the list splits on a real 0x0A and a "\n" INSIDE
+  -- an element is a 0x00. Reversible, which is what makes binary
+  -- msgpack safe over a non-RPC channel.
+  ok("p82: channel_bytes maps NUL<->NL back to the exact bytes",
+    frame.channel_bytes({ "a\nb", "c\nd" }) == "a\0b\nc\0d",
+    vim.inspect(frame.channel_bytes({ "a\nb", "c\nd" })))
+  ok("p82: a chunk that is all NULs decodes to all NULs",
+    frame.channel_bytes({ "\n\n" }) == "\0\0",
+    vim.inspect(frame.channel_bytes({ "\n\n" })))
+  ok("p82: an empty element is an empty line, not a lost byte",
+    frame.channel_bytes({ "a", "", "b" }) == "a\n\nb",
+    vim.inspect(frame.channel_bytes({ "a", "", "b" })))
+
+  -- ── whole frames ───────────────────────────────────────────────
+  local d = frame.decoder()
+  local req = enc({ 0, 1, "sys.hello", {} })
+  d:feed(req)
+  local status, value = d:next()
+  ok("p82: a complete frame decodes", status == "ok", status .. " " .. vim.inspect(value))
+  ok("p82: the decoded value is the request", value[1] == 0 and value[3] == "sys.hello",
+    vim.inspect(value))
+  ok("p82: an empty decoder is incomplete, not an error",
+    (frame.decoder():next()) == "incomplete")
+
+  -- ── two frames in one chunk, and a frame split across chunks ────
+  local d2 = frame.decoder()
+  d2:feed(enc({ 1, 1, vim.NIL, "first" }) .. enc({ 1, 2, vim.NIL, "second" }))
+  local s1, v1 = d2:next()
+  local s2, v2 = d2:next()
+  ok("p82: two frames in one chunk decode in order",
+    s1 == "ok" and s2 == "ok" and v1[4] == "first" and v2[4] == "second",
+    vim.inspect({ v1, v2 }))
+  ok("p82: nothing is left over", (d2:next()) == "incomplete" and d2:pending() == 0,
+    d2:pending())
+
+  -- The invariant the single-pass design exists for: a peer dripping a
+  -- frame one byte at a time must not make the parser rescan from the
+  -- start on every byte.
+  local payload = enc({ 1, 7, vim.NIL, { a = "alpha", b = { 1, 2, 3 } } })
+  local d3 = frame.decoder()
+  local completed_at, saw_error = nil, nil
+  for i = 1, #payload do
+    d3:feed(payload:sub(i, i))
+    local st, val = d3:next()
+    if st == "error" then saw_error = val break end
+    if st == "ok" then completed_at = i; ok("p82: a byte-at-a-time frame decodes",
+      val[2] == 7 and val[4].a == "alpha", vim.inspect(val)) end
+  end
+  ok("p82: it completed on the LAST byte, not before", completed_at == #payload,
+    tostring(completed_at) .. "/" .. #payload .. " err=" .. tostring(saw_error))
+
+  -- ── budgets refuse, they never truncate ────────────────────────
+  -- The measured attack: five bytes declaring 512 MiB. vim.mpack.Unpacker
+  -- allocates that on the length token (VmSize +512 MB, RSS flat); the
+  -- scanner refuses it without allocating anything.
+  local function be32(n)
+    return string.char(math.floor(n / 0x1000000) % 256, math.floor(n / 0x10000) % 256,
+      math.floor(n / 0x100) % 256, n % 256)
+  end
+  local huge = string.char(0xdb) .. be32(512 * 1024 * 1024)
+  local dh = frame.decoder()
+  dh:feed(huge)
+  local hs, herr = dh:next()
+  ok("p82: a 5-byte header declaring 512 MiB is REFUSED", hs == "error", hs .. " " .. tostring(herr))
+  ok("p82: the refusal names max_string", tostring(herr):find("max_string", 1, true) ~= nil, herr)
+  ok("p82: the decoder stays failed (the epoch is over)", (dh:next()) == "error")
+
+  local dc = frame.decoder()
+  dc:feed(string.char(0xdd) .. be32(0xFFFFFFFF))
+  local cs, cerr = dc:next()
+  ok("p82: an array declaring 4G elements is REFUSED", cs == "error", cs .. " " .. tostring(cerr))
+  ok("p82: the refusal names max_tokens", tostring(cerr):find("max_tokens", 1, true) ~= nil, cerr)
+
+  local dd = frame.decoder({ max_depth = 4 })
+  dd:feed(string.rep(string.char(0x91), 40) .. string.char(0x01))
+  local ds, derr = dd:next()
+  ok("p82: nesting past max_depth is REFUSED", ds == "error", ds .. " " .. tostring(derr))
+  ok("p82: the refusal names max_depth", tostring(derr):find("max_depth", 1, true) ~= nil, derr)
+
+  local df = frame.decoder({ max_frame = 16 })
+  df:feed(enc({ string.rep("x", 200) }))
+  local fs, ferr = df:next()
+  ok("p82: a frame over max_frame is REFUSED", fs == "error", fs .. " " .. tostring(ferr))
+
+  -- An endless incomplete frame is the reason max_buffer exists: without
+  -- it "incomplete" is an unbounded invitation.
+  local db = frame.decoder({ max_buffer = 64 })
+  db:feed(string.char(0xdb) .. be32(1024))   -- legitimate header, payload dribbles
+  local fed_ok, feed_err = true, nil
+  for _ = 1, 20 do
+    fed_ok, feed_err = db:feed(string.rep("x", 8))
+    if not fed_ok then break end
+  end
+  ok("p82: an endless incomplete frame trips max_buffer", fed_ok == false, tostring(feed_err))
+  ok("p82: the refusal names max_buffer",
+    tostring(feed_err):find("max_buffer", 1, true) ~= nil, feed_err)
+
+  ok("p82: 0xc1 (the never-used type byte) is refused",
+    (function() local x = frame.decoder(); x:feed(string.char(0xc1)); return (x:next()) end)() == "error")
+
+  -- ── every msgpack type is walked correctly ─────────────────────
+  -- Round-trip through our framing what vim.mpack itself produces, so a
+  -- type the scanner mis-sizes shows up as a wrong boundary rather than
+  -- silently shifting the stream.
+  local samples = {
+    0, 1, -1, 127, -32, 255, 65535, 4294967295, -2147483648,
+    1.5, -0.25, true, false, vim.NIL,
+    "", "short", string.rep("m", 40), string.rep("L", 70000),
+    {}, { 1, 2, 3 }, { { { 1 } } },
+    { a = 1 }, { a = { b = { c = "deep" } } },
+    { 1, "two", { three = 3 }, vim.NIL },
+  }
+  local all_ok, bad = true, nil
+  for i, sample in ipairs(samples) do
+    local dz = frame.decoder()
+    dz:feed(enc(sample) .. enc("SENTINEL"))
+    local st = dz:next()
+    local st2, v2b = dz:next()
+    -- The sentinel proves the first frame's boundary was exact: a
+    -- mis-sized token would eat into it or leave bytes behind.
+    if st ~= "ok" or st2 ~= "ok" or v2b ~= "SENTINEL" then
+      all_ok, bad = false, string.format("sample %d (%s): %s / %s %s",
+        i, type(sample), st, st2, vim.inspect(v2b))
+      break
+    end
+  end
+  ok("p82: every msgpack type yields an exact frame boundary", all_ok, bad)
 end)()
 
 -- ─────────────────────── summary ─────────────────────────

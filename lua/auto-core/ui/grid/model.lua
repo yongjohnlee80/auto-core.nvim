@@ -42,8 +42,9 @@ local DEFAULT_NULL_TEXT = "NULL"
 local NEWLINE_GLYPH = "␤"
 
 ---@class AutoCoreGridColumn
----@field name string        -- as the source named it (may repeat)
+---@field name string        -- RAW, as the source named it (may repeat)
 ---@field key string         -- unique, for object serialization
+---@field label string       -- single-line DISPLAY form of `name`
 ---@field type string|nil    -- optional type hint from the source
 
 ---@class AutoCoreGridCell
@@ -168,9 +169,19 @@ end
 ---UNIQUE key: the first `id` keeps `id`, the next becomes `id#2`. A
 ---name that would collide with a generated key is pushed further, so
 ---the mapping is always one-to-one.
+---
+---It also derives a **display label**, exactly as cells do. A quoted
+---database column name may legally contain a newline, a tab or
+---non-UTF-8 bytes; rendering that raw would break the buffer write
+---(a line may not contain a newline) or leave a tab whose width depends
+---on where it lands. `name` therefore stays RAW for CSV/JSON identity,
+---while `label` is the single-line form used for widths and headers —
+---which also guarantees that a rendered header contains no control
+---characters, so its width can be measured character by character.
 ---@param columns table
+---@param null_text string
 ---@return AutoCoreGridColumn[]
-local function normalize_columns(columns)
+local function normalize_columns(columns, null_text)
   local out, taken = {}, {}
   for i, c in ipairs(columns or {}) do
     local name, ctype
@@ -186,7 +197,7 @@ local function normalize_columns(columns)
       key = name .. "#" .. n
     end
     taken[key] = true
-    out[i] = { name = name, key = key, type = ctype }
+    out[i] = { name = name, key = key, label = M.display_text(name, null_text), type = ctype }
   end
   return out
 end
@@ -208,7 +219,7 @@ function M.new(opts)
   opts = opts or {}
   local self = setmetatable({}, Model)
   self._null = opts.null or DEFAULT_NULL_TEXT
-  self._columns = normalize_columns(opts.columns)
+  self._columns = normalize_columns(opts.columns, self._null)
   self._rows = opts.rows or {}
   self._verb = opts.verb
   self._affected = opts.affected
@@ -241,7 +252,7 @@ function Model:is_empty() return #self._rows == 0 end
 function Model:columns()
   local out = {}
   for i, c in ipairs(self._columns) do
-    out[i] = { name = c.name, key = c.key, type = c.type }
+    out[i] = { name = c.name, key = c.key, label = c.label, type = c.type }
   end
   return out
 end
@@ -285,7 +296,7 @@ function Model:widths(opts)
   local sample = opts.sample or 200
   local w = {}
   for i, c in ipairs(self._columns) do
-    w[i] = vim.fn.strdisplaywidth(c.name)
+    w[i] = vim.fn.strdisplaywidth(c.label)
   end
   local rows = math.min(#self._rows, sample)
   for r = 1, rows do
@@ -379,7 +390,7 @@ end
 ---@return string line, table ranges
 function Model:header_line(widths)
   local texts = {}
-  for c, column in ipairs(self._columns) do texts[c] = column.name end
+  for c, column in ipairs(self._columns) do texts[c] = column.label end
   return render_line(texts, widths)
 end
 

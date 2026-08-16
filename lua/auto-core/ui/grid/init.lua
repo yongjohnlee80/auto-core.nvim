@@ -24,11 +24,16 @@ M.model = model.new
 ---attach binds a model to a window. See `auto-core.ui.grid.view`.
 M.attach = view.attach
 
--- Pure helpers from the view half, exposed for testing and for
--- consumers rendering a header somewhere the view does not own.
-M.render_header     = view.render_header
-M.clip_header       = view.clip_header
-M.escape_statusline = view.escape_statusline
+---render_header turns a raw header into a winbar value, clipping by
+---`leftcol` FIRST and escaping second.
+---
+---This is the only supported header composition. `clip_header` and
+---`escape_statusline` stay on `auto-core.ui.grid.view` (internal, and
+---reachable for tests) and are deliberately NOT re-exported here:
+---published side by side with this one they invite the wrong order,
+---which shifts every label after a literal `%` and can leave a live
+---statusline item where a `%%` pair was cut in half.
+M.render_header = view.render_header
 
 ---NULL is the sentinel for a missing value when `vim.NIL` is awkward.
 M.NULL = model.NULL

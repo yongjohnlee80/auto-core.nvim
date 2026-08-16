@@ -7,7 +7,7 @@
 --
 -- Run under a pty:
 --   script -qec "nvim --clean -u tests/ui/grid_scroll.lua" /dev/null
--- and read tests/ui/.grid_scroll.out. `make test-ui` wraps both.
+-- and read tests/ui/.grid_scroll.out. tests/ui/run.sh wraps both.
 
 local plugin_root = vim.fn.fnamemodify(
   vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p"), ":h:h:h")
@@ -33,6 +33,9 @@ local function finish()
 end
 
 local grid = require("auto-core.ui").grid
+-- clip_header is internal (only render_header is public); tests reach
+-- it through the view module directly.
+local grid_view = require("auto-core.ui.grid.view")
 
 -- Wide model: enough columns that the header must scroll.
 local cols, row = {}, {}
@@ -105,7 +108,7 @@ vim.defer_fn(function()
     -- viewport shows.
     local cur = view:cell()
     local col_name = model:columns()[cur.col].name
-    local clipped = grid.clip_header(raw, leftcol)
+    local clipped = grid_view.clip_header(raw, leftcol)
     -- wincol() reports the CURRENT window, which need not be the one
     -- under test — the same trap as `normal!` above.
     local screen_col = vim.api.nvim_win_call(win, vim.fn.wincol) -- 1-based; --clean has no gutter
