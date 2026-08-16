@@ -40,6 +40,7 @@ in the auto-agents kb for the full eleven-rule contract.
 | Phase 6 — `ui.float` (help_overlay/confirm) + `ui.highlights` | `v0.0.9` |
 | Phase 7 — `log` + `health` (`:checkhealth auto-core`) | `v0.0.10` |
 | **v0.1.0 bundle** — `lsp.reset` (tech-stack-aware) + `ui.float.multi` (gitsgraph-shaped multi-pane) + `git.graph` (multi-repo discovery + commit caches) + `git.fetch` + `git.pull` + `git.worktree.destroy` (consultative round-trip) + `files` (global file-filter prefs) + `state.namespace` `VimLeavePre` flush + `doc:pinned`/`doc:unpinned` topics | **`v0.1.0` ← here** |
+| `ui.grid` — reusable tabular result model + window-owning view (ADR 0058, autodb M7) | `v0.1.x` (additive) |
 | Family cleanup + post-1.0 prep | `v0.X.0` minors (additive only) |
 | API freeze | `v1.0.0` |
 
@@ -97,6 +98,62 @@ local s = core.state.namespace("auto-finder", {
 s:set("panel.user_width", 42)  -- publishes state.auto-finder:panel.user_width:changed
 local w = s:watch("panel.user_width", function(new, old) ... end)
 ```
+
+## `ui.grid` — tabular results (ADR 0058)
+
+A reusable result grid: SQL rows today, any tabular data tomorrow. It is
+split into a **pure model** and a **window-owning view**, so every data
+rule is testable without a window, a server or a database.
+
+```lua
+local grid = require("auto-core").ui.grid
+
+local model = grid.model({
+  columns = { { name = "id", type = "integer" }, "title" },
+  rows    = { { 1, "alpha" }, { 2, vim.NIL } },   -- RAW values
+})
+
+model:cell(r, c)   --> { value = <raw>, text = <display>, null, binary }
+model:row(r)       --> raw values
+model:csv(r)       --> one RFC-4180 record
+model:json(r)      --> one object, duplicate column names disambiguated
+model:json_all()   --> { columns = [...], rows = [...] }, positional
+
+local view = grid.attach(model, { win = winid })   -- header = "line" for headless
+view:cell()  view:move_cell(dr, dc)  view:yank_row("csv"|"json")
+view:yank_cell()  view:toggle_view()  view:set_model(m)  view:dispose()
+```
+
+The model keeps **raw values and display text separately**, because they
+are not interchangeable: a yank must reproduce what the source returned,
+embedded newlines and all, while the grid on screen stays one line per
+row. Keeping only the rendered string loses data the moment a value
+contains a comma, a quote or a newline.
+
+| Case | Displayed | CSV | JSON |
+|---|---|---|---|
+| `vim.NIL` / missing | the null text (default `NULL`) | **empty field** | `null` |
+| non-UTF-8 bytes | `0x…` hex | `0x…` | `0x…` (never invalid UTF-8) |
+| embedded newline | `␤` (row stays one line) | real newline, quoted | real newline |
+| duplicate column names | both shown | both | `name`, `name#2` in object form; positional in `json_all` |
+
+Widths and truncation are measured in **display cells** via
+`strdisplaywidth`, never bytes, so CJK and other wide glyphs align.
+
+The view derives the current cell from the **real cursor** instead of
+trapping motions, so every native motion, search and count keeps working
+while selection stays cell-wise. It owns its own buffer, restores the
+window's prior buffer and options on `dispose`, and freezes the header in
+the window-local `winbar` — clipped to the window's `leftcol` and
+refreshed on `WinScrolled`, since a winbar does not scroll with the text.
+
+> Header rendering has one supported composition, `grid.render_header(raw,
+> leftcol)`: **clip first, escape second.** A winbar is evaluated as a
+> statusline, and escaping before clipping adds a cell per literal `%`,
+> which shifts every label after it and can leave a live statusline item.
+
+`WinScrolled` does not fire in a headless Neovim, so that wiring is
+covered by `tests/ui/run.sh` (a real pty) rather than `tests/smoke.lua`.
 
 ## Logging — the family contract (ADR 0021 / v0.1.11+)
 
