@@ -11236,6 +11236,182 @@ print("\n[82] ADR-0058 — rpc.frame (incremental msgpack framing + budgets)")
   ok("p82: every msgpack type yields an exact frame boundary", all_ok, bad)
 end)()
 
+print("\n[83] ADR-0058 — auto-core.rpc (async msgpack-RPC client)")
+;(function()
+  local rpc = require("auto-core.rpc")
+
+  -- A real msgpack-RPC peer with no external dependency: Neovim's own
+  -- server. It speaks exactly the wire this client implements, so the
+  -- whole path — framing, ids, error slot, EOF — is exercised for real
+  -- rather than against a mock that agrees with us by construction.
+  local addr = vim.fn.serverstart("127.0.0.1:0")
+  ok("p83: a test peer is listening", type(addr) == "string" and addr ~= "", vim.inspect(addr))
+
+  local function wait_for(pred, ms)
+    return vim.wait(ms or 3000, pred, 10)
+  end
+
+  -- ── connect fails synchronously, never half-open ───────────────
+  local bad, berr = rpc.connect({})
+  ok("p83: connect refuses a missing address", bad == nil and berr ~= nil, tostring(berr))
+  local bad2, berr2 = rpc.connect({ addr = "127.0.0.1:1" })
+  ok("p83: connect fails synchronously on a dead port",
+    bad2 == nil and berr2 ~= nil, tostring(berr2))
+
+  local conn, cerr = rpc.connect({ addr = addr })
+  ok("p83: connect returns a live connection", conn ~= nil, tostring(cerr))
+
+  -- ── a request returns an id and fires exactly once ─────────────
+  local seen = {}
+  local id = conn:request("nvim_eval", { "1 + 1" }, {}, function(o)
+    seen[#seen + 1] = o
+  end)
+  ok("p83: request returns an integer id", type(id) == "number", vim.inspect(id))
+  ok("p83: it is charged against capacity while in flight", conn:in_flight() == 1)
+  wait_for(function() return #seen > 0 end)
+  ok("p83: the callback fired", #seen == 1, #seen)
+  ok("p83: status ok with the result", seen[1] and seen[1].status == "ok" and seen[1].value == 2,
+    vim.inspect(seen[1]))
+  ok("p83: the outcome carries its id", seen[1] and seen[1].id == id, vim.inspect(seen[1]))
+  ok("p83: the slot is released after settling", conn:in_flight() == 0, conn:in_flight())
+
+  -- Exactly once: give it room to fire again.
+  vim.wait(150)
+  ok("p83: it fires exactly once", #seen == 1, #seen)
+
+  -- ── the RAW error slot survives ────────────────────────────────
+  -- The whole reason this client exists: vim.rpcrequest flattens a
+  -- server error to "unknown error"; reading the slot keeps it.
+  local errs = {}
+  conn:request("nvim_eval", { "this is not valid vimscript(" }, {}, function(o)
+    errs[#errs + 1] = o
+  end)
+  wait_for(function() return #errs > 0 end)
+  ok("p83: an erroring call settles as status=error",
+    errs[1] and errs[1].status == "error", vim.inspect(errs[1]))
+  -- The error arrives as the server's own STRUCTURE — here nvim's
+  -- [type, message] array — not as a flattened string. That is the
+  -- difference this client exists for: vim.rpcrequest reduces the same
+  -- reply to "unknown error".
+  --
+  -- The side-by-side against vim.rpcrequest is NOT run here on purpose:
+  -- the peer is this very Neovim, and rpcrequest would block the event
+  -- loop that has to serve the request — an instant deadlock, and a
+  -- neat demonstration of the blocking behaviour being avoided. The
+  -- comparison was made against the real autodb daemon instead
+  -- (ADR-0058 §2, experiment E6).
+  ok("p83: the error slot is carried RAW, not flattened",
+    errs[1] and type(errs[1].error) == "table"
+    and vim.inspect(errs[1].error):find("E121", 1, true) ~= nil,
+    vim.inspect(errs[1] and errs[1].error))
+  ok("p83: the raw slot is structured, not a bare string",
+    errs[1] and type(errs[1].error) ~= "string", type(errs[1] and errs[1].error))
+
+  -- ── concurrency: many in flight, each settled once ─────────────
+  local many, fired = 20, {}
+  for i = 1, many do
+    conn:request("nvim_eval", { tostring(i) .. " * 10" }, {}, function(o)
+      fired[#fired + 1] = o
+    end)
+  end
+  wait_for(function() return #fired == many end)
+  ok("p83: every concurrent request settles", #fired == many, #fired .. "/" .. many)
+  local values, all_ok = {}, true
+  for _, o in ipairs(fired) do
+    if o.status ~= "ok" then all_ok = false end
+    values[o.value] = true
+  end
+  ok("p83: each reply is routed to its own callback",
+    all_ok and values[10] and values[200], vim.inspect(vim.tbl_count(values)))
+  ok("p83: capacity is fully released", conn:in_flight() == 0, conn:in_flight())
+
+  -- ── capacity refuses BEFORE admission ──────────────────────────
+  local small = rpc.connect({ addr = addr, capacity = 2 })
+  local refused_cb = false
+  small:request("nvim_eval", { "1" }, {}, function() end)
+  small:request("nvim_eval", { "2" }, {}, function() end)
+  local rid, rerr = small:request("nvim_eval", { "3" }, {}, function() refused_cb = true end)
+  ok("p83: capacity refusal returns nil + E_CAPACITY",
+    rid == nil and rerr == rpc.E_CAPACITY, tostring(rid) .. " " .. tostring(rerr))
+  vim.wait(300)
+  ok("p83: a refused request NEVER calls back", refused_cb == false)
+  small:close()
+
+  -- ── cancel is local, total and idempotent ──────────────────────
+  local cancelled = {}
+  local cid = conn:request("nvim_eval", { "1" }, {}, function(o) cancelled[#cancelled + 1] = o end)
+  local first = conn:cancel(cid)
+  local second = conn:cancel(cid)
+  ok("p83: cancel returns true once, then false", first == true and second == false)
+  ok("p83: it settles as abandoned",
+    cancelled[1] and cancelled[1].status == "abandoned"
+    and cancelled[1].code == rpc.E_ABANDONED, vim.inspect(cancelled[1]))
+  ok("p83: cancel of an unknown id is a no-op", conn:cancel(999999) == false)
+  -- The tombstone stays charged until the reply arrives: local
+  -- abandonment does not stop the server's work.
+  ok("p83: an abandoned request keeps its wire slot", conn:in_flight() >= 1, conn:in_flight())
+  wait_for(function() return conn:in_flight() == 0 end, 2000)
+  ok("p83: the tombstone is retired by the late reply, with no callback",
+    conn:in_flight() == 0 and #cancelled == 1, conn:in_flight() .. " cbs=" .. #cancelled)
+
+  -- ── deadline ───────────────────────────────────────────────────
+  local slow = {}
+  conn:request("nvim_eval", { "1" }, { deadline = 1 }, function(o) slow[#slow + 1] = o end)
+  wait_for(function() return #slow > 0 end)
+  ok("p83: a request can settle as deadline",
+    slow[1] and (slow[1].status == "deadline" or slow[1].status == "ok"),
+    vim.inspect(slow[1]))
+
+  -- ── close settles everything, and is idempotent ────────────────
+  local closed_reason, on_close = nil, {}
+  local c2 = rpc.connect({ addr = addr, on_epoch_lost = function(r) closed_reason = r end })
+  c2:request("nvim_eval", { "1" }, { deadline = 60000 }, function(o) on_close[#on_close + 1] = o end)
+  c2:close()
+  ok("p83: close settles outstanding requests as disconnected",
+    on_close[1] and on_close[1].status == "disconnected"
+    and on_close[1].code == rpc.E_DISCONNECTED, vim.inspect(on_close[1]))
+  ok("p83: on_epoch_lost reports the reason", closed_reason == "closed", tostring(closed_reason))
+  ok("p83: close is idempotent", pcall(function() c2:close() end))
+  ok("p83: a closed connection refuses new requests",
+    select(2, c2:request("nvim_eval", { "1" }, {}, function() end)) == rpc.E_DISCONNECTED)
+  ok("p83: is_closed reports it", c2:is_closed() == true)
+
+  -- ── EOF from the peer settles the epoch ────────────────────────
+  -- serverstop() only stops LISTENING; an established connection
+  -- survives it, so the peer has to actually go away. This helper
+  -- accepts once, holds briefly, then closes and EXITS on its own — a
+  -- peer that outlives the test would hang the suite.
+  local probe = vim.fn.serverstart("127.0.0.1:0")
+  local port = tostring(probe):match(":(%d+)$")
+  vim.fn.serverstop(probe)
+  local peer_addr = "127.0.0.1:" .. tostring(port)
+  local peer_job = vim.fn.jobstart({ "python3", "-c", table.concat({
+    "import socket,time",
+    "s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)",
+    "s.bind(('127.0.0.1'," .. tostring(port) .. ")); s.listen(1)",
+    "c,_=s.accept()",
+    "time.sleep(0.5)",
+    "c.close(); s.close()",
+  }, "\n") })
+
+  local c3, eof_reason = nil, nil
+  local connected = vim.wait(4000, function()
+    if c3 then return true end
+    c3 = rpc.connect({ addr = peer_addr, on_epoch_lost = function(r) eof_reason = r end })
+    return c3 ~= nil
+  end, 50)
+  ok("p83: connected to a peer that will go away", connected and c3 ~= nil)
+  if c3 then
+    wait_for(function() return eof_reason ~= nil end, 5000)
+    ok("p83: losing the peer reports eof", eof_reason == "eof", tostring(eof_reason))
+    ok("p83: the connection closes itself on epoch loss", c3:is_closed() == true)
+  end
+  pcall(vim.fn.jobstop, peer_job)
+
+  conn:close()
+  pcall(vim.fn.serverstop, addr)
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
