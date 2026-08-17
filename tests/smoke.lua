@@ -10829,6 +10829,33 @@ print("\n[81] ADR-0058 — ui.grid.attach (window ownership, cell cursor, header
     vim.inspect(vim.api.nvim_get_option_value("winbar", { win = win2, scope = "local" })))
   pcall(vim.api.nvim_win_close, win2, true)
 
+  -- ── ownership ends at the buffer swap, not at dispose (R5-4) ───
+  -- The view stays live until disposal, and its scroll/resize callbacks
+  -- are GLOBAL. Without an ownership predicate it would keep writing
+  -- this grid's winbar into whatever replaced it.
+  vim.cmd("new")
+  local win6 = vim.api.nvim_get_current_win()
+  local v6 = grid.attach(grid.model({ columns = { "zzz" }, rows = { { 1 } } }), { win = win6 })
+  ok("p81: a fresh view owns its window", v6:owns_window() == true)
+  local intruder = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_win_set_buf(win6, intruder)
+  vim.api.nvim_set_option_value("winbar", "THEIRS", { win = win6, scope = "local" })
+  ok("p81: ownership ends the moment the buffer is swapped",
+    v6:owns_window() == false)
+  v6:refresh_header()
+  ok("p81: refresh_header writes nothing into a window it lost",
+    vim.api.nvim_get_option_value("winbar", { win = win6, scope = "local" }) == "THEIRS",
+    vim.inspect(vim.api.nvim_get_option_value("winbar", { win = win6, scope = "local" })))
+  ok("p81: cell() reports nothing once ownership is gone", v6:cell() == nil)
+  v6:render()
+  ok("p81: render writes nothing into a window it lost",
+    vim.api.nvim_get_option_value("winbar", { win = win6, scope = "local" }) == "THEIRS")
+  v6:dispose()
+  ok("p81: disposing an un-owned view leaves the intruder alone",
+    vim.api.nvim_win_get_buf(win6) == intruder
+    and vim.api.nvim_get_option_value("winbar", { win = win6, scope = "local" }) == "THEIRS")
+  pcall(vim.api.nvim_win_close, win6, true)
+
   -- ── dispose must not mutate a window it no longer owns (R4-4) ──
   -- Ownership is per option AND per buffer: the guard that protects the
   -- replacement buffer has to protect wrap/cursorline too, or disposal
@@ -10994,16 +11021,51 @@ print("\n[82] ADR-0058 — rpc.frame (incremental msgpack framing + budgets)")
 
   -- An endless incomplete frame is the reason max_buffer exists: without
   -- it "incomplete" is an unbounded invitation.
-  local db = frame.decoder({ max_buffer = 64 })
+  local db = frame.decoder({ max_buffer = 64, max_string = 4096 })
   db:feed(string.char(0xdb) .. be32(1024))   -- legitimate header, payload dribbles
-  local fed_ok, feed_err = true, nil
+  local bst, berr = "incomplete", nil
   for _ = 1, 20 do
-    fed_ok, feed_err = db:feed(string.rep("x", 8))
-    if not fed_ok then break end
+    db:feed(string.rep("x", 8))
+    bst, berr = db:next()
+    if bst == "error" then break end
   end
-  ok("p82: an endless incomplete frame trips max_buffer", fed_ok == false, tostring(feed_err))
+  ok("p82: an endless incomplete frame trips max_buffer", bst == "error", tostring(berr))
   ok("p82: the refusal names max_buffer",
-    tostring(feed_err):find("max_buffer", 1, true) ~= nil, feed_err)
+    tostring(berr):find("max_buffer", 1, true) ~= nil, berr)
+  -- The budget is per INCOMPLETE frame, so a callback carrying several
+  -- COMPLETE frames whose total exceeds it must still drain (R5-2).
+  local dq = frame.decoder({ max_buffer = 64 })
+  local batch = {}
+  for i = 1, 8 do batch[i] = enc({ 1, i, vim.NIL, string.rep("y", 20) }) end
+  dq:feed(table.concat(batch))
+  local drained = 0
+  while true do
+    local st = dq:next()
+    if st ~= "ok" then break end
+    drained = drained + 1
+  end
+  ok("p82: several complete frames over max_buffer still drain", drained == 8, drained)
+
+  -- A header split across chunks must cost exactly what an unsplit one
+  -- costs: charging a token per retry would let TCP framing decide
+  -- whether a valid frame is refused.
+  -- The array itself is a token, so this frame is exactly 5.
+  local split = enc({ 1, 2, vim.NIL, "ok" })
+  local whole = frame.decoder({ max_tokens = 5 })
+  whole:feed(split)
+  local whole_st = whole:next()
+  local dt = frame.decoder({ max_tokens = 5 })
+  local dt_st
+  for i = 1, #split do dt:feed(split:sub(i, i)); dt_st = dt:next() end
+  ok("p82: a byte-split frame reaches the SAME outcome as an unsplit one",
+    whole_st == "ok" and dt_st == "ok",
+    "whole=" .. tostring(whole_st) .. " split=" .. tostring(dt_st))
+
+  -- fixstr/fixext carry data too, so a tight max_string must bind them.
+  local dfs = frame.decoder({ max_string = 4 })
+  dfs:feed(enc("0123456789"))                  -- fixstr, 10 bytes
+  local fst, ferr2 = dfs:next()
+  ok("p82: fixstr is bounded by max_string too", fst == "error", tostring(ferr2))
 
   ok("p82: 0xc1 (the never-used type byte) is refused",
     (function() local x = frame.decoder(); x:feed(string.char(0xc1)); return (x:next()) end)() == "error")

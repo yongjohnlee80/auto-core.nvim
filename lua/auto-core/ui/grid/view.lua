@@ -216,9 +216,17 @@ function View:_bind_autocmds()
     group = self._augroup, buffer = self._buf,
     callback = function() self:_paint_cursor() end,
   })
+  -- These are GLOBAL events (a scroll in any window fires them), so the
+  -- ownership check is what keeps this view's writes inside its own
+  -- window. Losing the window is also the end of the view's life: hold
+  -- nothing once someone else owns the display.
   vim.api.nvim_create_autocmd({ "WinScrolled", "WinResized", "VimResized" }, {
     group = self._augroup,
-    callback = function() self:refresh_header() end,
+    callback = function()
+      if self._disposed then return end
+      if not self:owns_window() then return self:dispose() end
+      self:refresh_header()
+    end,
   })
   vim.api.nvim_create_autocmd("WinClosed", {
     group = self._augroup,
@@ -227,10 +235,25 @@ function View:_bind_autocmds()
   })
 end
 
-function View:_valid()
+---owns_window reports whether this view may still touch `self._win`.
+---
+---Existence is not ownership. If another component swapped its own
+---buffer into the window, the view's global `WinScrolled`/resize
+---callbacks would otherwise keep writing this grid's winbar into
+---somebody else's view — for the whole period between the swap and
+---disposal. Ownership ends the instant the window stops displaying this
+---view's buffer, not at `dispose`.
+---@return boolean
+function View:owns_window()
   return not self._disposed
-    and vim.api.nvim_buf_is_valid(self._buf)
     and vim.api.nvim_win_is_valid(self._win)
+    and vim.api.nvim_buf_is_valid(self._buf)
+    and vim.api.nvim_win_get_buf(self._win) == self._buf
+end
+
+---_valid gates every window read and write.
+function View:_valid()
+  return self:owns_window()
 end
 
 ---set_model swaps the data and re-renders, keeping the window.
