@@ -35,6 +35,7 @@
 ---@module 'auto-core.rpc'
 
 local frame = require("auto-core.rpc.frame")
+local log = require("auto-core.log")
 
 local M = {}
 
@@ -141,7 +142,7 @@ function Conn:_settle(id, outcome)
     local ok, err = pcall(entry.cb, outcome)
     if not ok then
       vim.schedule(function()
-        vim.notify("auto-core.rpc: callback error: " .. tostring(err), vim.log.levels.ERROR)
+        log.error("rpc", "callback error: " .. tostring(err))
       end)
     end
   end
@@ -170,7 +171,7 @@ function Conn:_lose_epoch(reason)
       })
       if not ok then
         vim.schedule(function()
-          vim.notify("auto-core.rpc: callback error: " .. tostring(err), vim.log.levels.ERROR)
+          log.error("rpc", "callback error during epoch teardown: " .. tostring(err))
         end)
       end
     end
