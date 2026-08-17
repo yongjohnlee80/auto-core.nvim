@@ -11182,6 +11182,31 @@ print("\n[82] ADR-0058 — rpc.frame (incremental msgpack framing + budgets)")
     dref:pending() == 0 and dref:retained() == 0,
     dref:pending() .. "/" .. dref:retained())
 
+  -- ── the queue TABLE is bounded too (R8-1) ──────────────────────
+  -- retained() counts string bytes; the queue's own slot capacity is a
+  -- second quantity Lua will not shrink on its own. A drained batch used
+  -- to leave ~1 MB of slots held at a permanent high-water mark.
+  local dq2 = frame.decoder({ max_buffer = 64 * 1024 * 1024 })
+  local one = enc({ 1, 1, vim.NIL, "x" })
+  for _ = 1, 5000 do dq2:feed(one) end
+  while (dq2:next()) == "ok" do end
+  ok("p82: an emptied queue resets its table indices",
+    dq2.qh == 1 and dq2.qt == 0, "qh=" .. dq2.qh .. " qt=" .. dq2.qt)
+  ok("p82: and reports nothing retained", dq2:retained() == 0 and dq2:pending() == 0)
+  -- Still usable afterwards: the reset must not lose the parse state.
+  dq2:feed(enc({ 1, 42, vim.NIL, "after" }))
+  local ast, aval = dq2:next()
+  ok("p82: the decoder still works after a queue reset",
+    ast == "ok" and aval[2] == 42, tostring(ast) .. " " .. vim.inspect(aval))
+
+  -- Rebasing while NON-empty: many drained frames with one live tail.
+  local dq3 = frame.decoder({ max_buffer = 64 * 1024 * 1024 })
+  for _ = 1, 2000 do dq3:feed(one) end
+  dq3:feed(enc({ 1, 7, vim.NIL, "live" }):sub(1, 4))   -- partial: stays queued
+  while (dq3:next()) == "ok" do end
+  ok("p82: a non-empty queue rebases its live entries to the front",
+    dq3.qh <= 64, "qh=" .. dq3.qh .. " qt=" .. dq3.qt)
+
   -- ── every msgpack type is walked correctly ─────────────────────
   -- Round-trip through our framing what vim.mpack itself produces, so a
   -- type the scanner mis-sizes shows up as a wrong boundary rather than

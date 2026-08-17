@@ -65,17 +65,18 @@ local DEFAULTS = {
   --      5 000 rows x 20 cols  (~105k values, 1.0 MB)  ->  23.6 ms
   --      1 000 rows x 10 cols  (~11k values,   91 KB)  ->   1.6 ms
   --
-  -- ~4.8k values per ms. This bound exists for a HOSTILE or defective
-  -- peer: autodb pages reads at 500 rows (exec.DefaultMaxRows), so a
-  -- legitimate frame tops out near 500 x 100 columns ~= 50k values. The
-  -- default sits at twice that — high enough never to refuse a wide real
-  -- table, low enough that a maximum-size frame costs ~21 ms.
+  -- ~4.8k values per ms, so 100k values costs about 21 ms.
   --
-  -- Stated plainly rather than dressed up: 21 ms is longer than one
-  -- 60 Hz interval (16.7 ms), and scanning, projection and rendering
-  -- come on top. This transport accepts that stall for a worst-case
-  -- frame; the answer to a legitimately larger result is server-side
-  -- paging, not a bigger synchronous bite.
+  -- This is a GENERIC transport default and is chosen purely as a
+  -- latency/denial-of-service tradeoff. It is not derived from any
+  -- application's data shape, and it makes no promise that a given
+  -- application's results will fit: a valid frame carrying more than
+  -- max_tokens values is REFUSED, deliberately. 21 ms is already longer
+  -- than one 60 Hz interval (16.7 ms), and scanning, projection and
+  -- rendering come on top of it.
+  --
+  -- A consumer that knows its own result shapes passes its own limits
+  -- and derives them from a bound its server actually enforces.
   max_tokens = 100000,
   max_buffer = 16 * 1024 * 1024,
 }
@@ -248,7 +249,39 @@ function Decoder:_take_frame()
   end
   self.qi, self.qo = self.qh, self.qs
   self:_compact()
+  self:_rebase()
   return frame
+end
+
+---_rebase bounds the queue TABLE, which `retained()` cannot see.
+---
+---`qh`/`qt` advance for the decoder's lifetime, and Lua does not return
+---a table's array capacity when numeric slots are nilled. Measured: a
+---batch of 100 000 queued feeds, fully drained, left 1025 KB held while
+---`retained()` reported 0 — and it stayed at that high-water mark
+---(+2 KB over a further 1000 cycles). String bytes were correctly
+---released; the SLOTS were not.
+---
+---Emptying the queue is the common case and resets the table outright.
+---While it is non-empty, the live entries are rebased to the front only
+---once the dead span dominates them, which is the same amortized shape
+---as `_compact`: O(live) work paid after `qh` advanced by at least 3 x
+---live.
+local REBASE_FLOOR = 64
+function Decoder:_rebase()
+  if self.qh > self.qt then
+    -- Empty: drop the whole table rather than carry its capacity.
+    self.q, self.qh, self.qt = {}, 1, 0
+    self.qi, self.qo, self.qs = 1, 0, 0
+    return
+  end
+  local live = self.qt - self.qh + 1
+  local dead = self.qh - 1
+  if dead < REBASE_FLOOR or dead <= live * 3 then return end
+  local moved = {}
+  for i = self.qh, self.qt do moved[i - self.qh + 1] = self.q[i] end
+  self.qi = self.qi - self.qh + 1
+  self.q, self.qh, self.qt = moved, 1, live
 end
 
 ---_compact bounds PHYSICAL retention.
@@ -440,10 +473,15 @@ end
 ---@return integer
 function Decoder:pending() return self.consumed + self.avail end
 
----retained reports the PHYSICAL bytes the decoder holds, including any
----dead prefix of the head chunk not yet compacted away. Bounded by
----2 × `pending()` + 4096; exposed so the bound is observable rather than
----merely asserted.
+---retained reports the QUEUED STRING BYTES the decoder holds, including
+---any dead prefix of the head chunk not yet compacted away. Bounded by
+---2 × `pending()` + 4096, so bounding `pending` by `max_buffer` bounds
+---this too; exposed so the bound is observable rather than asserted.
+---
+---It deliberately does NOT count the queue table's own slot capacity —
+---that is metadata, is bounded separately by `_rebase`, and Lua exposes
+---no way to measure it. Two different quantities under one number would
+---make neither checkable.
 ---@return integer
 function Decoder:retained()
   local total = 0
