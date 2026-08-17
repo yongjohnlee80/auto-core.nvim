@@ -11132,6 +11132,56 @@ print("\n[82] ADR-0058 — rpc.frame (incremental msgpack framing + budgets)")
   ok("p82: a frame split across two batched feeds still decodes",
     st_a == "ok", tostring(st_a) .. " " .. vim.inspect(va))
 
+  -- ── PHYSICAL retention, not just logical (R7-1) ────────────────
+  -- A Lua string is immutable, so holding the head chunk holds the whole
+  -- original callback. Draining a big batch used to leave the entire
+  -- callback pinned while the logical count reported one byte.
+  local dret = frame.decoder()
+  local big = {}
+  for i = 1, 400 do big[i] = enc({ 1, i, vim.NIL, string.rep("q", 300) }) end
+  dret:feed(table.concat(big) .. string.char(0xdb))  -- + one byte of the next header
+  local pulled = 0
+  while true do
+    local st = dret:next()
+    if st ~= "ok" then break end
+    pulled = pulled + 1
+  end
+  ok("p82: the batch drained", pulled == 400, pulled)
+  ok("p82: logical retention is the trailing byte", dret:pending() == 1, dret:pending())
+  ok("p82: PHYSICAL retention is bounded, not the whole callback",
+    dret:retained() <= 2 * dret:pending() + 4096,
+    "retained=" .. dret:retained() .. " logical=" .. dret:pending())
+
+  -- Compaction must not corrupt the stream it is compacting.
+  local dcomp = frame.decoder()
+  local kept = {}
+  for i = 1, 300 do kept[i] = enc({ 1, i, vim.NIL, string.rep("c", 200) }) end
+  local tail_frame = enc({ 1, 999, vim.NIL, "tail" })
+  dcomp:feed(table.concat(kept) .. tail_frame:sub(1, 3))
+  while (dcomp:next()) == "ok" do end
+  dcomp:feed(tail_frame:sub(4))
+  local cst, cval = dcomp:next()
+  ok("p82: a frame straddling a compaction still decodes",
+    cst == "ok" and cval[2] == 999 and cval[4] == "tail",
+    tostring(cst) .. " " .. vim.inspect(cval))
+
+  -- Queue REFERENCE work: many feeds queued before a single drain must
+  -- not rebuild or shift the chunk array per frame.
+  local dref = frame.decoder()
+  for i = 1, 500 do dref:feed(enc({ 1, i, vim.NIL, "f" .. i })) end
+  local refs, last_ref = 0, nil
+  while true do
+    local st, val = dref:next()
+    if st ~= "ok" then break end
+    refs = refs + 1
+    last_ref = val
+  end
+  ok("p82: 500 separately-fed frames all drain in order",
+    refs == 500 and last_ref[2] == 500, refs .. " last=" .. vim.inspect(last_ref))
+  ok("p82: nothing is retained after draining separate feeds",
+    dref:pending() == 0 and dref:retained() == 0,
+    dref:pending() .. "/" .. dref:retained())
+
   -- ── every msgpack type is walked correctly ─────────────────────
   -- Round-trip through our framing what vim.mpack itself produces, so a
   -- type the scanner mis-sizes shows up as a wrong boundary rather than

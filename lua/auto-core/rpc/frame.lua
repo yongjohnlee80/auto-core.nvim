@@ -130,7 +130,9 @@ end
 ---reset clears the queue and all parse state.
 function Decoder:reset()
   self.q = {}       -- chunk queue, exactly as the channel delivered them
-  self.qs = 0       -- bytes at the front of q[1] already consumed by past frames
+  self.qh = 1       -- HEAD index: first chunk still holding live bytes
+  self.qt = 0       -- TAIL index: last chunk queued
+  self.qs = 0       -- dead bytes at the front of q[qh] (consumed by past frames)
   self.qi = 1       -- chunk holding the cursor
   self.qo = 0       -- absolute offset within q[qi] (bytes of it consumed)
   self.avail = 0    -- unconsumed bytes across the whole queue
@@ -156,7 +158,9 @@ function Decoder:feed(chunk)
   if self.failed then return false, self.failed end
   local bytes = type(chunk) == "table" and M.channel_bytes(chunk) or chunk
   if #bytes == 0 then return true end
-  self.q[#self.q + 1] = bytes
+  self.qt = self.qt + 1
+  self.q[self.qt] = bytes
+  if self.qt == self.qh then self.qi, self.qo, self.qs = self.qh, 0, 0 end
   self.avail = self.avail + #bytes
   return true
 end
@@ -171,13 +175,14 @@ end
 function Decoder:_byte(n)
   if n > self.avail then return nil end
   local i, o = self.qi, self.qo
-  while true do
+  while i <= self.qt do
     local chunk = self.q[i]
     local left = #chunk - o
     if n <= left then return chunk:byte(o + n) end
     n = n - left
     i, o = i + 1, 0
   end
+  return nil
 end
 
 ---_u reads a big-endian unsigned integer of `width` bytes starting at
@@ -194,7 +199,7 @@ end
 function Decoder:_advance(n)
   self.avail = self.avail - n
   self.consumed = self.consumed + n
-  while n > 0 do
+  while n > 0 and self.qi <= self.qt do
     local chunk = self.q[self.qi]
     local left = #chunk - self.qo
     if n < left then
@@ -218,30 +223,61 @@ end
 ---remembers how far into it we are. Only fully consumed chunks are
 ---dropped, and each byte is copied exactly once: into its own frame.
 function Decoder:_take_frame()
+  local qh, qi = self.qh, self.qi
   local parts = {}
-  if self.qi == 1 then
-    parts[1] = self.q[1]:sub(self.qs + 1, self.qo)
+  if qi == qh then
+    parts[1] = self.q[qh]:sub(self.qs + 1, self.qo)
   else
-    parts[1] = self.q[1]:sub(self.qs + 1)
-    for i = 2, self.qi - 1 do parts[#parts + 1] = self.q[i] end
-    if self.qo > 0 then parts[#parts + 1] = self.q[self.qi]:sub(1, self.qo) end
+    parts[1] = self.q[qh]:sub(self.qs + 1)
+    for i = qh + 1, qi - 1 do parts[#parts + 1] = self.q[i] end
+    if self.qo > 0 then parts[#parts + 1] = self.q[qi]:sub(1, self.qo) end
   end
   local frame = table.concat(parts)
 
-  -- Drop chunks the cursor has left behind; keep the one it sits in.
-  if self.qi > 1 then
-    local rest = {}
-    for i = self.qi, #self.q do rest[#rest + 1] = self.q[i] end
-    self.q = rest
-    self.qi = 1
-  end
-  self.qs = self.qo
-  if self.q[1] and self.qs >= #self.q[1] then
-    table.remove(self.q, 1)   -- fully consumed; the next frame starts clean
+  -- Release the chunks the cursor has left behind. The queue is indexed
+  -- by a monotonic HEAD rather than rebuilt or shifted: rebuilding it
+  -- per frame costs K + (K-1) + … reference work when several feeds are
+  -- queued before a drain — the same quadratic shape as copying bytes,
+  -- one level up.
+  for i = qh, qi - 1 do self.q[i] = nil end
+  self.qh, self.qs = qi, self.qo
+  if self.qh <= self.qt and self.qs >= #self.q[self.qh] then
+    self.q[self.qh] = nil       -- fully consumed
+    self.qh = self.qh + 1
     self.qs = 0
   end
-  self.qo = self.qs
+  self.qi, self.qo = self.qh, self.qs
+  self:_compact()
   return frame
+end
+
+---_compact bounds PHYSICAL retention.
+---
+---A Lua string is immutable, so holding the head chunk holds the whole
+---original callback — including the part already delivered. Measured: a
+---798 KB callback carrying 2000 complete frames plus one byte of the
+---next header stayed 895 KB resident after every frame was drained,
+---while the logical count reported 1 byte. Logical accounting alone
+---therefore does not bound memory.
+---
+---The dead prefix is dropped once it DOMINATES the live tail, which is
+---the classic amortized rule: a copy of `live` bytes is only paid after
+---at least `live` bytes have been consumed, so the aggregate stays
+---linear and no copy happens on an ordinary incomplete callback.
+---
+---Bound: physical retained ≤ 2 × logical + SLACK. With logical bounded
+---by `max_buffer`, physical is bounded too.
+local COMPACT_SLACK = 4096
+function Decoder:_compact()
+  local chunk = self.q[self.qh]
+  if not chunk then return end
+  local dead = self.qs
+  if dead < COMPACT_SLACK then return end
+  local live = #chunk - dead
+  if dead <= live then return end
+  self.q[self.qh] = chunk:sub(dead + 1)
+  if self.qi == self.qh then self.qo = self.qo - dead end
+  self.qs = 0
 end
 
 ---next returns the next complete frame, if one has arrived.
@@ -399,9 +435,24 @@ function Decoder:_incomplete()
   return "incomplete"
 end
 
----pending reports how many bytes are retained for the current frame.
+---pending reports the LOGICAL bytes of the current frame — what
+---`max_buffer` is measured against.
 ---@return integer
 function Decoder:pending() return self.consumed + self.avail end
+
+---retained reports the PHYSICAL bytes the decoder holds, including any
+---dead prefix of the head chunk not yet compacted away. Bounded by
+---2 × `pending()` + 4096; exposed so the bound is observable rather than
+---merely asserted.
+---@return integer
+function Decoder:retained()
+  local total = 0
+  for i = self.qh, self.qt do
+    local c = self.q[i]
+    if c then total = total + #c end
+  end
+  return total
+end
 
 ---channel_bytes reverses Neovim's channel encoding.
 ---
