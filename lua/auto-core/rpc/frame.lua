@@ -21,13 +21,20 @@
 ---    stays flat, which is why an RSS-based measurement sees nothing —
 ---    the allocation is virtual until the payload touches it.
 ---
----**Linear work, in BOTH cursor and storage.** Parser state persists
----across chunks, so each received byte is examined once. Storage matters
----just as much: Lua strings are immutable, so appending each chunk to a
----retained buffer recopies the whole growing prefix and is quadratic
----against a peer dripping one byte per callback — measured at 2.8-2.9x
----per doubling before this was fixed. Chunks are therefore held in a
----QUEUE and joined exactly once, when a complete frame is handed to
+---**Linear work, in BOTH cursor and storage, on BOTH axes.** Parser
+---state persists across chunks, so each received byte is examined once.
+---Storage matters just as much, and it has two separate ways to go
+---quadratic — each measured, each fixed:
+---
+---  * ONE frame dripped over many callbacks. Appending each chunk to a
+---    retained immutable string recopies the growing prefix: 2.77x and
+---    2.93x per doubling. Chunks are held in a QUEUE instead.
+---  * MANY frames in one callback. Slicing the unconsumed remainder
+---    after each frame recopies the rest of the batch every time: 3.74x
+---    and 4.83x per doubling. A chunk still holding live bytes is kept
+---    as is, with an offset into it.
+---
+---Bytes are joined exactly once, when a complete frame is handed to
 ---`vim.mpack.decode`.
 ---
 ---Every limit is a hard refusal, never a truncation: a violation means
@@ -39,28 +46,37 @@ local M = {}
 
 ---@class AutoCoreRpcLimits
 ---@field max_frame integer?     bytes in one complete value (default 8388608)
----@field max_string integer?    bytes in one str/bin/ext payload (default 4194304)
----@field max_depth integer?     nested container levels (default 32)
----@field max_tokens integer?    msgpack values in one frame, keys AND values (default 200000)
+---@field max_string integer?    bytes of str/bin/ext DATA, excluding the ext type tag (default 4194304)
+---@field max_depth integer?     container levels, empty containers included (default 32)
+---@field max_tokens integer?    msgpack values in one frame, keys AND values (default 100000)
 ---@field max_buffer integer?    bytes retained for ONE incomplete frame (default 16777216)
 
 local DEFAULTS = {
   max_frame = 8 * 1024 * 1024,
   max_string = 4 * 1024 * 1024,
   max_depth = 32,
-  -- 200k values, not a round million. The whole allowance is
-  -- materialized SYNCHRONOUSLY by vim.mpack.decode on Neovim's main loop
-  -- the moment a frame completes, so this ceiling is an EDITOR-STALL
-  -- budget, not only a memory one. Measured on 0.12.2:
+  -- An EDITOR-STALL budget, not only a memory one: the whole allowance
+  -- is materialized SYNCHRONOUSLY by vim.mpack.decode on the main loop
+  -- the instant a frame completes, so "linear" is necessary but not
+  -- sufficient — the entire allowed unit runs without yielding.
+  -- Measured on 0.12.2, string-heavy rows (the expensive shape):
   --
-  --     10 000 rows x 20 cols  (~210k tokens, 2.0 MB)  ->  43.6 ms
-  --      5 000 rows x 20 cols  (~105k tokens, 1.0 MB)  ->  23.6 ms
-  --      1 000 rows x 10 cols  (~11k tokens,   91 KB)  ->   1.6 ms
+  --     10 000 rows x 20 cols  (~210k values, 2.0 MB)  ->  43.6 ms
+  --      5 000 rows x 20 cols  (~105k values, 1.0 MB)  ->  23.6 ms
+  --      1 000 rows x 10 cols  (~11k values,   91 KB)  ->   1.6 ms
   --
-  -- So 200k tokens costs roughly one dropped frame at 60 Hz for a large
-  -- real result. A million — the obvious round number — would be about
-  -- 220 ms for the same shape: a freeze the user sees.
-  max_tokens = 200000,
+  -- ~4.8k values per ms. This bound exists for a HOSTILE or defective
+  -- peer: autodb pages reads at 500 rows (exec.DefaultMaxRows), so a
+  -- legitimate frame tops out near 500 x 100 columns ~= 50k values. The
+  -- default sits at twice that — high enough never to refuse a wide real
+  -- table, low enough that a maximum-size frame costs ~21 ms.
+  --
+  -- Stated plainly rather than dressed up: 21 ms is longer than one
+  -- 60 Hz interval (16.7 ms), and scanning, projection and rendering
+  -- come on top. This transport accepts that stall for a worst-case
+  -- frame; the answer to a legitimately larger result is server-side
+  -- paging, not a bigger synchronous bite.
+  max_tokens = 100000,
   max_buffer = 16 * 1024 * 1024,
 }
 
@@ -113,9 +129,10 @@ end
 
 ---reset clears the queue and all parse state.
 function Decoder:reset()
-  self.q = {}       -- chunk queue; q[1] starts at the current frame's first byte
+  self.q = {}       -- chunk queue, exactly as the channel delivered them
+  self.qs = 0       -- bytes at the front of q[1] already consumed by past frames
   self.qi = 1       -- chunk holding the cursor
-  self.qo = 0       -- bytes consumed within q[qi]
+  self.qo = 0       -- absolute offset within q[qi] (bytes of it consumed)
   self.avail = 0    -- unconsumed bytes across the whole queue
   self.consumed = 0 -- bytes consumed in the CURRENT frame
   self.need = 1     -- values still required to finish the current frame
@@ -190,20 +207,40 @@ function Decoder:_advance(n)
   end
 end
 
----_take_frame joins the consumed bytes into ONE string and drops them.
----This is the only place bytes are copied, and each is copied once.
+---_take_frame joins this frame's bytes into ONE string and advances the
+---queue past them.
+---
+---It must NOT slice the unconsumed remainder. One `on_data` callback can
+---carry many complete replies in a single string; copying that string's
+---suffix after each frame costs N + (N-f) + (N-2f) + … — quadratic in
+---the number of frames, measured at 3.7× and 4.8× per doubling. So a
+---chunk that still holds live bytes is kept AS IS and the queue simply
+---remembers how far into it we are. Only fully consumed chunks are
+---dropped, and each byte is copied exactly once: into its own frame.
 function Decoder:_take_frame()
   local parts = {}
-  for i = 1, self.qi - 1 do parts[#parts + 1] = self.q[i] end
-  if self.qo > 0 then parts[#parts + 1] = self.q[self.qi]:sub(1, self.qo) end
+  if self.qi == 1 then
+    parts[1] = self.q[1]:sub(self.qs + 1, self.qo)
+  else
+    parts[1] = self.q[1]:sub(self.qs + 1)
+    for i = 2, self.qi - 1 do parts[#parts + 1] = self.q[i] end
+    if self.qo > 0 then parts[#parts + 1] = self.q[self.qi]:sub(1, self.qo) end
+  end
   local frame = table.concat(parts)
 
-  local rest = {}
-  local tail = self.q[self.qi]
-  if tail and self.qo < #tail then rest[1] = tail:sub(self.qo + 1) end
-  for i = self.qi + 1, #self.q do rest[#rest + 1] = self.q[i] end
-
-  self.q, self.qi, self.qo = rest, 1, 0
+  -- Drop chunks the cursor has left behind; keep the one it sits in.
+  if self.qi > 1 then
+    local rest = {}
+    for i = self.qi, #self.q do rest[#rest + 1] = self.q[i] end
+    self.q = rest
+    self.qi = 1
+  end
+  self.qs = self.qo
+  if self.q[1] and self.qs >= #self.q[1] then
+    table.remove(self.q, 1)   -- fully consumed; the next frame starts clean
+    self.qs = 0
+  end
+  self.qo = self.qs
   return frame
 end
 
@@ -233,22 +270,30 @@ function Decoder:next()
     if self.avail == 0 then return self:_incomplete() end
 
     local t = self:_byte(1)
-    local header, payload, children = 1, 0, 0
+    -- `payload` is bytes to walk past; `opaque` is str/bin/ext DATA and
+    -- is the only thing max_string bounds. They differ: a float64 has 8
+    -- payload bytes and no opaque data, and an ext's one type-tag byte
+    -- is payload but not data — counting it made an extension carrying
+    -- exactly max_string bytes fail by one.
+    local header, payload, opaque, children = 1, 0, 0, 0
+    local is_container = false
 
     if t <= 0x7f or t >= 0xe0 then            -- fixint
       payload = 0
     elseif t >= 0x80 and t <= 0x8f then       -- fixmap
-      children = (t - 0x80) * 2
+      children, is_container = (t - 0x80) * 2, true
     elseif t >= 0x90 and t <= 0x9f then       -- fixarray
-      children = t - 0x90
+      children, is_container = t - 0x90, true
     elseif t >= 0xa0 and t <= 0xbf then       -- fixstr
       payload = t - 0xa0
+      opaque = payload
     elseif t == 0xc1 then
       return self:_fail("invalid msgpack type byte 0xc1")
     elseif SCALAR[t] then
       payload = SCALAR[t]
     elseif FIXEXT[t] then
       payload = FIXEXT[t]
+      opaque = payload - 1                    -- minus the extension type tag
     elseif LEN[t] then
       local spec = LEN[t]
       -- Not enough bytes for the length field: retry this token later.
@@ -261,12 +306,13 @@ function Decoder:next()
           "value declares %d bytes, over max_string (%d)", len, lim.max_string))
       end
       header = 1 + spec[1]
-      payload = len + spec[2]
+      payload = len + spec[2]                 -- spec[2] is the ext type tag
+      opaque = len
     elseif CONTAINER[t] then
       local spec = CONTAINER[t]
       if self.avail < 1 + spec[1] then return self:_incomplete() end
       local count = self:_u(2, spec[1])
-      children = count * spec[2]
+      children, is_container = count * spec[2], true
       -- Refuse an absurd declared count now: max_tokens would catch it
       -- eventually, but only after walking that far.
       if children > lim.max_tokens then
@@ -278,11 +324,12 @@ function Decoder:next()
       return self:_fail(string.format("unknown msgpack type byte 0x%02x", t))
     end
 
-    -- Every fixed-size opaque payload is bounded too, so a caller that
-    -- sets max_string below 31 gets the bound it asked for.
-    if payload > lim.max_string then
+    -- fixstr/fixext are opaque data too, so a caller that sets
+    -- max_string below 31 gets the bound it asked for. Numeric scalars
+    -- are NOT data and are never measured against it.
+    if opaque > lim.max_string then
       return self:_fail(string.format(
-        "value carries %d bytes, over max_string (%d)", payload, lim.max_string))
+        "value carries %d bytes, over max_string (%d)", opaque, lim.max_string))
     end
     if self.consumed + header + payload > lim.max_frame then
       return self:_fail(string.format("frame exceeds max_frame (%d bytes)", lim.max_frame))
@@ -300,13 +347,18 @@ function Decoder:next()
     self.skip = payload
     self.need = self.need - 1
 
-    if children > 0 then
-      self.depth = self.depth + 1
-      if self.depth > lim.max_depth then
+    -- An EMPTY array or map is still a container level: without this,
+    -- nested empty containers could exceed max_depth unrefused. The
+    -- level is charged, then only pushed if it has children to wait for.
+    if is_container then
+      if self.depth + 1 > lim.max_depth then
         return self:_fail(string.format("nesting deeper than max_depth (%d)", lim.max_depth))
       end
-      self.stack[self.depth] = self.need
-      self.need = children
+      if children > 0 then
+        self.depth = self.depth + 1
+        self.stack[self.depth] = self.need
+        self.need = children
+      end
     end
 
     -- Close every container this value completed.

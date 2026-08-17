@@ -11070,6 +11070,68 @@ print("\n[82] ADR-0058 — rpc.frame (incremental msgpack framing + budgets)")
   ok("p82: 0xc1 (the never-used type byte) is refused",
     (function() local x = frame.decoder(); x:feed(string.char(0xc1)); return (x:next()) end)() == "error")
 
+  -- ── limits must mean what the table says (R6-1) ────────────────
+  -- max_string bounds str/bin/ext DATA. A float64 has an 8-byte payload
+  -- and no data, so a tiny max_string must not refuse ordinary numbers.
+  local dnum = frame.decoder({ max_string = 1 })
+  dnum:feed(enc({ 1.5, 4294967295, -2147483648, true, vim.NIL }))
+  local nst, nval = dnum:next()
+  ok("p82: max_string does not bound numeric scalars",
+    nst == "ok" and nval[1] == 1.5, tostring(nst) .. " " .. vim.inspect(nval))
+
+  -- An extension's one type-tag byte is payload but NOT data: counting
+  -- it made an ext carrying exactly max_string bytes fail by one.
+  local ext4 = string.char(0xc7, 4, 42) .. "abcd"   -- ext8, 4 data bytes
+  local dext = frame.decoder({ max_string = 4 })
+  dext:feed(ext4)
+  local est = dext:next()
+  ok("p82: an ext carrying exactly max_string DATA is accepted",
+    est == "ok", tostring(est))
+  local dext2 = frame.decoder({ max_string = 3 })
+  dext2:feed(ext4)
+  ok("p82: one data byte over max_string is still refused",
+    (dext2:next()) == "error")
+
+  -- An empty container is a container level too.
+  local nested_empty = string.rep(string.char(0x91), 6) .. string.char(0x90)
+  local dde = frame.decoder({ max_depth = 4 })
+  dde:feed(nested_empty)
+  ok("p82: empty containers count toward max_depth",
+    (dde:next()) == "error", "6 nested arrays ending in an empty one")
+  local dde2 = frame.decoder({ max_depth = 8 })
+  dde2:feed(nested_empty)
+  ok("p82: and are accepted when they fit", (dde2:next()) == "ok")
+
+  -- ── many complete frames in ONE callback ───────────────────────
+  -- The other quadratic axis: slicing the unconsumed remainder after
+  -- each frame recopies the rest of the batch every time.
+  local dmulti = frame.decoder()
+  local blob, want = {}, 200
+  for i = 1, want do blob[i] = enc({ 1, i, vim.NIL, "row" .. i }) end
+  dmulti:feed(table.concat(blob))
+  local seen, last = 0, nil
+  while true do
+    local st, val = dmulti:next()
+    if st ~= "ok" then break end
+    seen = seen + 1
+    last = val
+  end
+  ok("p82: a batch of frames in one feed all decode, in order",
+    seen == want and last[2] == want and last[4] == "row" .. want,
+    seen .. "/" .. want .. " last=" .. vim.inspect(last))
+  ok("p82: the queue is empty afterwards", dmulti:pending() == 0, dmulti:pending())
+
+  -- A frame straddling the boundary between two batched chunks.
+  local dstr = frame.decoder()
+  local two = enc({ 1, 1, vim.NIL, "alpha" }) .. enc({ 1, 2, vim.NIL, "beta" })
+  dstr:feed(two:sub(1, #two - 4))
+  local mid = dstr:next()
+  dstr:feed(two:sub(#two - 3))
+  local st_a, va = mid, nil
+  if st_a == "ok" then st_a, va = dstr:next() else st_a, va = dstr:next() end
+  ok("p82: a frame split across two batched feeds still decodes",
+    st_a == "ok", tostring(st_a) .. " " .. vim.inspect(va))
+
   -- ── every msgpack type is walked correctly ─────────────────────
   -- Round-trip through our framing what vim.mpack itself produces, so a
   -- type the scanner mis-sizes shows up as a wrong boundary rather than
