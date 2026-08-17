@@ -78,7 +78,7 @@ Conn.__index = Conn
 ---Note what it does NOT do: judge the endpoint. Address policy belongs
 ---to the application — a generic family module must not inherit one
 ---application's rules about where it may connect.
----@param opts { addr: string, limits: AutoCoreRpcLimits?, capacity: integer?, deadline: integer?, on_epoch_lost: function? }
+---@param opts { addr: string, mode: string?, limits: AutoCoreRpcLimits?, capacity: integer?, deadline: integer?, on_epoch_lost: function? }
 ---@return AutoCoreRpcConn|nil, string?
 function M.connect(opts)
   opts = opts or {}
@@ -86,9 +86,18 @@ function M.connect(opts)
   if type(addr) ~= "string" or addr == "" then
     return nil, "auto-core.rpc: opts.addr must be a non-empty string"
   end
+  -- "pipe" is Neovim's name for a unix socket (and a named pipe on
+  -- Windows); "tcp" takes host:port. The caller decides, because only it
+  -- knows which endpoint it resolved — a transport default guessed here
+  -- would be a second opinion about where to meet.
+  local mode = opts.mode or "tcp"
+  if mode ~= "tcp" and mode ~= "pipe" then
+    return nil, string.format("auto-core.rpc: opts.mode must be \"tcp\" or \"pipe\", got %q", mode)
+  end
 
   local self = setmetatable({}, Conn)
   self._addr = addr
+  self._mode = mode
   self._decoder = frame.decoder(opts.limits)
   self._capacity = opts.capacity or DEFAULT_CAPACITY
   self._deadline = opts.deadline or DEFAULT_DEADLINE
@@ -99,7 +108,7 @@ function M.connect(opts)
   self._count = 0       -- live + tombstoned, both charged against capacity
   self._dead = false
 
-  local ok, chan = pcall(vim.fn.sockconnect, "tcp", addr, {
+  local ok, chan = pcall(vim.fn.sockconnect, mode, addr, {
     rpc = false,
     on_data = function(_, data) self:_on_data(data) end,
   })
@@ -330,5 +339,6 @@ function Conn:is_closed() return self._dead end
 function Conn:in_flight() return self._count end
 
 function Conn:addr() return self._addr end
+function Conn:mode() return self._mode end
 
 return M

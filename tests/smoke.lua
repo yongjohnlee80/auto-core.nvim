@@ -11376,6 +11376,33 @@ print("\n[83] ADR-0058 — auto-core.rpc (async msgpack-RPC client)")
     select(2, c2:request("nvim_eval", { "1" }, {}, function() end)) == rpc.E_DISCONNECTED)
   ok("p83: is_closed reports it", c2:is_closed() == true)
 
+  -- ── unix socket transport (the DEFAULT endpoint) ───────────────
+  -- Same protocol, different plumbing: addressed by a file path, never
+  -- touching the network stack, and openable only by whoever the file
+  -- permissions allow. Neovim calls this mode "pipe".
+  local sock = vim.fn.tempname() .. ".sock"
+  local sock_addr = vim.fn.serverstart(sock)
+  ok("p83: a unix-socket peer is listening",
+    type(sock_addr) == "string" and vim.fn.filereadable(sock_addr) == 1
+      or vim.loop.fs_stat(sock) ~= nil, vim.inspect(sock_addr))
+
+  local uconn, uerr = rpc.connect({ addr = sock, mode = "pipe" })
+  ok("p83: connects over a unix socket", uconn ~= nil, tostring(uerr))
+  if uconn then
+    ok("p83: the mode is recorded", uconn:mode() == "pipe", uconn:mode())
+    local useen = {}
+    uconn:request("nvim_eval", { "6 * 7" }, {}, function(o) useen[#useen + 1] = o end)
+    wait_for(function() return #useen > 0 end)
+    ok("p83: a request round-trips over the socket",
+      useen[1] and useen[1].status == "ok" and useen[1].value == 42,
+      vim.inspect(useen[1]))
+    uconn:close()
+  end
+  pcall(vim.fn.serverstop, sock_addr)
+
+  ok("p83: an unknown mode is refused",
+    select(2, rpc.connect({ addr = sock, mode = "smoke-signals" })):find("mode", 1, true) ~= nil)
+
   -- ── EOF from the peer settles the epoch ────────────────────────
   -- serverstop() only stops LISTENING; an established connection
   -- survives it, so the peer has to actually go away. This helper
