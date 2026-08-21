@@ -42,6 +42,7 @@ local DEFAULTS = {
   AutoCoreDimmed          = { link = "Comment",     default = true },
   AutoCoreHelpKey         = { link = "Special",     default = true },
   AutoCoreHelpDesc        = { link = "Comment",     default = true },
+  AutoCoreGridHeader      = { link = "Title",       default = true },
 }
 
 local _ensured = false

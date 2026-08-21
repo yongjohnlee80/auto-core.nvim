@@ -10737,6 +10737,17 @@ print("\n[81] ADR-0058 — ui.grid.attach (window ownership, cell cursor, header
   ok("p81: a too-wide header keeps its LEFT (truncates from the right)",
     narrow:match("^LEFT_col") ~= nil and narrow:find("RIGHT_col", 1, true) == nil,
     vim.inspect(narrow))
+
+  -- The header row carries its own highlight group so the column titles
+  -- read distinctly from the surrounding winbar.
+  local hlres = vim.api.nvim_eval_statusline(grid.render_header("id  name", 0),
+    { use_winbar = true, highlights = true })
+  local has_hdr_hl = false
+  for _, h in ipairs(hlres.highlights or {}) do
+    if h.group == "AutoCoreGridHeader" then has_hdr_hl = true end
+  end
+  ok("p81: the header text carries the AutoCoreGridHeader highlight", has_hdr_hl,
+    vim.inspect(hlres.highlights))
   -- The wrong order, kept as an executable record of the bug: clipping
   -- the escaped string by 2 cuts the %% pair in half.
   ok("p81: escape-then-clip really does corrupt (the bug this prevents)",

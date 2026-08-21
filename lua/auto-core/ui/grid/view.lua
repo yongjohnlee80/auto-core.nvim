@@ -108,7 +108,11 @@ function M.render_header(raw, leftcol)
   -- An empty header stays empty: nothing to truncate, and JSON mode
   -- relies on "" to clear the winbar (a lone "%<" would leave a bar).
   if body == "" then return "" end
-  return body .. "%<"
+  -- Colour the column titles distinctly from the surrounding WinBar with
+  -- a zero-width `%#group#…%*` wrap (no display cells, so alignment and
+  -- the clip arithmetic are untouched); `%<` stays last so a too-wide
+  -- header still truncates from the right.
+  return "%#AutoCoreGridHeader#" .. body .. "%*%<"
 end
 
 ---@class AutoCoreGridView
