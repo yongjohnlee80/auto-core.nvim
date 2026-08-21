@@ -169,6 +169,10 @@ function M.attach(model, opts)
   self._prior_winbar = vim.api.nvim_get_option_value("winbar", { win = self._win, scope = "local" })
   self._prior_wrap = vim.api.nvim_get_option_value("wrap", { win = self._win, scope = "local" })
   self._prior_cursorline = vim.api.nvim_get_option_value("cursorline", { win = self._win, scope = "local" })
+  self._prior_number = vim.api.nvim_get_option_value("number", { win = self._win, scope = "local" })
+  self._prior_relativenumber = vim.api.nvim_get_option_value("relativenumber", { win = self._win, scope = "local" })
+  self._prior_signcolumn = vim.api.nvim_get_option_value("signcolumn", { win = self._win, scope = "local" })
+  self._prior_foldcolumn = vim.api.nvim_get_option_value("foldcolumn", { win = self._win, scope = "local" })
 
   vim.api.nvim_win_set_buf(self._win, self._buf)
   -- Remember what we WROTE, not just what was there: dispose restores an
@@ -176,6 +180,22 @@ function M.attach(model, opts)
   self._owned_wrap, self._owned_cursorline = false, false
   vim.api.nvim_set_option_value("wrap", false, { win = self._win, scope = "local" })
   vim.api.nvim_set_option_value("cursorline", false, { win = self._win, scope = "local" })
+
+  -- The winbar header spans the window from column 0, but the buffer text
+  -- is pushed right by ANY gutter (number, relativenumber, signcolumn,
+  -- foldcolumn). A gutter slides every data cell out from under its
+  -- header label, which is the classic "header does not match the values"
+  -- misalignment. The grid owns these off for the life of the view and
+  -- restores them on dispose, exactly as it does wrap/cursorline. They
+  -- must be set EXPLICITLY: a fresh buffer's window-local defaults vary by
+  -- the user's globals, so relying on the buffer swap to clear them is not
+  -- enough (e.g. signcolumn="auto" still reserves a variable-width gutter).
+  self._owned_number, self._owned_relativenumber = false, false
+  self._owned_signcolumn, self._owned_foldcolumn = "no", "0"
+  vim.api.nvim_set_option_value("number", false, { win = self._win, scope = "local" })
+  vim.api.nvim_set_option_value("relativenumber", false, { win = self._win, scope = "local" })
+  vim.api.nvim_set_option_value("signcolumn", "no", { win = self._win, scope = "local" })
+  vim.api.nvim_set_option_value("foldcolumn", "0", { win = self._win, scope = "local" })
 
   self:_bind_keymaps(opts.keymaps)
   self:_bind_autocmds()
@@ -453,11 +473,17 @@ function View:dispose()
       -- buffer, so anything not written explicitly afterwards is decided
       -- by that implicit restore rather than by us.
       local observed = { winbar = get("winbar"), wrap = get("wrap"),
-        cursorline = get("cursorline") }
+        cursorline = get("cursorline"), number = get("number"),
+        relativenumber = get("relativenumber"), signcolumn = get("signcolumn"),
+        foldcolumn = get("foldcolumn") }
       local prior = { winbar = self._prior_winbar, wrap = self._prior_wrap,
-        cursorline = self._prior_cursorline }
+        cursorline = self._prior_cursorline, number = self._prior_number,
+        relativenumber = self._prior_relativenumber, signcolumn = self._prior_signcolumn,
+        foldcolumn = self._prior_foldcolumn }
       local written = { winbar = self._owned_winbar, wrap = self._owned_wrap,
-        cursorline = self._owned_cursorline }
+        cursorline = self._owned_cursorline, number = self._owned_number,
+        relativenumber = self._owned_relativenumber, signcolumn = self._owned_signcolumn,
+        foldcolumn = self._owned_foldcolumn }
 
       local restore = self._prior_buf
       if not (restore and vim.api.nvim_buf_is_valid(restore)) then
@@ -470,7 +496,8 @@ function View:dispose()
       -- write their value back — the buffer swap above would otherwise
       -- silently discard it. Either way the net effect on someone
       -- else's choice is zero.
-      for _, opt in ipairs({ "winbar", "wrap", "cursorline" }) do
+      for _, opt in ipairs({ "winbar", "wrap", "cursorline",
+        "number", "relativenumber", "signcolumn", "foldcolumn" }) do
         local ours = observed[opt] == written[opt]
         vim.api.nvim_set_option_value(opt, ours and prior[opt] or observed[opt],
           { win = self._win, scope = "local" })

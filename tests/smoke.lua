@@ -11465,6 +11465,33 @@ print("\n[83] ADR-0058 — auto-core.rpc (async msgpack-RPC client)")
   pcall(vim.fn.serverstop, addr)
 end)()
 
+-- ─────────── [grid] ui.grid — result grid owns its window gutters ──────────
+print("\n[grid] ui.grid — a result grid disables gutters so the winbar header aligns")
+;(function()
+  local grid = core.ui.grid
+  local model = grid.model({ columns = { "a", "b", "c" }, rows = { { "1", "2", "3" } } })
+  vim.cmd("botright split")
+  local win = vim.api.nvim_get_current_win()
+  local function setw(o, v) vim.api.nvim_set_option_value(o, v, { win = win, scope = "local" }) end
+  local function getw(o) return vim.api.nvim_get_option_value(o, { win = win, scope = "local" }) end
+  setw("number", true); setw("relativenumber", true)
+  setw("signcolumn", "yes"); setw("foldcolumn", "2")
+
+  local view = grid.attach(model, { win = win })
+  -- The winbar header sits at window column 0; any gutter would slide the
+  -- body cells out from under their labels. The grid must own them off.
+  ok("[grid] number off under the grid", getw("number") == false, tostring(getw("number")))
+  ok("[grid] relativenumber off under the grid", getw("relativenumber") == false)
+  ok("[grid] signcolumn off under the grid", getw("signcolumn") == "no", tostring(getw("signcolumn")))
+  ok("[grid] foldcolumn off under the grid", getw("foldcolumn") == "0", tostring(getw("foldcolumn")))
+
+  view:dispose()
+  ok("[grid] number restored on dispose", getw("number") == true, tostring(getw("number")))
+  ok("[grid] signcolumn restored on dispose", getw("signcolumn") == "yes", tostring(getw("signcolumn")))
+  ok("[grid] foldcolumn restored on dispose", getw("foldcolumn") == "2", tostring(getw("foldcolumn")))
+  pcall(vim.cmd, "close")
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
