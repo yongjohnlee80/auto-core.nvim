@@ -10726,6 +10726,17 @@ print("\n[81] ADR-0058 — ui.grid.attach (window ownership, cell cursor, header
   ok("p81: render_header never leaves a live statusline item",
     rendered(grid.render_header(raw_pct, 1)) == "%b  c",
     vim.inspect(rendered(grid.render_header(raw_pct, 1))))
+
+  -- A header WIDER than the window truncates from the RIGHT (keeps the
+  -- left columns above the body), because the trailing %< moves the
+  -- truncation point to the end. Without it a winbar truncates from the
+  -- START — the rightmost columns paint with a leading "<" while the
+  -- body shows the leftmost, and header/body drift apart (the field bug).
+  local wide = "LEFT_col              MIDDLE_col              RIGHT_col"
+  local narrow = vim.api.nvim_eval_statusline(grid.render_header(wide, 0), { maxwidth = 20 }).str
+  ok("p81: a too-wide header keeps its LEFT (truncates from the right)",
+    narrow:match("^LEFT_col") ~= nil and narrow:find("RIGHT_col", 1, true) == nil,
+    vim.inspect(narrow))
   -- The wrong order, kept as an executable record of the bug: clipping
   -- the escaped string by 2 cuts the %% pair in half.
   ok("p81: escape-then-clip really does corrupt (the bug this prevents)",

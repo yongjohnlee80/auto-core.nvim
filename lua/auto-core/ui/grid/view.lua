@@ -95,7 +95,20 @@ end
 ---@param leftcol integer -- the target window's current leftcol
 ---@return string
 function M.render_header(raw, leftcol)
-  return M.escape_statusline(M.clip_header(raw, leftcol))
+  -- Trailing `%<` is the truncation point. A header wider than the
+  -- window is the normal case (many columns), and a winbar with no `%<`
+  -- truncates from the START — Neovim would paint the RIGHTMOST columns
+  -- with a leading `<`, while the body, scrolled to leftcol, shows the
+  -- LEFT ones. Header and body would truncate from opposite ends and
+  -- never line up. `%<` at the very end truncates from the right instead,
+  -- keeping the left columns aligned with the body. It is inert when the
+  -- header already fits, and it must sit AFTER escaping so it stays a
+  -- live statusline item rather than a literal `%<`.
+  local body = M.escape_statusline(M.clip_header(raw, leftcol))
+  -- An empty header stays empty: nothing to truncate, and JSON mode
+  -- relies on "" to clear the winbar (a lone "%<" would leave a bar).
+  if body == "" then return "" end
+  return body .. "%<"
 end
 
 ---@class AutoCoreGridView
