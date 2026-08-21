@@ -1244,6 +1244,32 @@ do
     ok("self-ext: no events under a runtime-created node_modules/",
       not saw_under_nm, vim.inspect({ added = #se_seen - pre_ignore }))
 
+    -- Test 3b — the agent mailbox transport is ignored, but the KB
+    -- beside it is NOT. A multi-agent session writes to
+    -- `.auto-agents/mailbox/` constantly, and each new instance/agent
+    -- subdir used to consume a watch handle AND publish events that
+    -- drove a consumer refresh. The scoping is deliberate: `kb/` holds
+    -- documents a user browses and edits, so it stays watched.
+    local pre_aa = #se_seen
+    vim.fn.mkdir(se_root .. "/.auto-agents/mailbox/inst/agent/outbox", "p")
+    vim.fn.mkdir(se_root .. "/.auto-agents/kb/shared", "p")
+    vim.wait(300)
+    vim.fn.writefile({ "{}" },
+      se_root .. "/.auto-agents/mailbox/inst/agent/outbox/msg.json")
+    vim.fn.writefile({ "# doc" }, se_root .. "/.auto-agents/kb/shared/note.md")
+    vim.wait(800, function() return se_saw("/.auto-agents/kb/shared/note.md") end)
+    local saw_under_mailbox = false
+    for i = pre_aa + 1, #se_seen do
+      if se_seen[i].path:find("/%.auto%-agents/mailbox/") then
+        saw_under_mailbox = true
+      end
+    end
+    ok("self-ext: no events under .auto-agents/mailbox/ (agent transport)",
+      not saw_under_mailbox, vim.inspect({ added = #se_seen - pre_aa }))
+    ok("self-ext: .auto-agents/kb/ IS still watched (scoping is deliberate)",
+      se_saw("/.auto-agents/kb/shared/note.md"),
+      vim.inspect({ added = #se_seen - pre_aa }))
+
     -- Test 5 — deletion cleanup (C5). A runtime dir adds a handle; deleting
     -- it reclaims the handle so the count returns to baseline (honest cap
     -- accounting under churn).

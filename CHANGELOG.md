@@ -10,6 +10,35 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.1.65] — 2026-08-21 — ADR-0059: `fs.watch` ignores the agent mailbox transport
+
+Strictly additive patch; `api_version` stays `0.1`. One new
+`DEFAULT_IGNORE` pattern, no signature or topic changes.
+
+### Changed
+
+- **`fs/watch.lua` `DEFAULT_IGNORE` +`/%.auto%-agents/mailbox/`.** The
+  mailbox tree (ADR 0013) lives INSIDE the watched workspace, and a
+  multi-agent session writes to it constantly — outbox → inbox →
+  responses → archive. On Linux the watcher opens one `fs_event` handle
+  per directory, so every new instance/agent subdirectory also consumed
+  a handle. Agent traffic was therefore financing its own refresh load:
+  each write published a `core.file:*` event that consumers turned into
+  a tree refresh.
+
+  Scoped to `mailbox/` **deliberately**, not the whole `.auto-agents/`
+  tree — the sibling `kb/` holds documents a user browses and edits, and
+  hiding those from the watcher would mean a newly created KB doc never
+  appears in an expanded directory. The transport is the part that is
+  pure per-instance runtime state. Pinned both ways in smoke: no events
+  under `mailbox/`, events still fire under `kb/`.
+
+  Pairs with `auto-finder` ≥ v0.3.5 (which stops treating every
+  `files:changed` as a structural full-rescan trigger), but each half
+  stands alone.
+
+Smoke **1608/0** (two new pins in the self-extension section).
+
 ## [v0.1.61] — 2026-07-06 — ADR-0048 Phase 1: events.register_topics + auto-core.trust
 
 Strictly additive patch; `api_version` stays `0.1`. Ships the two

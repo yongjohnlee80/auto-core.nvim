@@ -83,6 +83,19 @@ local DEFAULT_IGNORE = {
   "%.swo$",             -- vim secondary swap
   "~$",                 -- vim backup file
   "/4913$",             -- vim's "is the dir writable" probe
+  -- Agent mailbox transport (ADR 0013). It lives INSIDE the watched
+  -- workspace and a multi-agent session writes to it constantly
+  -- (outbox -> inbox -> responses -> archive), so agent traffic used
+  -- to finance its own refresh load: every write published a
+  -- `core.file:*` event, and every new instance/agent subdirectory
+  -- consumed another per-directory watch handle.
+  --
+  -- Scoped to `mailbox/` deliberately, NOT the whole `.auto-agents/`
+  -- tree: the sibling `kb/` holds documents a user genuinely browses
+  -- and edits, and hiding those from the watcher would mean a new KB
+  -- doc never appears in an expanded directory. The transport is the
+  -- part that is pure per-instance runtime state.
+  "/%.auto%-agents/mailbox/",
 }
 
 local DEFAULT_DEBOUNCE_MS = 100
