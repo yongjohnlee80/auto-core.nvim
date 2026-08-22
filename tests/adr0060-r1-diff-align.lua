@@ -186,6 +186,164 @@ end)()
   ok("[5] every pad has lineno=nil (inert for row_for / anchoring)", bad == 0, "bad=" .. bad)
 end)()
 
+-- ── [6] MF5: a range comment renders as a SPAN, not a single line ──
+-- _paint read only `a.line` and `a.side`; neither start_line nor start_side
+-- appeared anywhere in auto-core. A review on lines 3-5 was drawn under line 5
+-- with no span and no range label — byte-identical to a single-line finding,
+-- so the reviewer's stated scope silently vanished. `line` is DOCUMENTED as
+-- "the END line of a range", so this contradicted the declared contract.
+;(function()
+  local dv = require("auto-core.ui").diffview
+  local marks = require("auto-core.ui.marks")
+
+  -- A file whose b/ side renders new lines 1..6, so 3..5 is a real range.
+  local diff = table.concat({
+    "diff --git a/s.go b/s.go",
+    "--- a/s.go",
+    "+++ b/s.go",
+    "@@ -1,6 +1,6 @@",
+    " l1", " l2", "-old3", "+new3", " l4", " l5", " l6",
+  }, "\n") .. "\n"
+  local files = D.parse(diff)
+
+  local saved_cols = vim.o.columns
+  vim.o.columns = 200
+
+  local function open_with(ann)
+    dv.close()
+    local okopen = dv.open({ files = files, annotations = { ["s.go"] = ann } })
+    return okopen, dv._state_for_tests()
+  end
+
+  ---Collect this namespace's extmarks on the b/ pane, with details.
+  ---The b/ side is float.multi's `preview` pane (a/ is `middle`).
+  local function bmarks(state)
+    if not (state and state.float) then return nil end
+    local buf = state.float:bufnr("preview")
+    if not buf or not vim.api.nvim_buf_is_valid(buf) then return nil end
+    return vim.api.nvim_buf_get_extmarks(buf, marks.ns("diffview"), 0, -1,
+      { details = true })
+  end
+
+  local okr = open_with({
+    { path = "s.go", line = 5, start_line = 3, side = "RIGHT",
+      start_side = "RIGHT", severity = "must-fix", reviewer = "lector",
+      body = "this block leaks" },
+  })
+  ok("[6] open() succeeds with a range annotation", okr ~= nil)
+  local ranged = bmarks(dv._state_for_tests())
+  ok("[6] the b/ pane carries extmarks", ranged ~= nil and #ranged > 0,
+    ranged and #ranged)
+
+  -- The span is one `line_hl_group` mark PER COVERED ROW, in a review-severity
+  -- group. Counting review groups specifically matters: paint_diff_column also
+  -- sets line_hl_group (AutoCoreDiff*) on add/del rows, so a naive count of
+  -- line_hl_group marks would conflate diff colouring with the span and pass
+  -- for a single-line comment too.
+  local function span_rows(list)
+    local rows = {}
+    for _, m in ipairs(list or {}) do
+      local g = (m[4] or {}).line_hl_group
+      if type(g) == "string" and g:match("^AutoCoreReview") then rows[m[2]] = true end
+    end
+    local n = 0
+    for _ in pairs(rows) do n = n + 1 end
+    return n
+  end
+  local labelled = false
+  for _, m in ipairs(ranged or {}) do
+    local d = m[4] or {}
+    if d.virt_lines then
+      for _, vl in ipairs(d.virt_lines) do
+        for _, chunk in ipairs(vl) do
+          if type(chunk[1]) == "string" and chunk[1]:match("L3.-5") then labelled = true end
+        end
+      end
+    end
+  end
+  local spans = span_rows(ranged)
+  ok("[6] *** the covered rows carry a review SPAN highlight (3 rows: 3,4,5) ***",
+    spans == 3, "review-highlighted rows=" .. spans)
+  ok("[6] *** and the annotation header names the range (L3-5) ***",
+    labelled, "no L3-5 label found in any virt_lines chunk")
+
+  -- CONTROL: a single-line comment must NOT gain a span or a range label, or
+  -- the assertions above would pass for everything.
+  local oks = open_with({
+    { path = "s.go", line = 5, side = "RIGHT", severity = "nit",
+      reviewer = "lector", body = "single" },
+  })
+  ok("[6] CONTROL — open() succeeds with a single-line annotation", oks ~= nil)
+  local single = bmarks(dv._state_for_tests())
+  local slabel = false
+  for _, m in ipairs(single or {}) do
+    local d = m[4] or {}
+    if d.virt_lines then
+      for _, vl in ipairs(d.virt_lines) do
+        for _, chunk in ipairs(vl) do
+          if type(chunk[1]) == "string" and chunk[1]:match("L%d+.-%d") then slabel = true end
+        end
+      end
+    end
+  end
+  local ssp = span_rows(single)
+  ok("[6] CONTROL — a single-line comment draws NO span", ssp == 0,
+    "review-highlighted rows=" .. ssp)
+  ok("[6] CONTROL — and carries no range label", not slabel)
+
+  dv.close()
+  vim.o.columns = saved_cols
+end)()
+
+-- ── [7] MF5: unplaced_for reports PARTIAL placement, not just the end line ──
+-- It keyed off `a.line` alone, so a range whose START was outside the diff was
+-- reported as fully placed (silent partial loss), while a range whose END was
+-- outside was reported wholly lost even though its start was renderable.
+;(function()
+  local dv = require("auto-core.ui").diffview
+  local files = D.parse(table.concat({
+    "diff --git a/s.go b/s.go",
+    "--- a/s.go",
+    "+++ b/s.go",
+    "@@ -300,3 +300,3 @@",
+    " l300", "-old301", "+new301", " l302",
+  }, "\n") .. "\n")
+  -- b/ side carries new lines 300, 301, 302 only.
+
+  local function classify(ann)
+    return dv.unplaced_for(files, { ["s.go"] = { ann } })
+  end
+
+  local inside = classify({ path = "s.go", line = 302, start_line = 300,
+                            side = "RIGHT", body = "fully inside" })
+  ok("[7] CONTROL — a range wholly inside the diff is not reported",
+    #inside == 0, vim.inspect(inside))
+
+  local start_out = classify({ path = "s.go", line = 302, start_line = 200,
+                               side = "RIGHT", body = "start off-diff" })
+  ok("[7] *** a range whose START is off-diff is REPORTED (was silent) ***",
+    #start_out == 1, vim.inspect(start_out))
+  ok("[7] and it is marked partial rather than wholly unplaceable",
+    start_out[1] and start_out[1].partial == true, vim.inspect(start_out[1]))
+
+  local end_out = classify({ path = "s.go", line = 400, start_line = 301,
+                             side = "RIGHT", body = "end off-diff" })
+  ok("[7] a range whose END is off-diff is still reported",
+    #end_out == 1, vim.inspect(end_out))
+  ok("[7] and IT is partial too — its start is renderable",
+    end_out[1] and end_out[1].partial == true, vim.inspect(end_out[1]))
+
+  local gone = classify({ path = "s.go", line = 900, side = "RIGHT",
+                          body = "nowhere near" })
+  ok("[7] CONTROL — a single line outside the diff is wholly unplaceable",
+    #gone == 1 and gone[1].partial ~= true, vim.inspect(gone))
+
+  local nofile = dv.unplaced_for(files, { ["other.go"] = {
+    { path = "other.go", line = 1, body = "no such file in the diff" } } })
+  ok("[7] CONTROL — a file the diff does not carry is unplaceable",
+    #nofile == 1, vim.inspect(nofile))
+end)()
+
 io.stdout:write(string.format("\n%d passed, %d failed\n", pass, fail)); io.stdout:flush()
 if fail > 0 then os.exit(1) end
 os.exit(0)

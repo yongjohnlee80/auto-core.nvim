@@ -197,6 +197,11 @@ function M.annotate(bufnr, ns, row, entry, opts)
 
   local head = sev
   if entry.author and entry.author ~= "" then head = head .. " · " .. entry.author end
+  -- The reviewer's SPAN, when the finding covers more than one line. It goes in
+  -- the header rather than being implied by highlighting alone, so the scope
+  -- survives even when one endpoint falls outside the rendered diff and the
+  -- span itself cannot be drawn (ADR-0060 r1 MF5).
+  if entry.range and entry.range ~= "" then head = head .. " · " .. entry.range end
   if entry.resolved then head = head .. " · resolved" end
 
   local out = { { { "▎ ", frame }, { head, sev_hl } } }

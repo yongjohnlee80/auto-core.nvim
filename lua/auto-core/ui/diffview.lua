@@ -80,9 +80,37 @@ local function _paint(bufnr, column, annotations, side)
     if want == side then
       local row = gitdiff.row_for(column, a.line)
       if row then
+        -- A RANGE is rendered as a range (ADR-0060 r1 MF5). `line` is
+        -- documented as the END of a span, so drawing 128-134 under 134 with no
+        -- span and no label made it indistinguishable from a single-line
+        -- finding — silently discarding the reviewer's stated scope.
+        --
+        -- `start_side` defaults to `side`, as GitHub does. A range whose start
+        -- lies outside the rendered diff still gets its LABEL, so the scope
+        -- survives even when the span itself cannot be drawn.
+        local range_label, start_row = nil, nil
+        if a.start_line and a.start_line ~= a.line then
+          local scol = column
+          if a.start_side and a.start_side ~= (a.side or "RIGHT") then
+            scol = nil -- a span across both sides cannot be drawn in one pane
+          end
+          start_row = scol and gitdiff.row_for(scol, a.start_line) or nil
+          range_label = ("L%d-%d"):format(
+            math.min(a.start_line, a.line), math.max(a.start_line, a.line))
+          if start_row and start_row <= row then
+            local span_hl = a.resolved and "AutoCoreReviewResolved"
+              or (marks.SEVERITY_HL[tostring(a.severity or "comment")]
+                  or "AutoCoreReviewFrame")
+            -- One mark per covered row: `line` gives the whole row the span
+            -- colour, which reads as a block rather than a character range.
+            for r = start_row, row do
+              marks.line(bufnr, ns, r, span_hl, { priority = 90 })
+            end
+          end
+        end
         marks.annotate(bufnr, ns, row, {
           severity = a.severity, author = a.author or a.reviewer,
-          body = a.body, resolved = a.resolved,
+          body = a.body, resolved = a.resolved, range = range_label,
         }, { width = 70 })
         placed = placed + 1
       end
@@ -273,12 +301,21 @@ end
 ---contents without synthesising keypresses.
 function M._state_for_tests() return _state end
 
----unplaced_for reports annotations whose line is not present in the rendered
----diff — a comment on an unchanged line, or on a file the diff does not carry.
----A caller should surface these rather than let feedback vanish.
+---unplaced_for reports annotations the rendered diff cannot fully show — a
+---comment on an unchanged line, on a file the diff does not carry, or a RANGE
+---with an endpoint outside the diff. A caller should surface these rather than
+---let feedback vanish.
+---
+---Three outcomes, because two of them used to be wrong (ADR-0060 r1 MF5). This
+---keyed off `a.line` alone, so a range whose START was off-diff was reported as
+---fully placed — silent partial loss — while a range whose END was off-diff was
+---reported as wholly lost even though its start was renderable.
+---
+---An entry with `partial = true` IS drawn, but not over its whole span; one
+---without it is not drawn at all.
 ---@param files table[]
 ---@param annotations table<string, table[]>
----@return table[] unplaced
+---@return table[] unplaced  each { path, line, body, partial: boolean? }
 function M.unplaced_for(files, annotations)
   local out = {}
   for path, list in pairs(annotations or {}) do
@@ -287,8 +324,25 @@ function M.unplaced_for(files, annotations)
     for _, a in ipairs(list) do
       -- LEFT -> the a/ side, RIGHT -> the b/ side.
       local col = sides and ((a.side or "RIGHT") == "LEFT" and sides.before or sides.after)
-      if not col or not gitdiff.row_for(col, a.line) then
+      local end_row = col and gitdiff.row_for(col, a.line) or nil
+      local has_range = a.start_line ~= nil and a.start_line ~= a.line
+      local start_row
+      if has_range and col then
+        local scol = col
+        if a.start_side and a.start_side ~= (a.side or "RIGHT") then
+          scol = (a.start_side == "LEFT") and (sides and sides.before)
+            or (sides and sides.after)
+        end
+        start_row = scol and gitdiff.row_for(scol, a.start_line) or nil
+      end
+
+      if not end_row and not (has_range and start_row) then
+        -- Neither endpoint is in the diff: nothing of this comment is drawn.
         out[#out + 1] = { path = path, line = a.line, body = a.body }
+      elseif has_range and not (end_row and start_row) then
+        -- One endpoint renders and the other does not: the comment appears, but
+        -- its stated span is not fully shown. Report it as partial.
+        out[#out + 1] = { path = path, line = a.line, body = a.body, partial = true }
       end
     end
   end
