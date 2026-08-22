@@ -11514,6 +11514,168 @@ print("\n[grid] ui.grid — a result grid disables gutters so the winbar header 
   pcall(vim.cmd, "close")
 end)()
 
+-- ────────── [gitlog] git.log — commits, range policy, changes (ADR-0060 P1) ──────────
+print("\n[gitlog] auto-core.git.log — structured history + working changes (ADR-0060 P1)")
+;(function()
+  local glog = require("auto-core.git").log
+  ok("[gitlog] exported on the git facade", type(glog) == "table" and type(glog.commits) == "function")
+  ok("[gitlog] DEFAULT_WINDOW is 15 (ADR-0060 §6.1)", glog.DEFAULT_WINDOW == 15,
+    tostring(glog.DEFAULT_WINDOW))
+
+  -- Guard clauses must never throw — a panel calls these before a repo is known.
+  ok("[gitlog] commits() with no common_dir is empty + err",
+    select(1, glog.commits(nil)) ~= nil and #(select(1, glog.commits(nil))) == 0
+    and select(2, glog.commits(nil)) ~= nil)
+  ok("[gitlog] working_changes() with no worktree is empty + err",
+    #(select(1, glog.working_changes(""))) == 0 and select(2, glog.working_changes("")) ~= nil)
+  ok("[gitlog] merge_base() with missing args errors", select(2, glog.merge_base(nil, "a", "b")) ~= nil)
+  ok("[gitlog] rev_exists() is false, not an error, on nil", glog.rev_exists(nil, "x") == false)
+
+  -- ── a real repo: history queries need real git output ──
+  local repo = vim.fn.tempname() .. "_gitlog"
+  vim.fn.mkdir(repo, "p")
+  local function g(...)
+    local argv = { "git", "-C", repo, "-c", "user.email=t@t", "-c", "user.name=t" }
+    for _, a in ipairs({ ... }) do argv[#argv + 1] = a end
+    local out = vim.fn.system(argv)
+    return vim.v.shell_error, out
+  end
+  g("init", "-q", "-b", "main")
+  vim.fn.writefile({ "one" }, repo .. "/a.txt")
+  g("add", "."); g("commit", "-q", "-m", "first: base commit")
+  local base_sha = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "HEAD" }))
+  local common = repo .. "/.git"
+  if base_sha == "" or vim.v.shell_error ~= 0 then
+    ok("[gitlog] git fixture", false, "git unavailable")
+    vim.fn.delete(repo, "rf")
+    return
+  end
+
+  -- A subject containing the delimiters + a pipe + quotes: the parser must not
+  -- lose or split it. This is why the format uses US/RS, not tab-or-pipe.
+  vim.fn.writefile({ "two" }, repo .. "/b.txt")
+  g("add", "."); g("commit", "-q", "-m", 'weird: a|b "quoted" $x %s subject')
+
+  local commits, err = glog.commits(common, {})
+  ok("[gitlog] commits() reads real history", err == nil and #commits == 2, tostring(err))
+  local head = commits[1]
+  ok("[gitlog] a commit carries sha/short/author/ts/subject",
+    head and #head.sha == 40 and head.short ~= "" and head.author == "t"
+    and head.email == "t@t" and head.ts > 0 and head.subject ~= "",
+    vim.inspect(head))
+  ok("[gitlog] a delimiter/quote-heavy subject survives intact",
+    head and head.subject == 'weird: a|b "quoted" $x %s subject', head and head.subject)
+  ok("[gitlog] parents are a list; a non-merge has one",
+    head and type(head.parents) == "table" and #head.parents == 1 and head.merge == false,
+    head and vim.inspect(head.parents))
+  ok("[gitlog] the root commit has no parents",
+    commits[2] and #commits[2].parents == 0)
+  ok("[gitlog] newest first", commits[1].ts >= commits[2].ts)
+
+  -- limit + skip page through
+  local one = glog.commits(common, { limit = 1 })
+  local two = glog.commits(common, { limit = 1, skip = 1 })
+  ok("[gitlog] limit bounds the result", #one == 1)
+  ok("[gitlog] skip pages past it", #two == 1 and two[1].sha == commits[2].sha)
+
+  -- ── range policy (ADR-0060 §2.4) ──
+  g("checkout", "-q", "-b", "feature")
+  vim.fn.writefile({ "f1" }, repo .. "/f1.txt")
+  g("add", "."); g("commit", "-q", "-m", "feature: one")
+  vim.fn.writefile({ "f2" }, repo .. "/f2.txt")
+  g("add", "."); g("commit", "-q", "-m", "feature: two")
+
+  local rc, meta, rerr = glog.range(common, { rev = "feature", base = "main" })
+  ok("[gitlog] a diverged branch resolves since_divergence",
+    rerr == nil and meta.mode == "since_divergence", vim.inspect(meta))
+  ok("[gitlog] and returns ONLY its own commits (not the base's)",
+    #rc == 2 and rc[1].subject == "feature: two" and rc[2].subject == "feature: one",
+    vim.inspect(vim.tbl_map(function(c) return c.subject end, rc)))
+  ok("[gitlog] meta names the merge-base", meta.merge_base ~= nil and #meta.merge_base == 40,
+    tostring(meta.merge_base))
+
+  local bc, bmeta = glog.range(common, { rev = "main", base = "main" })
+  ok("[gitlog] the base branch itself falls back to a window",
+    bmeta.mode == "window" and bmeta.limit == 15, vim.inspect(bmeta))
+  ok("[gitlog] the window returns the base's own history", #bc == 2, tostring(#bc))
+
+  local wc, wmeta = glog.range(common, { rev = "main", base = "main", limit = 1 })
+  ok("[gitlog] an explicit limit is honoured in window mode",
+    #wc == 1 and wmeta.limit == 1)
+
+  -- an unrelated history shares no merge-base -> window, not a crash
+  local nb, nmeta = glog.range(common, { rev = "feature", base = "refs/heads/does-not-exist" })
+  ok("[gitlog] a missing base degrades to a window", nmeta.mode == "window" and #nb > 0,
+    vim.inspect(nmeta))
+
+  ok("[gitlog] merge_base() agrees with the range meta",
+    glog.merge_base(common, "feature", "main") == meta.merge_base)
+  ok("[gitlog] rev_exists() true for a real ref and false for a fake one",
+    glog.rev_exists(common, "main") == true and glog.rev_exists(common, "nope/x") == false)
+
+  -- ── working_changes: every status class, including a rename ──
+  vim.fn.writefile({ "one", "edited" }, repo .. "/a.txt")   -- modified
+  vim.fn.writefile({ "brand new" }, repo .. "/new.txt")     -- untracked
+  g("rm", "-q", "b.txt")                                     -- deleted (staged)
+  vim.fn.writefile({ "f1" }, repo .. "/renamed.txt")
+  g("add", "renamed.txt"); g("rm", "-q", "--cached", "f1.txt")
+  vim.fn.delete(repo .. "/f1.txt")
+
+  local ch, cerr = glog.working_changes(repo)
+  ok("[gitlog] working_changes() reads the worktree", cerr == nil and #ch > 0, tostring(cerr))
+  local by = {}
+  for _, c in ipairs(ch) do by[c.path] = c end
+  ok("[gitlog] a modified file is kind=modified",
+    by["a.txt"] and by["a.txt"].kind == "modified", vim.inspect(by["a.txt"]))
+  ok("[gitlog] an untracked file is kind=untracked and not staged",
+    by["new.txt"] and by["new.txt"].kind == "untracked" and by["new.txt"].staged == false,
+    vim.inspect(by["new.txt"]))
+  ok("[gitlog] a deleted file is kind=deleted",
+    by["b.txt"] and by["b.txt"].kind == "deleted", vim.inspect(by["b.txt"]))
+  ok("[gitlog] every change carries x/y/staged/unstaged",
+    by["a.txt"] and by["a.txt"].x ~= nil and by["a.txt"].y ~= nil
+    and type(by["a.txt"].staged) == "boolean" and type(by["a.txt"].unstaged) == "boolean")
+  ok("[gitlog] results are path-sorted",
+    (function() for i = 2, #ch do if ch[i - 1].path > ch[i].path then return false end end return true end)())
+
+  -- A path containing a SPACE and a QUOTE proves the -z parse: with git's
+  -- default quoting this entry would arrive wrapped in quotes and split.
+  vim.fn.writefile({ "x" }, repo .. '/we ird".txt')
+  local ch2 = glog.working_changes(repo)
+  local found_weird = false
+  for _, c in ipairs(ch2) do if c.path == 'we ird".txt' then found_weird = true end end
+  ok("[gitlog] a path with a space and a quote parses literally (-z)", found_weird,
+    vim.inspect(vim.tbl_map(function(c) return c.path end, ch2)))
+
+  -- ── commit_files ──
+  local cf, cferr = glog.commit_files(common, commits[1].sha)
+  ok("[gitlog] commit_files() lists what a commit touched",
+    cferr == nil and #cf == 1 and cf[1].path == "b.txt", vim.inspect(cf))
+  ok("[gitlog] and labels it with the same kind vocabulary",
+    cf[1] and cf[1].kind == "added", cf[1] and cf[1].kind)
+  ok("[gitlog] commit_files() guards a nil sha", select(2, glog.commit_files(common, nil)) ~= nil)
+
+  -- ── async variants deliver on the main loop ──
+  local acommits, aerr, adone
+  glog.commits_async(common, { limit = 1 }, function(c, e) acommits, aerr, adone = c, e, true end)
+  vim.wait(4000, function() return adone end, 10)
+  ok("[gitlog] commits_async delivers", adone == true and aerr == nil and #acommits == 1,
+    tostring(aerr))
+
+  local ach, adone2
+  glog.working_changes_async(repo, function(c) ach, adone2 = c, true end)
+  vim.wait(4000, function() return adone2 end, 10)
+  ok("[gitlog] working_changes_async delivers", adone2 == true and #ach > 0)
+
+  local bad, bdone
+  glog.commits_async("", {}, function(c, e) bad, bdone = e, true end)
+  vim.wait(2000, function() return bdone end, 10)
+  ok("[gitlog] commits_async reports a bad common_dir instead of hanging",
+    bdone == true and bad ~= nil, tostring(bad))
+
+  vim.fn.delete(repo, "rf")
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
