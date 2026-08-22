@@ -20,5 +20,6 @@ M.section    = require("auto-core.ui.section")
 M.float      = require("auto-core.ui.float")
 M.grid       = require("auto-core.ui.grid")
 M.highlights = require("auto-core.ui.highlights")
+M.marks      = require("auto-core.ui.marks")
 
 return M

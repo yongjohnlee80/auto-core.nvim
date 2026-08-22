@@ -11676,6 +11676,319 @@ print("\n[gitlog] auto-core.git.log — structured history + working changes (AD
   vim.fn.delete(repo, "rf")
 end)()
 
+-- ────────── [gitdiff] git.diff — unified-diff parser (ADR-0060 P2) ──────────
+print("\n[gitdiff] auto-core.git.diff — unified-diff parsing (ADR-0060 P2)")
+;(function()
+  local D = require("auto-core.git").diff
+  ok("[gitdiff] exported on the git facade", type(D) == "table" and type(D.parse) == "function")
+  ok("[gitdiff] parse(nil) is empty, not an error", #D.parse(nil) == 0)
+  ok("[gitdiff] parse('') is empty", #D.parse("") == 0)
+
+  -- A hand-written diff exercising every shape at once. Hand-written on
+  -- purpose: git will not readily produce a rename AND a binary AND a
+  -- no-newline marker in one commit, and each is a distinct parser branch.
+  local patch = table.concat({
+    "commit deadbeef",                      -- `git show` preamble must be ignored
+    "Author: t <t@t>",
+    "",
+    "    subject line",
+    "",
+    "diff --git a/keep.txt b/keep.txt",
+    "index 111..222 100644",
+    "--- a/keep.txt",
+    "+++ b/keep.txt",
+    "@@ -1,4 +1,5 @@ function ctx()",
+    " one",
+    "-two",
+    "+two-edited",
+    "+inserted",
+    " three",
+    " four",
+    "@@ -20,2 +21,2 @@",
+    "-old20",
+    "+new21",
+    " tail",
+    "diff --git a/added.txt b/added.txt",
+    "new file mode 100644",
+    "--- /dev/null",
+    "+++ b/added.txt",
+    "@@ -0,0 +1,2 @@",
+    "+alpha",
+    "+beta",
+    "\\ No newline at end of file",
+    "diff --git a/gone.txt b/gone.txt",
+    "deleted file mode 100644",
+    "--- a/gone.txt",
+    "+++ /dev/null",
+    "@@ -1,1 +0,0 @@",
+    "-was here",
+    "diff --git a/old name.txt b/new name.txt",
+    "similarity index 95%",
+    "rename from old name.txt",
+    "rename to new name.txt",
+    "diff --git a/logo.png b/logo.png",
+    "index 333..444 100644",
+    "Binary files a/logo.png and b/logo.png differ",
+  }, "\n")
+
+  local files = D.parse(patch)
+  ok("[gitdiff] five files parsed, preamble ignored", #files == 5, tostring(#files))
+  local by = {}
+  for _, f in ipairs(files) do by[f.path] = f end
+
+  -- modified
+  local keep = by["keep.txt"]
+  ok("[gitdiff] a modified file is kind=modified with both paths",
+    keep and keep.kind == "modified" and keep.old_path == "keep.txt"
+    and keep.new_path == "keep.txt", vim.inspect(keep and keep.kind))
+  ok("[gitdiff] both hunks captured", keep and #keep.hunks == 2, keep and #keep.hunks)
+  local h1 = keep and keep.hunks[1]
+  ok("[gitdiff] hunk header numbers parsed",
+    h1 and h1.old_start == 1 and h1.old_count == 4
+    and h1.new_start == 1 and h1.new_count == 5, vim.inspect(h1 and { h1.old_start, h1.old_count, h1.new_start, h1.new_count }))
+  ok("[gitdiff] the @@ heading is kept", h1 and h1.heading == "function ctx()", h1 and h1.heading)
+  ok("[gitdiff] a hunk with omitted counts defaults to 1",
+    (function()
+      local f = D.parse("diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -3 +3 @@\n-a\n+b")
+      local h = f[1] and f[1].hunks[1]
+      return h and h.old_count == 1 and h.new_count == 1 and h.old_start == 3
+    end)())
+
+  -- line numbering is the whole point: a comment anchors to it
+  local kinds, olds, news = {}, {}, {}
+  for _, l in ipairs(h1.lines) do
+    kinds[#kinds + 1] = l.kind; olds[#olds + 1] = tostring(l.old or "-")
+    news[#news + 1] = tostring(l.new or "-")
+  end
+  ok("[gitdiff] line kinds in order",
+    table.concat(kinds, ",") == "context,del,add,add,context,context",
+    table.concat(kinds, ","))
+  ok("[gitdiff] OLD numbering skips adds",
+    table.concat(olds, ",") == "1,2,-,-,3,4", table.concat(olds, ","))
+  ok("[gitdiff] NEW numbering skips deletes",
+    table.concat(news, ",") == "1,-,2,3,4,5", table.concat(news, ","))
+  ok("[gitdiff] the marker is stripped from the text",
+    h1.lines[2].text == "two" and h1.lines[3].text == "two-edited",
+    h1.lines[2].text .. "/" .. h1.lines[3].text)
+  ok("[gitdiff] the second hunk restarts numbering at its own start",
+    keep.hunks[2].lines[1].old == 20 and keep.hunks[2].lines[2].new == 21)
+
+  -- added / deleted / renamed / binary
+  ok("[gitdiff] a new file is kind=added with no old_path",
+    by["added.txt"] and by["added.txt"].kind == "added" and by["added.txt"].old_path == nil,
+    vim.inspect(by["added.txt"] and by["added.txt"].kind))
+  ok("[gitdiff] the no-newline marker annotates the previous line, not a new one",
+    (function()
+      local a = by["added.txt"]
+      local last = a and a.hunks[1].lines[#a.hunks[1].lines]
+      return last and last.text == "beta" and last.no_newline == true
+        and #a.hunks[1].lines == 2
+    end)())
+  ok("[gitdiff] a deleted file is kind=deleted and displays its old path",
+    by["gone.txt"] and by["gone.txt"].kind == "deleted"
+    and by["gone.txt"].new_path == nil, vim.inspect(by["gone.txt"] and by["gone.txt"].kind))
+  local ren = by["new name.txt"]
+  ok("[gitdiff] a rename keeps BOTH paths (with spaces) and the similarity",
+    ren and ren.kind == "renamed" and ren.old_path == "old name.txt"
+    and ren.new_path == "new name.txt" and ren.similarity == 95,
+    vim.inspect(ren and { ren.old_path, ren.new_path, ren.similarity }))
+  ok("[gitdiff] a binary file is flagged, with no hunks",
+    by["logo.png"] and by["logo.png"].binary == true
+    and by["logo.png"].kind == "binary" and #by["logo.png"].hunks == 0)
+
+  -- sides(): the three-column projection
+  local sides = D.sides(keep)
+  ok("[gitdiff] sides() splits into before/after",
+    type(sides.before) == "table" and type(sides.after) == "table")
+  ok("[gitdiff] BEFORE holds context+deletes only",
+    (function()
+      for _, e in ipairs(sides.before) do if e.kind == "add" then return false end end
+      return true
+    end)())
+  ok("[gitdiff] AFTER holds context+adds only",
+    (function()
+      for _, e in ipairs(sides.after) do if e.kind == "del" then return false end end
+      return true
+    end)())
+  ok("[gitdiff] hunks are separated by a gap so the view can draw a divider",
+    (function()
+      for _, e in ipairs(sides.before) do if e.kind == "gap" then return true end end
+      return false
+    end)())
+
+  -- row_for(): what a review comment actually needs
+  ok("[gitdiff] row_for() finds the row carrying a given AFTER line",
+    D.row_for(sides.after, 2) ~= nil
+    and sides.after[D.row_for(sides.after, 2) + 1].lineno == 2,
+    tostring(D.row_for(sides.after, 2)))
+  ok("[gitdiff] row_for() is 0-based (extmark rows are)",
+    D.row_for(sides.after, 1) == 0, tostring(D.row_for(sides.after, 1)))
+  ok("[gitdiff] row_for() a line not shown is nil, not 0",
+    D.row_for(sides.after, 9999) == nil)
+  ok("[gitdiff] row_for() guards nils", D.row_for(nil, 1) == nil and D.row_for(sides.after, nil) == nil)
+
+  -- stats + find
+  local st = D.stats(keep)
+  ok("[gitdiff] stats() counts adds and removes", st.added == 3 and st.removed == 2,
+    vim.inspect(st))
+  ok("[gitdiff] find() matches by new OR old path",
+    D.find(files, "keep.txt") == keep
+    and D.find(files, "old name.txt") == ren
+    and D.find(files, "nope") == nil)
+
+  -- ── against REAL git output, not just a hand-written patch ──
+  local repo = vim.fn.tempname() .. "_p2diff"
+  vim.fn.mkdir(repo, "p")
+  local function g(...)
+    local argv = { "git", "-C", repo, "-c", "user.email=t@t", "-c", "user.name=t" }
+    for _, a in ipairs({ ... }) do argv[#argv + 1] = a end
+    return vim.fn.system(argv)
+  end
+  g("init", "-q", "-b", "main")
+  vim.fn.writefile({ "a", "b", "c" }, repo .. "/f.txt")
+  g("add", "."); g("commit", "-q", "-m", "one")
+  vim.fn.writefile({ "a", "B", "c", "d" }, repo .. "/f.txt")
+  g("add", "."); g("commit", "-q", "-m", "two")
+  local sha = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-parse", "HEAD" }))
+  if sha ~= "" and vim.v.shell_error == 0 then
+    local raw = require("auto-core.git.graph").show_diff(repo .. "/.git", sha)
+    local rf = D.parse(raw)
+    ok("[gitdiff] parses REAL `git show -p` output", #rf == 1 and rf[1].path == "f.txt",
+      vim.inspect(vim.tbl_map(function(f) return f.path end, rf)))
+    local rst = D.stats(rf[1])
+    ok("[gitdiff] real stats: 2 added, 1 removed", rst.added == 2 and rst.removed == 1,
+      vim.inspect(rst))
+    local rs = D.sides(rf[1])
+    ok("[gitdiff] real AFTER side carries line 4 (the appended 'd')",
+      D.row_for(rs.after, 4) ~= nil)
+  else
+    print("  SKIP  real-git diff (git unavailable)")
+  end
+  vim.fn.delete(repo, "rf")
+end)()
+
+-- ────────── [marks] ui.marks — highlights, gutter, virt_lines (ADR-0060 P2) ──────────
+print("\n[marks] auto-core.ui.marks — line/range/gutter/virt_lines (ADR-0060 P2)")
+;(function()
+  local marks = require("auto-core.ui").marks
+  local D = require("auto-core.git").diff
+  marks._reset_for_tests()
+  ok("[marks] exported on the ui facade", type(marks) == "table" and type(marks.line) == "function")
+
+  local ns = marks.ns("p2test")
+  ok("[marks] ns() returns a namespace id", type(ns) == "number" and ns > 0)
+  ok("[marks] ns() is stable for the same name", marks.ns("p2test") == ns)
+  ok("[marks] ns() differs per name", marks.ns("other") ~= ns)
+
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "one", "two", "three" })
+
+  ok("[marks] line() highlights a valid row", marks.line(buf, ns, 0, "AutoCoreDiffAdd") == true)
+  ok("[marks] line() refuses a row past the end (an extmark error, not a no-op)",
+    marks.line(buf, ns, 99, "AutoCoreDiffAdd") == false)
+  ok("[marks] line() refuses a negative row", marks.line(buf, ns, -1, "AutoCoreDiffAdd") == false)
+  ok("[marks] line() refuses an invalid buffer", marks.line(9999, ns, 0, "AutoCoreDiffAdd") == false)
+  local got = vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, { details = true })
+  ok("[marks] the mark is really set with line_hl_group",
+    #got == 1 and got[1][4].line_hl_group == "AutoCoreDiffAdd", vim.inspect(got[1] and got[1][4]))
+
+  marks.clear(buf, ns)
+  ok("[marks] clear() removes them", #vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, {}) == 0)
+
+  ok("[marks] range() clamps end_col to the real line length",
+    marks.range(buf, ns, 1, 0, 1, 9999, "AutoCoreDiffChange") == true)
+  ok("[marks] range() refuses an out-of-range row",
+    marks.range(buf, ns, 42, 0, 42, 1, "AutoCoreDiffChange") == false)
+  marks.clear(buf, ns)
+
+  ok("[marks] gutter() places a sign extmark", marks.gutter(buf, ns, 0, "▎", "AutoCoreGitModified") == true)
+  local gm = vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, { details = true })
+  ok("[marks] the sign text is set (multibyte glyph survives)",
+    #gm == 1 and gm[1][4].sign_text ~= nil, vim.inspect(gm[1] and gm[1][4].sign_text))
+  marks.clear(buf, ns)
+  -- Byte-slicing a multibyte sign yields invalid UTF-8 and nvim rejects the
+  -- extmark outright, so the sign silently vanishes. Trim by CHARACTER.
+  ok("[marks] an over-long multibyte sign is trimmed by character, not byte",
+    marks.gutter(buf, ns, 0, "▎▎▎▎", "AutoCoreGitAdded") == true)
+  ok("[marks] an empty sign is refused", marks.gutter(buf, ns, 0, "", nil) == false)
+  marks.clear(buf, ns)
+
+  ok("[marks] virt_lines() renders below a row",
+    marks.virt_lines(buf, ns, 0, { "hello", "world" }) == true)
+  local vm = vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, { details = true })
+  ok("[marks] two virtual lines are attached",
+    #vm == 1 and vm[1][4].virt_lines and #vm[1][4].virt_lines == 2,
+    vim.inspect(vm[1] and vm[1][4].virt_lines and #vm[1][4].virt_lines))
+  ok("[marks] virt_lines() with no lines is refused", marks.virt_lines(buf, ns, 0, {}) == false)
+  ok("[marks] virt_lines() refuses a bad row", marks.virt_lines(buf, ns, 77, { "x" }) == false)
+  marks.clear(buf, ns)
+
+  -- annotate(): the review comment block
+  ok("[marks] annotate() renders a comment",
+    marks.annotate(buf, ns, 1, {
+      severity = "must-fix", author = "lector",
+      body = "This is a fairly long finding body that must wrap across more than one virtual line so the wrapping path is genuinely exercised.",
+    }, { width = 40 }) == true)
+  local am = vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, { details = true })
+  local vl = am[1] and am[1][4].virt_lines
+  ok("[marks] the block wraps to several lines", vl and #vl > 3, vl and #vl)
+  ok("[marks] the head names severity and author",
+    vl and vl[1][2] and vl[1][2][1] == "must-fix · lector", vl and vl[1][2] and vl[1][2][1])
+  ok("[marks] severity picks its highlight group",
+    vl and vl[1][2] and vl[1][2][2] == "AutoCoreReviewMustFix", vl and vl[1][2] and vl[1][2][2])
+  ok("[marks] no wrapped line exceeds the width",
+    (function()
+      for i = 2, #vl do
+        local text = vl[i][2] and vl[i][2][1] or ""
+        if #text > 40 then return false end
+      end
+      return true
+    end)())
+  marks.clear(buf, ns)
+
+  ok("[marks] a resolved comment renders dimmed rather than hidden",
+    (function()
+      marks.annotate(buf, ns, 0, { severity = "nit", author = "a", body = "x", resolved = true })
+      local m = vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, { details = true })
+      local v = m[1] and m[1][4].virt_lines
+      return v and v[1][2][2] == "AutoCoreReviewResolved"
+        and v[1][2][1]:find("resolved", 1, true) ~= nil
+    end)())
+  marks.clear(buf, ns)
+
+  ok("[marks] every severity in the ladder maps to a group",
+    (function()
+      for _, s in ipairs({ "must-fix", "should-fix", "nit", "question" }) do
+        if not marks.SEVERITY_HL[s] then return false end
+      end
+      return true
+    end)())
+
+  -- paint_diff_column(): text and colour stay separable
+  local files = D.parse(
+    "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n ctx\n-gone\n+came\n")
+  local sides = D.sides(files[1])
+  local buf2 = vim.api.nvim_create_buf(false, true)
+  local text = {}
+  for _, e in ipairs(sides.after) do text[#text + 1] = e.text end
+  vim.api.nvim_buf_set_lines(buf2, 0, -1, false, text)
+  local painted = marks.paint_diff_column(buf2, ns, sides.after)
+  ok("[marks] paint_diff_column colours the add and leaves context alone",
+    painted == 1, tostring(painted))
+  local pm = vim.api.nvim_buf_get_extmarks(buf2, ns, 0, -1, { details = true })
+  ok("[marks] and it used the diff-add group",
+    #pm == 1 and pm[1][4].line_hl_group == "AutoCoreDiffAdd",
+    vim.inspect(pm[1] and pm[1][4].line_hl_group))
+  ok("[marks] painting an over-long column does not throw",
+    (function()
+      local okp = pcall(marks.paint_diff_column, buf2, ns, sides.after, { offset = 500 })
+      return okp
+    end)())
+
+  vim.api.nvim_buf_delete(buf, { force = true })
+  vim.api.nvim_buf_delete(buf2, { force = true })
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

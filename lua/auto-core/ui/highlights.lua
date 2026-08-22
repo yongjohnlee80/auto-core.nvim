@@ -24,6 +24,12 @@
 ---  AutoCoreDimmed         -- de-emphasized inline text
 ---  AutoCoreHelpKey        -- the "<key>" column in help overlays
 ---  AutoCoreHelpDesc       -- the description column in help overlays
+---  AutoCoreGridHeader     -- the column-title row of a result grid
+---  AutoCoreDiff*          -- Add/Delete/Change/Context/Header/Hunk (ADR-0060)
+---  AutoCoreGit*           -- Added/Modified/Deleted/Renamed/Untracked/
+---                            Conflicted: per-file status in the repos tree
+---  AutoCoreReview*        -- Frame/Body/MustFix/ShouldFix/Nit/Question/
+---                            Resolved: inline review annotations
 ---
 ---Future groups can be added to DEFAULTS without breaking consumers
 ---— `ensure()` is forward-compatible.
@@ -43,6 +49,31 @@ local DEFAULTS = {
   AutoCoreHelpKey         = { link = "Special",     default = true },
   AutoCoreHelpDesc        = { link = "Comment",     default = true },
   AutoCoreGridHeader      = { link = "Title",       default = true },
+  -- ADR-0060: the diff view. Linked to the built-in Diff* groups so every
+  -- colourscheme already themes them; `theme_override` still wins.
+  AutoCoreDiffAdd         = { link = "DiffAdd",     default = true },
+  AutoCoreDiffDelete      = { link = "DiffDelete",  default = true },
+  AutoCoreDiffChange      = { link = "DiffChange",  default = true },
+  AutoCoreDiffContext     = { link = "Normal",      default = true },
+  AutoCoreDiffHeader      = { link = "Title",       default = true },
+  AutoCoreDiffHunk        = { link = "Special",     default = true },
+  -- ADR-0060 §2.2: the repos tree's per-file status colours. Johno's scheme is
+  -- deleted RED, modified GREEN, added GREEN with a `+` marker -- so added and
+  -- modified deliberately SHARE the green and the marker distinguishes them.
+  AutoCoreGitAdded        = { link = "DiffAdd",     default = true },
+  AutoCoreGitModified     = { link = "DiffAdd",     default = true },
+  AutoCoreGitDeleted      = { link = "DiffDelete",  default = true },
+  AutoCoreGitRenamed      = { link = "DiffChange",  default = true },
+  AutoCoreGitUntracked    = { link = "DiffAdd",     default = true },
+  AutoCoreGitConflicted   = { link = "ErrorMsg",    default = true },
+  -- ADR-0060 §2.6: inline review annotations rendered as virt_lines.
+  AutoCoreReviewFrame     = { link = "Comment",     default = true },
+  AutoCoreReviewBody      = { link = "NormalFloat", default = true },
+  AutoCoreReviewMustFix   = { link = "DiagnosticError", default = true },
+  AutoCoreReviewShouldFix = { link = "DiagnosticWarn",  default = true },
+  AutoCoreReviewNit       = { link = "DiagnosticHint",  default = true },
+  AutoCoreReviewQuestion  = { link = "DiagnosticInfo",  default = true },
+  AutoCoreReviewResolved  = { link = "Comment",     default = true },
 }
 
 local _ensured = false
