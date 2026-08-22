@@ -11989,6 +11989,155 @@ print("\n[marks] auto-core.ui.marks — line/range/gutter/virt_lines (ADR-0060 P
   vim.api.nvim_buf_delete(buf2, { force = true })
 end)()
 
+-- ────────── [diffview] ui.diffview — three columns + annotations (ADR-0060 P5) ──────────
+print("\n[diffview] auto-core.ui.diffview — three columns, git a/ b/ (ADR-0060 P5)")
+;(function()
+  local dv = require("auto-core.ui").diffview
+  local D = require("auto-core.git").diff
+  ok("[diffview] exported on the ui facade", type(dv) == "table" and type(dv.open) == "function")
+  ok("[diffview] MIN_COLUMNS is declared", type(dv.MIN_COLUMNS) == "number" and dv.MIN_COLUMNS > 0)
+  ok("[diffview] open() with no files refuses", select(1, dv.open({ files = {} })) == nil)
+
+  -- Refuse on a narrow window rather than silently dropping the b/ pane.
+  local saved_cols = vim.o.columns
+  vim.o.columns = 40
+  local narrow, nerr = dv.open({ files = { { path = "x", hunks = {} } } })
+  ok("[diffview] a narrow window REFUSES with an explanation (never half a diff)",
+    narrow == nil and tostring(nerr):find("columns") ~= nil, tostring(nerr))
+  vim.o.columns = 200
+
+  local files = D.parse(table.concat({
+    "diff --git a/keep.lua b/keep.lua",
+    "--- a/keep.lua",
+    "+++ b/keep.lua",
+    "@@ -1,4 +1,5 @@",
+    " one",
+    "-two",
+    "+two-edited",
+    "+inserted",
+    " three",
+    " four",
+    "diff --git a/gone.lua b/gone.lua",
+    "deleted file mode 100644",
+    "--- a/gone.lua",
+    "+++ /dev/null",
+    "@@ -1,1 +0,0 @@",
+    "-was here",
+  }, "\n"))
+  ok("[diffview] fixture parsed", #files == 2)
+
+  -- annotations keyed by path; LEFT = a/ side, RIGHT = b/ side
+  local annotations = {
+    ["keep.lua"] = {
+      { line = 2, side = "RIGHT", severity = "must-fix", author = "lector",
+        body = "this edit drops the guard" },
+      { line = 2, side = "LEFT", severity = "nit", author = "lector",
+        body = "the old line was clearer" },
+      { line = 999, side = "RIGHT", severity = "question", body = "not in the diff" },
+    },
+  }
+
+  local handle, err = dv.open({ files = files, annotations = annotations,
+    title = " abc1234 test " })
+  ok("[diffview] open() returns a handle", handle ~= nil and err == nil, tostring(err))
+  ok("[diffview] is_open()", dv.is_open() == true)
+
+  local st = dv._state_for_tests()
+  ok("[diffview] three content panes exist",
+    st and st.float:bufnr("left") and st.float:bufnr("middle") and st.float:bufnr("preview"))
+
+  local function lines(pane)
+    local b = st.float:bufnr(pane)
+    return vim.api.nvim_buf_get_lines(b, 0, -1, false)
+  end
+  local left = table.concat(lines("left"), "\n")
+  ok("[diffview] the file list shows both files with +/- counts",
+    left:find("keep.lua", 1, true) and left:find("gone.lua", 1, true)
+    and left:find("+2", 1, true), left)
+  ok("[diffview] a deleted file is tagged", left:find("deleted", 1, true) ~= nil, left)
+
+  local a_side = table.concat(lines("middle"), "\n")
+  local b_side = table.concat(lines("preview"), "\n")
+  ok("[diffview] the a/ pane holds context + deletions, not insertions",
+    a_side:find("two", 1, true) and not a_side:find("inserted", 1, true), a_side)
+  ok("[diffview] the b/ pane holds context + insertions, not deletions",
+    b_side:find("inserted", 1, true) and b_side:find("two%-edited"), b_side)
+  ok("[diffview] both panes carry line numbers (a comment anchors to one)",
+    a_side:match("%s+1 │ one") ~= nil and b_side:match("%s+1 │ one") ~= nil, a_side)
+
+  -- annotations: the whole point of the view
+  local marks = require("auto-core.ui").marks
+  local ns = marks.ns("diffview")
+  local function ann(pane)
+    local b = st.float:bufnr(pane)
+    local out = {}
+    for _, m in ipairs(vim.api.nvim_buf_get_extmarks(b, ns, 0, -1, { details = true })) do
+      if m[4] and m[4].virt_lines then out[#out + 1] = m end
+    end
+    return out
+  end
+  local b_ann, a_ann = ann("preview"), ann("middle")
+  ok("[diffview] a RIGHT comment renders on the b/ side", #b_ann == 1, tostring(#b_ann))
+  ok("[diffview] a LEFT comment renders on the a/ side", #a_ann == 1, tostring(#a_ann))
+  ok("[diffview] the b/ annotation names its severity and author",
+    (function()
+      local vl = b_ann[1] and b_ann[1][4].virt_lines
+      return vl and vl[1] and vl[1][2] and vl[1][2][1] == "must-fix · lector"
+    end)(), b_ann[1] and vim.inspect(b_ann[1][4].virt_lines[1]))
+  ok("[diffview] and it is anchored to the row carrying that file line",
+    (function()
+      local sides = D.sides(files[1])
+      local want = D.row_for(sides.after, 2)
+      return b_ann[1] and b_ann[1][2] == want
+    end)(),
+    b_ann[1] and (b_ann[1][2] .. " vs " .. tostring(D.row_for(D.sides(files[1]).after, 2))))
+
+  -- diff colouring is present alongside the annotations
+  local painted = 0
+  for _, m in ipairs(vim.api.nvim_buf_get_extmarks(st.float:bufnr("preview"), ns, 0, -1,
+    { details = true })) do
+    if m[4] and m[4].line_hl_group == "AutoCoreDiffAdd" then painted = painted + 1 end
+  end
+  ok("[diffview] insertions are coloured on the b/ side", painted == 2, tostring(painted))
+
+  -- an unplaceable comment is reported, never silently dropped
+  local lost = dv.unplaced_for(files, annotations)
+  ok("[diffview] unplaced_for() reports a comment on a line not in the diff",
+    #lost == 1 and lost[1].line == 999, vim.inspect(lost))
+
+  -- selecting the second file retitles and repaints
+  st.float:focus("left")
+  local lw = st.float:winid("left")
+  vim.api.nvim_win_set_cursor(lw, { 2, 0 })
+  vim.api.nvim_exec_autocmds("CursorMoved", { buffer = st.float:bufnr("left") })
+  vim.wait(120, function() return dv._state_for_tests().idx == 2 end, 10)
+  ok("[diffview] moving in the file list selects the next file",
+    dv._state_for_tests().idx == 2, tostring(dv._state_for_tests().idx))
+  -- nvim_win_get_config().title is a CHUNK LIST ({{text, hl}, ...}), not a
+  -- string; tostring() on it yields "table: 0x…" and would fail a working view.
+  local function title_text(winid)
+    local cfg = vim.api.nvim_win_get_config(winid)
+    local tt = cfg.title
+    if type(tt) == "string" then return tt end
+    local parts = {}
+    for _, chunk in ipairs(tt or {}) do
+      parts[#parts + 1] = type(chunk) == "table" and tostring(chunk[1]) or tostring(chunk)
+    end
+    return table.concat(parts)
+  end
+  ok("[diffview] a deleted file titles the b/ pane /dev/null, as git prints it",
+    title_text(st.float:winid("preview")):find("/dev/null", 1, true) ~= nil,
+    title_text(st.float:winid("preview")))
+  ok("[diffview] and the a/ pane carries the a/<path> title",
+    title_text(st.float:winid("middle")):find("a/gone.lua", 1, true) ~= nil,
+    title_text(st.float:winid("middle")))
+
+  dv.close()
+  ok("[diffview] close() disposes", dv.is_open() == false)
+  ok("[diffview] close() is idempotent", (function() local o = pcall(dv.close); return o end)())
+  vim.o.columns = saved_cols
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
