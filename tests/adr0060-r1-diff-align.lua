@@ -235,16 +235,33 @@ end)()
   ok("[6] the b/ pane carries extmarks", ranged ~= nil and #ranged > 0,
     ranged and #ranged)
 
-  -- The span is one `line_hl_group` mark PER COVERED ROW, in a review-severity
-  -- group. Counting review groups specifically matters: paint_diff_column also
-  -- sets line_hl_group (AutoCoreDiff*) on add/del rows, so a naive count of
-  -- line_hl_group marks would conflate diff colouring with the span and pass
-  -- for a single-line comment too.
+  -- The span lives in the SIGN COLUMN (r2 SF2), not in `line_hl_group`. It used
+  -- to be a line highlight at priority 90 against paint_diff_column's default
+  -- 100, so on added/deleted rows the diff won and the span was invisible —
+  -- and the OLD version of this assertion passed anyway, because it only asked
+  -- whether a review-group mark EXISTED, never what priority it carried or
+  -- what actually displayed. Asserting on the sign attribute removes the
+  -- competition entirely: nothing can outrank it, because nothing else writes
+  -- it.
   local function span_rows(list)
     local rows = {}
     for _, m in ipairs(list or {}) do
+      local d = m[4] or {}
+      if type(d.sign_hl_group) == "string"
+        and d.sign_hl_group:match("^AutoCoreReview") then rows[m[2]] = true end
+    end
+    local n = 0
+    for _ in pairs(rows) do n = n + 1 end
+    return n
+  end
+
+  ---diff_rows counts rows still carrying paint_diff_column's own line
+  ---highlight, so we can prove the span does NOT cost the diff colour.
+  local function diff_rows(list)
+    local rows = {}
+    for _, m in ipairs(list or {}) do
       local g = (m[4] or {}).line_hl_group
-      if type(g) == "string" and g:match("^AutoCoreReview") then rows[m[2]] = true end
+      if type(g) == "string" and g:match("^AutoCoreDiff") then rows[m[2]] = true end
     end
     local n = 0
     for _ in pairs(rows) do n = n + 1 end
@@ -262,8 +279,12 @@ end)()
     end
   end
   local spans = span_rows(ranged)
-  ok("[6] *** the covered rows carry a review SPAN highlight (3 rows: 3,4,5) ***",
-    spans == 3, "review-highlighted rows=" .. spans)
+  ok("[6] *** the covered rows carry a review span in the SIGN column ***",
+    spans == 3, "sign-marked rows=" .. spans)
+  -- The whole point of the sign column: the diff colouring SURVIVES. A
+  -- priority raise would have passed the assertion above while destroying this.
+  ok("[6] *** and the diff colouring on changed rows is NOT lost to the span ***",
+    diff_rows(ranged) >= 1, "rows still carrying AutoCoreDiff*=" .. diff_rows(ranged))
   ok("[6] *** and the annotation header names the range (L3-5) ***",
     labelled, "no L3-5 label found in any virt_lines chunk")
 

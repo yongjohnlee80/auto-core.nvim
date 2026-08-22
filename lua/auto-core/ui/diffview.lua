@@ -101,10 +101,27 @@ local function _paint(bufnr, column, annotations, side)
             local span_hl = a.resolved and "AutoCoreReviewResolved"
               or (marks.SEVERITY_HL[tostring(a.severity or "comment")]
                   or "AutoCoreReviewFrame")
-            -- One mark per covered row: `line` gives the whole row the span
-            -- colour, which reads as a block rather than a character range.
+            -- The span is drawn in the SIGN COLUMN, not as a line highlight
+            -- (ADR-0060 r2 SF2). A `line_hl_group` span competed with
+            -- `paint_diff_column`'s own line highlight on the same attribute,
+            -- and at priority 90 against its default 100 the diff won — so the
+            -- span vanished on exactly the added/deleted rows a reviewer most
+            -- needs marked. Raising the priority instead would have inverted
+            -- the loss: added/deleted rows inside a range would stop looking
+            -- added or deleted, which is information the reviewer needs just as
+            -- much. `sign_text`/`sign_hl_group` is a DIFFERENT attribute, so
+            -- both signals coexist and neither can be overridden at any
+            -- priority — a severity-coloured rail down the flagged rows beside
+            -- the untouched diff colouring.
+            --
+            -- Pad rows are skipped deliberately: they are the blank filler
+            -- opposite an unequal replacement block, and marking "nothing here"
+            -- as part of a reviewer's span would be a claim about absent code.
             for r = start_row, row do
-              marks.line(bufnr, ns, r, span_hl, { priority = 90 })
+              local entry = column[r + 1]
+              if not (entry and entry.kind == "pad") then
+                marks.gutter(bufnr, ns, r, "▎", span_hl)
+              end
             end
           end
         end
