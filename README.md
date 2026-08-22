@@ -324,8 +324,14 @@ rules).
    release with both names live + a warning on use of the old).
 4. **Smoke tests every iteration.** Per the
    `lua-nvim-plugin-development` convention in the project's
-   auto-agents kb: `tests/smoke.lua` extends every iteration; the
-   suite runs green headless before any commit is reported done.
+   auto-agents kb, `tests/smoke.lua` extends every iteration and runs
+   green headless — `nvim --headless -u NONE -l tests/smoke.lua` (NOT
+   `-c 'qa!'`: under `-l` a mid-run abort exits non-zero instead of
+   silently green) — before any commit is reported done. The full
+   gate is `tests/run-all.sh`, which runs the smoke suite behind a
+   summary-presence / crash-before-assertions guard, the UI-attached
+   pty suite (`tests/ui/`, watchdog-guarded), and the `rpc.frame`
+   scaling bench.
 5. **No bare `vim.notify` in family plugins.** Route through
    `lua/<plugin>/log.lua` so every toast lands in the ring (rule
    1 of the [`auto-family-logging`](https://github.com/yongjohnlee80/auto-agents)

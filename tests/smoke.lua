@@ -1,13 +1,24 @@
 -- auto-core.nvim — smoke test driver
 --
 -- Run headless:
---   nvim --headless -u tests/smoke.lua -c 'qa!'
+--   nvim --headless -u NONE -l tests/smoke.lua
+--
+-- Use `-u NONE -l`, NOT `-u tests/smoke.lua -c 'qa!'`. The distinction
+-- is a correctness gate, not style: under `-c 'qa!'` a Lua error that
+-- aborts the suite mid-run is swallowed by nvim's sourcing path and the
+-- trailing `qa!` still quits with EXIT 0 — a silent, GREEN abort with no
+-- summary printed. Under `-l` the error propagates and nvim exits 1, so a
+-- partial run is loud. auto-core is the foundation every sibling depends
+-- on; a silent abort here is the most expensive one in the family. See
+-- tests/run-all.sh for the summary-presence / crash-before-assertions
+-- guard that catches this even when the wrong invocation is used.
 --
 -- Per the binding convention at
 --   ~/.config/nvim/.auto-agents-config/kb/shared/conventions/lua-nvim-plugin-development.md
 -- (loaded automatically by the autovim agent kb), every iteration
 -- on this plugin must extend or update this driver and run it green
--- before reporting work complete.
+-- before reporting work complete. §2 mandates `-u NONE -l`; §3 mandates
+-- the `<P> passed, <F> failed` summary and os.exit(1)/os.exit(0).
 --
 -- Phase 0: only validates package metadata + setup idempotency.
 -- Subsystem tests land alongside their phase implementations:
@@ -84,11 +95,8 @@ end
 ok("M.version is a semver string",
   type(core.version) == "string" and core.version:match("^%d+%.%d+%.%d+$") ~= nil,
   tostring(core.version))
--- FIXME (baseline-stale): see the long FIXME in section [48] below —
--- this literal-string version assertion needs manual updating on
--- each patch bump. v0.1.36 introduces auto-core.todo (ADR-0031);
--- the pattern matches the v0.1.x line. Left stale across bumps so
--- the failure stays discoverable.
+-- Regex-anchored to the v0.1.x line so additive patch bumps pass
+-- without a manual edit; a minor/major bump trips it deliberately.
 ok("M.version matches the v0.1.x line",
   type(core.version) == "string" and core.version:match("^0%.1%.%d+$") ~= nil,
   "got " .. tostring(core.version))
@@ -3719,18 +3727,9 @@ pcall(os.remove, tmp)
 end)()
 
 -- ─────────────────────── 48. version + api_version sanity ─────────────────────────
--- FIXME (baseline-stale): the literal-string version assertion below
--- needs manual updating on every patch bump (currently expects 0.1.5;
--- this branch is shipping v0.1.6). The next maintenance pass should
--- either
---   (a) parse `require("auto-core.version").version` and assert it
---       matches a regex like "^0%.1%.%d+$" so the test tracks
---       additive patch bumps without manual edits, OR
---   (b) replace this section with a single check that the surface
---       exists (M.debug.winlog, M.mailbox, etc) and drop the version
---       string assertion entirely.
--- Tracked: leave the assertion as-is so the failure stays
--- discoverable until someone consciously picks it up.
+-- Version is asserted against the v0.1.x regex (option (a) from the old
+-- FIXME, now adopted) so additive patch bumps pass without a manual
+-- edit; a minor/major bump trips it deliberately.
 print("\n[48] version + api_version sanity")
 ;(function()
 local v = require("auto-core.version")
@@ -5733,15 +5732,13 @@ ok("live ring grew but snapshot is stable",
 -- input).
 do
   local mod = require("auto-core.log.viewer")
-  -- Reproduce what the `R` keymap does: re-snapshot.
-  local s = mod._state()
-  -- Inline the snapshot — the `R` keymap is a thin closure over
-  -- `_snapshot_memory` which isn't exported. Verify via the public
-  -- observable: close + open does the same thing.
+  -- Reproduce what the `R` keymap does: re-snapshot. The `R` keymap is a
+  -- thin closure over `_snapshot_memory` which isn't exported, so verify
+  -- via the public observable: close + open does the same thing.
   mod.close()
   vim.wait(10)
   mod.open()
-  s = mod._state()
+  local s = mod._state()
   ok("close+reopen re-snapshots Memory (proxy for R)",
     s and #s.memory_entries == 4)
 end
@@ -8128,7 +8125,21 @@ print("\n[64] todo.import — kb-todo-list / legacy-todos-md / asana-json")
   local res_p = todo.import(src_plain, { kind = "kb-todo-list" })
   local task_p = todo.get(res_p[1].id)
   ok("no Tags line → defaults to status=open", task_p and task_p.status == "open")
-  ok("no H1 fallback: title from filename when H1 absent (separate test)", true)
+
+  -- ── no H1 → title falls back to the filename stem (import.lua:171) ──
+  -- extract_h1() returns nil when the source has no `# ` ATX heading, so
+  -- parse_kb_todo derives the title from basename(source):gsub("%.md$","").
+  local src_noh1 = tmp_root .. "/no-h1-title-fallback.md"
+  vim.fn.writefile({
+    "Just prose, no ATX heading anywhere.",
+    "",
+    "status:open",
+  }, src_noh1)
+  local res_n = todo.import(src_noh1, { kind = "kb-todo-list" })
+  local task_n = todo.get(res_n[1].id)
+  ok("no H1 → title falls back to the filename stem (sans .md)",
+    task_n and task_n.title == "no-h1-title-fallback",
+    task_n and tostring(task_n.title))
 
   cleanup()
 end)()
@@ -12139,7 +12150,12 @@ print("\n[diffview] auto-core.ui.diffview — three columns, git a/ b/ (ADR-0060
 end)()
 
 -- ─────────────────────── summary ─────────────────────────
+-- Convention §3: emit the `<P> passed, <F> failed` summary and exit
+-- EXPLICITLY — os.exit(1) on any failure, os.exit(0) otherwise. Do not
+-- rely on falling off the end for the success exit: an explicit 0 keeps
+-- the contract legible and survives any future trailing driver code.
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
   os.exit(1)
 end
+os.exit(0)
