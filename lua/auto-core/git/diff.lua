@@ -205,13 +205,36 @@ end
 ---review comment's `(line, side)` resolves to a row by lookup rather than
 ---arithmetic.
 ---
----Hunks are separated by a `gap` entry, so the view can draw a divider instead
----of implying the file is contiguous.
+---The two columns are kept ROW-ALIGNED: `#before == #after`, and a shared
+---context line occupies the same index in both. A replacement block whose
+---delete and add counts differ pairs del[k] with add[k] and pads the short side
+---with a `pad` entry, so unrelated code is never drawn on the same visual row
+---and shared context after the block resumes on the same row (ADR-0060 r1 MF4).
+---git emits all `-` lines of a change region before all `+` lines, so a block
+---is the run of del/add between two context lines; it is flushed at each
+---context line and at end of hunk.
+---
+---`pad` entries carry no lineno, so `row_for` skips them and a review comment
+---can never anchor to a filler row.
+---
+---Hunks are separated by a `gap` entry in BOTH columns; because every hunk
+---leaves the columns equal-length, the divider lands on the same row in each.
 ---@param file AutoCoreDiffFile
 ---@return { before: table[], after: table[] }
 function M.sides(file)
   local before, after = {}, {}
   if not file then return { before = before, after = after } end
+
+  local dels, adds = {}, {}
+  local function flush_block()
+    local n = math.max(#dels, #adds)
+    for k = 1, n do
+      before[#before + 1] = dels[k] or { kind = "pad", text = "", lineno = nil }
+      after[#after + 1] = adds[k] or { kind = "pad", text = "", lineno = nil }
+    end
+    dels, adds = {}, {}
+  end
+
   for hi, h in ipairs(file.hunks or {}) do
     if hi > 1 then
       before[#before + 1] = { kind = "gap", text = "", lineno = nil }
@@ -219,14 +242,16 @@ function M.sides(file)
     end
     for _, l in ipairs(h.lines) do
       if l.kind == "context" then
+        flush_block()  -- close any open replacement before the shared line
         before[#before + 1] = { kind = "context", text = l.text, lineno = l.old }
         after[#after + 1] = { kind = "context", text = l.text, lineno = l.new }
       elseif l.kind == "del" then
-        before[#before + 1] = { kind = "del", text = l.text, lineno = l.old }
+        dels[#dels + 1] = { kind = "del", text = l.text, lineno = l.old }
       elseif l.kind == "add" then
-        after[#after + 1] = { kind = "add", text = l.text, lineno = l.new }
+        adds[#adds + 1] = { kind = "add", text = l.text, lineno = l.new }
       end
     end
+    flush_block()  -- close the trailing block before the next hunk's gap
   end
   return { before = before, after = after }
 end

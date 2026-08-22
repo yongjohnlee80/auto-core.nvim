@@ -49,6 +49,11 @@ local function _fmt(column)
   for _, e in ipairs(column or {}) do
     if e.kind == "gap" then
       lines[#lines + 1] = "      ⋯"
+    elseif e.kind == "pad" then
+      -- The absent side of an unequal replacement block (ADR-0060 r1 MF4). A
+      -- blank row, deliberately WITHOUT the `│` gutter, so it reads as "nothing
+      -- here" opposite the added/removed line rather than an empty file line.
+      lines[#lines + 1] = ""
     else
       lines[#lines + 1] = string.format("%5s │ %s",
         e.lineno and tostring(e.lineno) or "", e.text or "")

@@ -119,7 +119,29 @@ run_bench() {
   echo "   ✓ bench OK (timing ratios above are informational; machine-dependent)"
 }
 
+run_standalone() {
+  # A focused headless suite that prints the same `<P> passed, <F> failed`
+  # summary as smoke, guarded the same way: a missing summary is an abort.
+  local name="$1" file="$2"
+  echo "── $name ─────────────────────────────────────"
+  local out rc summary fail_n
+  out="$(nvim --headless -u NONE -l "$file" 2>&1)"
+  rc=$?
+  printf '%s\n' "$out" | grep -E "^  (PASS|FAIL)" | sed 's/^/   /'
+  summary="$(printf '%s\n' "$out" | grep -oE "[0-9]+ passed, [0-9]+ failed" | tail -1 || true)"
+  if [ -z "$summary" ]; then
+    echo "   ✗ $name: NO SUMMARY LINE — the suite aborted mid-run (silent abort)"
+    overall=1; return
+  fi
+  echo "   $name: $summary (exit=$rc)"
+  fail_n="${summary##* passed, }"; fail_n="${fail_n%% failed}"
+  if [ "$fail_n" -ne 0 ]; then echo "   ✗ $name: $fail_n failed"; overall=1
+  elif [ "$rc" -ne 0 ]; then echo "   ✗ $name: exit=$rc despite '$summary'"; overall=1
+  else echo "   ✓ $name OK"; fi
+}
+
 run_smoke
+run_standalone "diff-align (r1 MF4)" tests/adr0060-r1-diff-align.lua
 run_pty
 run_bench
 
