@@ -284,6 +284,90 @@ function Model:cell(r, c)
   }
 end
 
+---@class AutoCoreGridRowEntry
+---@field col     integer   -- 1-based column index; what a drill-down opens
+---@field name    string    -- RAW column name. For identity, NEVER rendered.
+---@field label   string    -- single-line column name. This is what renders.
+---@field value   any       -- RAW value, newlines intact. NEVER rendered raw.
+---@field text    string    -- single-line display value. This is what renders.
+---@field null    boolean
+---@field binary  boolean
+
+---row_entries describes one row as a list of per-column entries, for a
+---consumer rendering a row-detail view.
+---
+---Per [[0066-autodb-lua-grid-selection-mode-and-detail-views]] §2.4. It lives
+---here rather than in the consumer because BOTH flattening rules already
+---live here, and the rule they encode has now been got wrong twice on two
+---different axes: a detail view that renders one line per column must
+---flatten every string that becomes part of that line — the value AND the
+---column name. `label` and `text` are the flattened halves; `name` and
+---`value` are the faithful ones a drill-down and a yank use.
+---
+---A quoted database column name may legally contain a newline (see
+---`normalize_columns`), so rendering `name` would break the one-line-per-
+---column premise exactly as rendering `value` would, and with it every
+---mapping from a cursor line back to a column.
+---@param r integer  1-based row index
+---@return AutoCoreGridRowEntry[]|nil
+function Model:row_entries(r)
+  if self._kind ~= "rows" then return nil end
+  if not self._rows[r] then return nil end
+  local out = {}
+  for i, c in ipairs(self._columns) do
+    local cell = self:cell(r, i)
+    out[i] = {
+      col    = i,
+      name   = c.name,
+      label  = c.label,
+      value  = cell and cell.value or nil,
+      text   = cell and cell.text or M.display_text(nil, self._null),
+      null   = cell and cell.null or true,
+      binary = cell and cell.binary or false,
+    }
+  end
+  return out
+end
+
+---row_detail_lines renders `entries` for a row-detail view and returns the
+---line→entry mapping alongside them.
+---
+---Per §2.4. The mapping is returned rather than recomputed by the consumer
+---because the whole class of bug this ADR removed twice is a consumer
+---deriving "which column is the cursor on?" from rendered TEXT. Here the
+---answer is an index lookup that cannot drift: `map[i]` is the entry drawn on
+---line `i`, by construction.
+---
+---It renders `label` and `text` — the flattened halves — never `name` and
+---`value`. That is the whole point: one line per column is only true if every
+---string on the line is single-line, and BOTH a value and a column name may
+---legally contain a newline.
+---@param entries AutoCoreGridRowEntry[]
+---@param sep string?  default " = "
+---@return string[] lines
+---@return AutoCoreGridRowEntry[] map  map[i] is the entry rendered on line i
+function M.row_detail_lines(entries, sep)
+  sep = sep or " = "
+  local lines, map = {}, {}
+  for _, e in ipairs(entries or {}) do
+    -- Flattened AGAIN, deliberately. `label` and `text` are already
+    -- single-line when the entries come from `row_entries`, so for that path
+    -- this is a no-op. It is here because the alternative is an invariant
+    -- held by convention: a caller that hand-builds entries, or reaches for
+    -- `name`/`value` instead, would otherwise emit a line containing a
+    -- newline — and since the viewer splits such a string across buffer
+    -- lines, the buffer would end up with MORE lines than `map` has entries
+    -- and every lookup below that point would silently resolve to the wrong
+    -- column. Making the flattening structural means `#lines == #map` cannot
+    -- be broken from outside. (Observed while control-testing ADR-0066:
+    -- the rejected renderer produced 5 buffer lines against a 3-entry map,
+    -- and only the line-count assertion noticed.)
+    lines[#lines + 1] = M.display_text(e.label, "") .. sep .. M.display_text(e.text, "")
+    map[#lines] = e
+  end
+  return lines, map
+end
+
 ---widths measures the INTRINSIC column widths in display cells —
 ---header included — using `strdisplaywidth`, never byte length, so
 ---multibyte content aligns. `opts.max` clamps a single column;

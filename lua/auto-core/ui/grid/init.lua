@@ -35,6 +35,16 @@ M.attach = view.attach
 ---statusline item where a `%%` pair was cut in half.
 M.render_header = view.render_header
 
+---render_winbar is what the view actually WRITES: render_header plus the
+---right-aligned selection-mode marker (ADR-0066 §2.5). Exposed because a
+---test asserting the header shift should not have to know the marker's
+---format string — and because the two are genuinely different questions.
+M.render_winbar = view.render_winbar
+
+---set_clipboard is the grid's yank rule, exposed so a consumer's detail
+---views yank identically to the grid (ADR-0066 §2.4).
+M.set_clipboard = view.set_clipboard
+
 ---NULL is the sentinel for a missing value when `vim.NIL` is awkward.
 M.NULL = model.NULL
 

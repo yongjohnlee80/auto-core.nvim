@@ -115,6 +115,27 @@ function M.render_header(raw, leftcol)
   return "%#AutoCoreGridHeader#" .. body .. "%*%<"
 end
 
+---render_winbar composes what the view actually writes to the winbar: the
+---clipped, escaped header, plus a right-aligned mode marker.
+---
+---This is a separate function from `render_header` because the two answer
+---different questions, and a test that wants to check the HEADER shift must
+---not have to know the marker's format string. The marker goes last on
+---purpose: `render_header` escapes `%` in the column labels (so a raw `%=`
+---composed in earlier would be escaped into a literal), and its trailing
+---`%<` is the truncation point — items after it survive while the header
+---itself truncates from the right, which is what keeps the LEFT columns
+---aligned with the body underneath.
+---@param raw string      the unclipped header text
+---@param leftcol integer the window's horizontal scroll, in display cells
+---@param marker string?  "" or a mode indicator such as "[ROW]"
+---@return string
+function M.render_winbar(raw, leftcol, marker)
+  local text = M.render_header(raw, leftcol)
+  if text == "" or not marker or marker == "" then return text end
+  return text .. "%=%#AutoCoreGridHeader#" .. marker .. "%*"
+end
+
 ---@class AutoCoreGridView
 ---@field _id integer                 unique per attach; names ns + augroup
 ---@field _model AutoCoreGridModel
@@ -124,6 +145,8 @@ end
 ---@field _max_width integer?         per-column display-width cap
 ---@field _on_inspect function?       consumer's detail-modal hook
 ---@field _json_mode boolean
+---@field _sel_mode string           "cell" (default) | "row"
+---@field _on_selection_mode fun(mode: string)?
 ---@field _disposed boolean
 ---@field _ns integer                 extmark namespace (cell cursor)
 ---@field _augroup integer
@@ -137,19 +160,27 @@ end
 local View = {}
 View.__index = View
 
+---The selection modes. `cell` is the default so that every existing
+---consumer keeps its current behaviour without opting in.
+local SEL_MODES = { cell = true, row = true }
+local DEFAULT_SEL_MODE = "cell"
+
 local DEFAULT_KEYMAPS = {
   yank_cell    = "y",
   yank_row_csv = "Y",
   yank_row_json = "gy",
   toggle_view  = "J",
   inspect      = "<CR>",
+  -- `s` (substitute) has no meaning in a read-only grid, and the grid
+  -- already claims y/Y/gy/J. Overridable like every other binding.
+  toggle_selection = "s",
   next_cell    = "<Tab>",
   prev_cell    = "<S-Tab>",
 }
 
 ---attach binds `model` to `opts.win` and renders it.
 ---@param model AutoCoreGridModel
----@param opts { win: integer?, header: string?, keymaps: table|boolean?, max_width: integer?, on_inspect: function?, name: string? }
+---@param opts { win: integer?, header: string?, keymaps: table|boolean?, max_width: integer?, on_inspect: function?, name: string?, selection_mode: string?, on_selection_mode: fun(mode: string)? }
 ---@return AutoCoreGridView
 function M.attach(model, opts)
   opts = opts or {}
@@ -164,6 +195,12 @@ function M.attach(model, opts)
   self._max_width = opts.max_width
   self._on_inspect = opts.on_inspect
   self._json_mode = false
+  -- Seeded, not set: `on_selection_mode` must NOT fire here. This value is
+  -- the consumer's own persisted mode arriving (the view is disposed and
+  -- re-attached on every query), so echoing it straight back out would make
+  -- attach-order a source of writes for something that never changed.
+  self._sel_mode = SEL_MODES[opts.selection_mode] and opts.selection_mode or DEFAULT_SEL_MODE
+  self._on_selection_mode = opts.on_selection_mode
   self._disposed = false
   self._ns = vim.api.nvim_create_namespace(NS_PREFIX .. self._id)
   self._augroup = vim.api.nvim_create_augroup(AUG_PREFIX .. self._id, { clear = true })
@@ -227,11 +264,14 @@ function View:_bind_keymaps(spec)
   -- Every binding is a thin wrapper over a public method, so a consumer
   -- can drive the grid without synthesizing keypresses.
   local actions = {
-    yank_cell     = function() self:yank_cell() end,
+    -- `y` is the ONE mode-dependent key (§2.3). `Y`/`gy` stay absolute in
+    -- both modes, so no yank key ever changes meaning under the reader.
+    yank_cell     = function() self:yank_selection() end,
     yank_row_csv  = function() self:yank_row("csv") end,
     yank_row_json = function() self:yank_row("json") end,
     toggle_view   = function() self:toggle_view() end,
     inspect       = function() self:inspect() end,
+    toggle_selection = function() self:toggle_selection_mode() end,
     next_cell     = function() self:move_cell(0, 1) end,
     prev_cell     = function() self:move_cell(0, -1) end,
   }
@@ -360,7 +400,7 @@ function View:refresh_header()
   local leftcol = vim.api.nvim_win_call(self._win, function()
     return vim.fn.winsaveview().leftcol
   end)
-  local text = M.render_header(self:header_text(), leftcol)
+  local text = M.render_winbar(self:header_text(), leftcol, self:mode_marker())
   vim.api.nvim_set_option_value("winbar", text, { win = self._win, scope = "local" })
   self._owned_winbar = text
 end
@@ -385,12 +425,29 @@ end
 
 function View:_paint_cursor()
   if not self:_valid() then return end
+  -- Clearing first is what makes the two marks EXCLUSIVE (§2.2, criterion
+  -- 13): the mode selects which single extmark exists, never both. Note it
+  -- is an extmark and not `cursorline` — attach deliberately turns
+  -- cursorline OFF and restores the caller's prior value on dispose, so
+  -- riding that option would fight the view's own owned-option discipline.
   vim.api.nvim_buf_clear_namespace(self._buf, self._ns, 0, -1)
   local cur = self:cell()
   if not cur then return end
   local rg = self._ranges[cur.row + self:row_offset()]
   if not rg or not rg[cur.col] then return end
   local line = cur.row + self:row_offset() - 1
+
+  if self._sel_mode == "row" then
+    pcall(vim.api.nvim_buf_set_extmark, self._buf, self._ns, line, 0, {
+      end_row = line + 1,
+      end_col = 0,
+      hl_group = "Visual",
+      hl_eol = true,
+      priority = 200,
+    })
+    return
+  end
+
   pcall(vim.api.nvim_buf_set_extmark, self._buf, self._ns, line, rg[cur.col].start, {
     end_col = rg[cur.col].stop,
     hl_group = "Visual",
@@ -412,7 +469,14 @@ function View:move_cell(dr, dc)
   self:_paint_cursor()
 end
 
-local function set_clipboard(text)
+---set_clipboard is the grid's yank rule: always the unnamed register, and
+---the system register too when `clipboard` asks for it.
+---
+---Exported (as `grid.set_clipboard`) because the detail views a consumer
+---opens from the grid must yank IDENTICALLY to the grid itself — two copies
+---of this drift the moment one of them learns about a new clipboard setting.
+---@param text string
+function M.set_clipboard(text)
   vim.fn.setreg('"', text)
   local cb = vim.o.clipboard or ""
   if cb:find("unnamedplus", 1, true) then vim.fn.setreg("+", text)
@@ -425,7 +489,7 @@ function View:yank_cell()
   local cur = self:cell()
   if not cur or not cur.cell then return nil end
   local text = cur.cell.null and "" or model_mod.raw_text(cur.cell.value, "")
-  set_clipboard(text)
+  M.set_clipboard(text)
   return text
 end
 
@@ -437,8 +501,75 @@ function View:yank_row(fmt)
   if not cur then return nil end
   local text = (fmt == "json") and self._model:json(cur.row) or self._model:csv(cur.row)
   if not text then return nil end
-  set_clipboard(text)
+  M.set_clipboard(text)
   return text
+end
+
+---mode_applies reports whether a selection mode means anything right now.
+---
+---Per §2.6. `cell()` is the operand for every mode-dependent key, and it
+---returns nil in the JSON layout AND for any non-`rows` model (a message or
+---an error result has no cells either). Where there is no operand, an
+---active-looking ROW marker would advertise a capability that does not
+---exist — the same defect class as the `(no help entries)` this ADR removes.
+---@return boolean
+function View:mode_applies()
+  return not self._json_mode and self._model:kind() == "rows"
+end
+
+---selection_mode returns the current mode, whether or not it applies.
+---@return string
+function View:selection_mode() return self._sel_mode end
+
+---set_selection_mode is the ONE mutation path for the mode.
+---
+---It REJECTS an unknown mode rather than coercing it: a typo in a
+---consumer's persisted value must not silently become a mode. The callback
+---fires only on an EFFECTIVE change, so a set to the current mode is inert.
+---@param mode string
+---@return boolean changed
+function View:set_selection_mode(mode)
+  if not SEL_MODES[mode] then return false end
+  if mode == self._sel_mode then return false end
+  self._sel_mode = mode
+  self:_paint_cursor()
+  self:refresh_header()
+  if self._on_selection_mode then pcall(self._on_selection_mode, mode) end
+  return true
+end
+
+---toggle_selection_mode flips cell↔row.
+---
+---Inert where the mode does not apply (§2.6): it says so once rather than
+---silently doing nothing, and it leaves the stored mode ALONE — so `J` into
+---the JSON layout and back returns the reader to the mode they chose, rather
+---than discarding that choice as a side effect of looking at the JSON form.
+---@return string mode
+function View:toggle_selection_mode()
+  if not self:mode_applies() then
+    vim.notify("auto-core grid: selection mode applies to the table view",
+      vim.log.levels.INFO)
+    return self._sel_mode
+  end
+  self:set_selection_mode(self._sel_mode == "row" and "cell" or "row")
+  return self._sel_mode
+end
+
+---mode_marker is the winbar indicator — EMPTY where the mode does not
+---apply, because §2.5 asks for absent rather than merely unlit.
+---@return string
+function View:mode_marker()
+  if not self:mode_applies() then return "" end
+  return self._sel_mode == "row" and "[ROW]" or "[CELL]"
+end
+
+---yank_selection is what `y` is bound to: the one mode-dependent key.
+---@return string|nil
+function View:yank_selection()
+  if self._sel_mode == "row" and self:mode_applies() then
+    return self:yank_row("csv")
+  end
+  return self:yank_cell()
 end
 
 ---toggle_view switches between the table and JSON layouts.
@@ -450,12 +581,18 @@ end
 
 function View:is_json() return self._json_mode end
 
----inspect hands the current cell to the consumer's detail modal.
+---inspect hands the current selection to the consumer's detail modal.
+---
+---The third argument is the selection mode, so the consumer opens the CELL
+---detail or the ROW detail without re-deriving it (§2.4). `cur` keeps its
+---shape, so an existing consumer that ignores the extra argument behaves
+---exactly as before.
 function View:inspect()
   local cur = self:cell()
   if not cur then return nil end
-  if self._on_inspect then self._on_inspect(cur, self._model) end
-  return cur
+  local mode = self:mode_applies() and self._sel_mode or DEFAULT_SEL_MODE
+  if self._on_inspect then self._on_inspect(cur, self._model, mode) end
+  return cur, mode
 end
 
 ---dispose returns every borrowed resource. Idempotent.

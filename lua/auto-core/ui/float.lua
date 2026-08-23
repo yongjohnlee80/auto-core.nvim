@@ -188,4 +188,8 @@ end
 -- consumers can `require("auto-core").ui.float.multi`.
 M.multi = require("auto-core.ui.float.multi")
 
+-- Content viewer (ADR 0066 §2.1) — the primitive `help_overlay` is NOT.
+-- Callable: `ui.float.viewer(lines, opts)`.
+M.viewer = require("auto-core.ui.float.viewer")
+
 return M

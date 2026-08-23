@@ -65,8 +65,12 @@ vim.defer_fn(function()
   -- winid, eval fits the result to the window width and inserts `<`
   -- truncation markers, which is a different question from what the view
   -- wrote.
+  -- Composed via render_winbar, not render_header: the view writes the
+  -- header PLUS a right-aligned selection-mode marker (ADR-0066 §2.5). This
+  -- stays an exact equality — the shift is still fully asserted — it just
+  -- names the whole contract instead of half of it.
   ok("[ui] header starts unclipped at leftcol 0",
-    at0 == grid.render_header(raw, 0), vim.inspect(at0:sub(1, 40)))
+    at0 == grid.render_winbar(raw, 0, view:mode_marker()), vim.inspect(at0:sub(1, 40)))
 
   -- Scroll horizontally. The cursor moves, so the row's first cells go
   -- off-screen to the left and the header must follow.
@@ -96,7 +100,7 @@ vim.defer_fn(function()
     -- The contract: the written header is the raw header with exactly
     -- `leftcol` display cells removed — the same shift the text
     -- underneath received — and then escaped.
-    local expected = grid.render_header(raw, leftcol)
+    local expected = grid.render_winbar(raw, leftcol, view:mode_marker())
     ok("[ui] written header == raw header shifted by the window's real leftcol",
       now == expected,
       "leftcol=" .. leftcol .. "\n        written =" .. vim.inspect(now:sub(1, 40))
@@ -147,7 +151,7 @@ vim.defer_fn(function()
         "before=" .. vim.inspect(before_scroll:sub(1, 24))
         .. " after=" .. vim.inspect(after_scroll:sub(1, 24)))
       ok("[ui] and it is still exactly the raw header shifted by leftcol",
-        after_scroll == grid.render_header(raw, moved_leftcol),
+        after_scroll == grid.render_winbar(raw, moved_leftcol, view:mode_marker()),
         vim.inspect(after_scroll:sub(1, 40)))
 
       view:dispose()
