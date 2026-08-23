@@ -35,6 +35,23 @@ local viewer = require("auto-core.ui.float.viewer")
 
 local NL, TAB = string.char(10), string.char(9)
 
+---The viewer handle is METHOD-based. Sections that drive it check the shape
+---FIRST, because if it ever regresses to bare `buf`/`win` fields then every
+---`:buf()` raises "attempt to call a number value" and aborts the suite
+---mid-run — real detection, but of the silent-truncation kind. This turns it
+---into one legible failure per section with the rest still reported.
+---@return boolean ok_to_continue
+local function handle_shape_ok(tag)
+  local h = viewer({ "probe" })
+  local shaped = type(h.buf) == "function" and type(h.win) == "function"
+  if shaped then h:close() else pcall(function() h.close() end) end
+  ok(tag .. " the viewer handle exposes buf/win as METHODS", shaped)
+  if not shaped then
+    ok(tag .. " SKIPPING this section — the handle shape is wrong", false)
+  end
+  return shaped
+end
+
 ---A fresh window each time, so one section's dispose cannot affect the next.
 local function with_grid(m, opts, fn)
   vim.cmd("new")
@@ -172,10 +189,21 @@ end)()
   with_grid(m, { header = "line", selection_mode = "row" }, function(view)
     ok("[4] opts.selection_mode is honoured at attach", view:selection_mode() == "row")
   end)
-  with_grid(m, { header = "line", selection_mode = "nonsense" }, function(view)
-    ok("[4] an invalid opts.selection_mode falls back to cell",
-      view:selection_mode() == "cell", view:selection_mode())
+  -- attach REJECTS an invalid mode rather than coercing it. The earlier
+  -- version silently fell back to `cell` and THIS TEST BLESSED IT — which
+  -- contradicted the very rule the boundary exists for: a typo in a
+  -- consumer's persisted mode must not quietly become a mode.
+  vim.cmd("new")
+  local w = vim.api.nvim_get_current_win()
+  local threw = not pcall(grid.attach, m, { win = w, header = "line", selection_mode = "nonsense" })
+  ok("[4] an invalid opts.selection_mode is REJECTED, not coerced", threw)
+  local ok_nil = pcall(function()
+    local v = grid.attach(m, { win = w, header = "line", selection_mode = nil })
+    ok("[4] nil selection_mode selects the default", v:selection_mode() == "cell")
+    v:dispose()
   end)
+  ok("[4] and nil is accepted", ok_nil)
+  pcall(vim.api.nvim_win_close, w, true)
 end)()
 
 -- ── [5] callback semantics (criterion 11) ─────────────────────────────
@@ -311,23 +339,57 @@ end)()
 
 -- ── [11] viewer: it is NOT help_overlay (§2.1) ────────────────────────
 ;(function()
+  if not handle_shape_ok("[11]") then return end
   local h = viewer({ "a", "b" })
   local maps = {}
-  for _, mp in ipairs(vim.api.nvim_buf_get_keymap(h.buf, "n")) do maps[mp.lhs] = true end
+  for _, mp in ipairs(vim.api.nvim_buf_get_keymap(h:buf(), "n")) do maps[mp.lhs] = true end
   ok("[11] <cr> does NOT dismiss the viewer", not maps["<CR>"], vim.inspect(vim.tbl_keys(maps)))
   ok("[11] q does", maps["q"] == true)
   ok("[11] lines are rendered as given, not formatted into key/desc columns",
-    vim.api.nvim_buf_get_lines(h.buf, 0, -1, false)[1] == "a")
-  h.close()
+    vim.api.nvim_buf_get_lines(h:buf(), 0, -1, false)[1] == "a")
+  -- One calling convention. The handle used to expose `buf`/`win` as bare
+  -- numbers alongside dot-closures, which let `h:set_lines({"x"})` pass the
+  -- handle itself as `lines` and render a single blank line — silently.
+  h:set_lines({ "b", "c" })
+  ok("[11] h:set_lines works via `:` and replaces the content",
+    vim.deep_equal(vim.api.nvim_buf_get_lines(h:buf(), 0, -1, false), { "b", "c" }),
+    vim.inspect(vim.api.nvim_buf_get_lines(h:buf(), 0, -1, false)))
+  ok("[11] and calling it with `.` is an ERROR, not a silent blank",
+    not pcall(function() h.set_lines({ "z" }) end))
+  h:close()
+
   local h2 = viewer("one" .. NL .. "two" .. NL .. "three")
   ok("[11] a multiline string is SPLIT across buffer lines, not an error",
-    #vim.api.nvim_buf_get_lines(h2.buf, 0, -1, false) == 3)
-  h2.close()
+    #vim.api.nvim_buf_get_lines(h2:buf(), 0, -1, false) == 3)
+  h2:close()
+
+  -- A lone CR is DATA and must survive; only a terminator splits. An earlier
+  -- version stripped every \r and rendered "a\rb" as "ab".
+  local CR = string.char(13)
+  local h3 = viewer("a" .. CR .. "b")
+  local got = vim.api.nvim_buf_get_lines(h3:buf(), 0, -1, false)
+  ok("[11] a lone CR is PRESERVED, not deleted",
+    #got == 1 and got[1] == "a" .. CR .. "b", vim.inspect(got))
+  h3:close()
+  local h4 = viewer("a" .. CR .. NL .. "b")
+  ok("[11] but CRLF is a terminator, so it splits cleanly",
+    vim.deep_equal(vim.api.nvim_buf_get_lines(h4:buf(), 0, -1, false), { "a", "b" }),
+    vim.inspect(vim.api.nvim_buf_get_lines(h4:buf(), 0, -1, false)))
+  h4:close()
+
+  -- Bad input is REJECTED with a message, not coerced or dropped into an
+  -- opaque ipairs failure (`viewer(12345)` used to throw from inside).
+  ok("[11] a number is rejected with a clear error", not pcall(viewer, 12345))
+  ok("[11] a list containing a non-string is rejected",
+    not pcall(viewer, { "a", 7 }))
+  ok("[11] a table with no array part is rejected (the accidental-self case)",
+    not pcall(viewer, { title = "x", lines = { "y" } }))
+
   local custom = false
-  local h3 = viewer({ "x" }, { keymaps = { ["y"] = function() custom = true end } })
-  vim.api.nvim_buf_call(h3.buf, function() vim.cmd("normal y") end)
+  local h5 = viewer({ "x" }, { keymaps = { ["y"] = function() custom = true end } })
+  vim.api.nvim_buf_call(h5:buf(), function() vim.cmd("normal y") end)
   ok("[11] a consumer keymap runs INSIDE the viewer", custom)
-  h3.close()
+  h5:close()
 end)()
 
 -- ── [12] viewer lifecycle: child return + parent cascade (15, 16) ─────
@@ -340,22 +402,23 @@ end)()
 -- for a consumer that passes a different `bufhidden`, NOT because each is
 -- separately load-bearing here.
 ;(function()
+  if not handle_shape_ok("[12]") then return end
   local n = 0
   local h = viewer({ "x" }, { on_close = function() n = n + 1 end })
-  h.close(); h.close(); h.close()
+  h:close(); h:close(); h:close()
   ok("[12] on_close fires exactly once however often close is called", n == 1, n)
 
   local n2 = 0
   local h2 = viewer({ "y" }, { on_close = function() n2 = n2 + 1 end })
-  vim.api.nvim_win_close(h2.win, true)
+  vim.api.nvim_win_close(h2:win(), true)
   ok("[12] on_close fires when the window dies EXTERNALLY", n2 == 1, n2)
-  ok("[12] and the handle knows it is closed", not h2.is_open())
+  ok("[12] and the handle knows it is closed", not h2:is_open())
 
   vim.cmd("new")
   local base = vim.api.nvim_get_current_win()
   local h3 = viewer({ "z" }, { opener = base })
-  local took = vim.api.nvim_get_current_win() == h3.win
-  h3.close()
+  local took = vim.api.nvim_get_current_win() == h3:win()
+  h3:close()
   ok("[12] CHILD RETURN — focus goes back to a still-valid opener",
     took and vim.api.nvim_get_current_win() == base)
 
@@ -364,15 +427,101 @@ end)()
     local pc, cc, child = 0, 0, nil
     local parent = viewer({ "parent" }, { on_close = function()
       pc = pc + 1
-      if child then child.close() end
+      if child then child:close() end
     end })
-    child = viewer({ "child" }, { opener = parent.win, on_close = function() cc = cc + 1 end })
-    if how == "handle" then parent.close() else vim.api.nvim_win_close(parent.win, true) end
+    child = viewer({ "child" }, { opener = parent:win(), on_close = function() cc = cc + 1 end })
+    if how == "handle" then parent:close() else vim.api.nvim_win_close(parent:win(), true) end
     ok("[12] PARENT CASCADE (" .. how .. ") — each on_close exactly once",
       pc == 1 and cc == 1, string.format("parent=%d child=%d", pc, cc))
     ok("[12] PARENT CASCADE (" .. how .. ") — no orphaned child float",
-      not child.is_open())
+      not child:is_open())
   end
+  pcall(vim.api.nvim_win_close, base, true)
+end)()
+
+-- ── [13] a 60-column row detail: reachable, scrollable, searchable ───
+--
+-- Criterion 14, which the first implementation pass shipped WITHOUT a test —
+-- I reported "all 17 criteria covered" and this one was not. r3 answered the
+-- design question (scroll and search all 60 columns, no pagination) and the
+-- implementation review caught the missing fixture.
+;(function()
+  if not handle_shape_ok("[13]") then return end
+  local cols, row = {}, {}
+  for i = 1, 60 do
+    cols[i] = string.format("col_%02d", i)
+    row[i]  = string.format("v%02d", i)
+  end
+  local m = model.new({ columns = cols, rows = { row } })
+  local e = m:row_entries(1)
+  ok("[13] all 60 columns become entries", #e == 60, #e)
+
+  local lines, map = model.row_detail_lines(e)
+  ok("[13] 60 lines for 60 columns", #lines == 60, #lines)
+  ok("[13] and the map covers every one of them", #map == 60, #map)
+  ok("[13] the LAST entry is reachable and is column 60",
+    map[60] ~= nil and map[60].col == 60 and map[60].label == "col_60",
+    vim.inspect(map[60] and { map[60].col, map[60].label }))
+
+  local h = viewer(lines, { title = "row 1" })
+  local win, buf = h:win(), h:buf()
+  ok("[13] the buffer holds all 60 lines",
+    vim.api.nvim_buf_line_count(buf) == 60, vim.api.nvim_buf_line_count(buf))
+  -- There must genuinely BE content past the fold, or "scrollable" is vacuous.
+  local height = vim.api.nvim_win_get_height(win)
+  ok("[13] the window is shorter than the content (so there IS a fold)",
+    height < 60, string.format("height=%d lines=60", height))
+
+  -- Search, with the real primitive, for a column BELOW the fold.
+  local found = vim.api.nvim_win_call(win, function()
+    vim.api.nvim_win_set_cursor(win, { 1, 0 })
+    return vim.fn.search("col_57", "W")
+  end)
+  ok("[13] `/` finds a column name below the fold", found == 57, found)
+  ok("[13] and the cursor really moved there",
+    vim.api.nvim_win_get_cursor(win)[1] == 57,
+    vim.inspect(vim.api.nvim_win_get_cursor(win)))
+  ok("[13] the line it landed on is that column's",
+    (vim.api.nvim_buf_get_lines(buf, 56, 57, false)[1] or ""):find("col_57", 1, true) == 1)
+
+  -- And scrolling to the very last line works, which is what "no pagination"
+  -- has to mean in practice.
+  vim.api.nvim_win_set_cursor(win, { 60, 0 })
+  ok("[13] the last line is reachable by cursor",
+    vim.api.nvim_win_get_cursor(win)[1] == 60)
+  h:close()
+end)()
+
+-- ── [14] malformed entries fail LOUDLY (impl-review) ─────────────────
+--
+-- row_detail_lines flattens defensively, but a MISSING half is a different
+-- thing from an unflattened one: substituting "" would render a line that
+-- looks fine and names no column, so the reader cannot tell what they are
+-- looking at.
+;(function()
+  ok("[14] an entry missing `label` is rejected",
+    not pcall(model.row_detail_lines, { { col = 1, text = "x" } }))
+  ok("[14] an entry missing `text` is rejected",
+    not pcall(model.row_detail_lines, { { col = 1, label = "a" } }))
+  ok("[14] a non-table entry is rejected",
+    not pcall(model.row_detail_lines, { "not an entry" }))
+  ok("[14] a non-string label is rejected",
+    not pcall(model.row_detail_lines, { { col = 1, label = 7, text = "x" } }))
+  ok("[14] and a well-formed entry still works",
+    select(1, model.row_detail_lines({ { col = 1, label = "a", text = "x" } }))[1] == "a = x")
+  -- The opener's cursor is left alone by a child's close (the auto-core half
+  -- of criterion 15; autodb [17] asserts the row-detail line itself).
+  if not handle_shape_ok("[14]") then return end
+  vim.cmd("new")
+  local base = vim.api.nvim_get_current_win()
+  vim.api.nvim_buf_set_lines(0, 0, -1, false, { "l1", "l2", "l3" })
+  vim.api.nvim_win_set_cursor(base, { 3, 0 })
+  local child = viewer({ "v" }, { opener = base })
+  child:close()
+  ok("[14] closing a child restores the opener with its cursor untouched",
+    vim.api.nvim_get_current_win() == base
+      and vim.api.nvim_win_get_cursor(base)[1] == 3,
+    vim.inspect(vim.api.nvim_win_get_cursor(base)))
   pcall(vim.api.nvim_win_close, base, true)
 end)()
 

@@ -35,23 +35,47 @@ local hl     = require("auto-core.ui.highlights")
 
 local DEFAULT_CLOSE_KEYS = { "q", "<esc>" }
 
----Flatten `lines` into buffer-safe strings. A buffer line may not contain a
----newline, so an embedded one becomes a line break rather than an error;
----`\r` is dropped so CRLF content does not render a stray control glyph.
----@param lines any
+---Split `lines` into buffer-safe strings, REJECTING anything else.
+---
+---The only transformation is the one a buffer makes unavoidable: a buffer
+---line cannot contain a newline, so a line TERMINATOR (`\n` or `\r\n`)
+---becomes a line break. Everything else is preserved, including a **lone
+---`\r`**, which is data rather than structure — an earlier version stripped
+---every `\r` and rendered `a\rb` as `ab`, silently losing a byte from a
+---primitive whose entire contract is to show what it was given.
+---
+---Bad input ERRORS rather than being coerced. It previously ran `tostring`
+---over elements and let a non-table, non-string argument fall through to an
+---opaque `ipairs` failure, so `viewer(12345)` threw from the middle of this
+---function instead of saying what was wrong.
+---@param lines string|string[]
 ---@return string[]
 local function to_buffer_lines(lines)
+  local list
+  if type(lines) == "string" then
+    list = { lines }
+  elseif type(lines) == "table" then
+    -- A table with keys but no array part is almost always a handle passed
+    -- by accident (`h.set_lines(h)`), which used to render as one blank line.
+    if #lines == 0 and next(lines) ~= nil then
+      error("auto-core viewer: `lines` is a table with no array part — "
+        .. "expected a string or a list of strings", 3)
+    end
+    list = lines
+  else
+    error("auto-core viewer: `lines` must be a string or a list of strings, got "
+      .. type(lines), 3)
+  end
+
   local out = {}
-  if type(lines) == "string" then lines = { lines } end
-  for _, l in ipairs(lines or {}) do
-    local s = type(l) == "string" and l or tostring(l)
-    s = s:gsub("\r", "")
-    if s:find("\n", 1, true) then
-      for _, part in ipairs(vim.split(s, "\n", { plain = true })) do
-        out[#out + 1] = part
-      end
-    else
-      out[#out + 1] = s
+  for i, l in ipairs(list) do
+    if type(l) ~= "string" then
+      error(string.format("auto-core viewer: line %d must be a string, got %s",
+        i, type(l)), 3)
+    end
+    -- CRLF and LF are terminators; a bare CR stays in the line.
+    for _, part in ipairs(vim.split((l:gsub("\r\n", "\n")), "\n", { plain = true })) do
+      out[#out + 1] = part
     end
   end
   if #out == 0 then out = { "" } end
@@ -72,11 +96,11 @@ end
 ---@field on_close   fun()?                     -- fired once per in-session close
 
 ---@class AutoCoreViewerHandle
----@field buf       integer
----@field win       integer
----@field close     fun()
----@field is_open   fun(): boolean
----@field set_lines fun(lines: any)
+---@field buf       fun(self): integer
+---@field win       fun(self): integer
+---@field close     fun(self)
+---@field is_open   fun(self): boolean
+---@field set_lines fun(self, lines: string|string[])
 
 ---Open a scrollable content float.
 ---@param lines any
@@ -151,20 +175,30 @@ return function(lines, opts)
     end
   end
 
-  handle = {
-    buf     = buf,
-    win     = win,
-    close   = do_close,
-    is_open = function()
-      return (not closed) and vim.api.nvim_win_is_valid(win)
-    end,
-    set_lines = function(new_lines)
-      if closed or not vim.api.nvim_buf_is_valid(buf) then return end
-      vim.bo[buf].modifiable = true
-      vim.api.nvim_buf_set_lines(buf, 0, -1, false, to_buffer_lines(new_lines))
-      vim.bo[buf].modifiable = false
-    end,
-  }
+  -- METHODS, not fields plus dot-closures. The published contract is
+  -- `:close()` / `:is_open()` / `:buf()` / `:win()` / `:set_lines(lines)`, and
+  -- a handle that ALSO exposed `buf`/`win` as bare numbers invited
+  -- `h:set_lines({"x"})` — which passed the handle itself as `lines` and
+  -- rendered one blank line, silently. One calling convention only.
+  handle = setmetatable({}, {
+    __index = {
+      buf     = function() return buf end,
+      win     = function() return win end,
+      close   = function() return do_close() end,
+      is_open = function()
+        return (not closed) and vim.api.nvim_win_is_valid(win)
+      end,
+      set_lines = function(self, new_lines)
+        if self ~= handle then
+          error("auto-core viewer: call set_lines with `:`, not `.`", 2)
+        end
+        if closed or not vim.api.nvim_buf_is_valid(buf) then return end
+        vim.bo[buf].modifiable = true
+        vim.api.nvim_buf_set_lines(buf, 0, -1, false, to_buffer_lines(new_lines))
+        vim.bo[buf].modifiable = false
+      end,
+    },
+  })
 
   for _, key in ipairs(opts.close_keys or DEFAULT_CLOSE_KEYS) do
     pcall(vim.keymap.set, "n", key, do_close, {
