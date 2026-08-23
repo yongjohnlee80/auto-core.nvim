@@ -11,6 +11,7 @@
 ---  fan_out(workspace_root, opts?)  → repos[]   multi-repo discovery
 ---  show_stat(common_dir, hash)     → string[]  cursor-preview cache
 ---  show_diff(common_dir, hash)     → string[]  full-diff cache
+---  working_diff(worktree)          → string[]  UNCACHED working-tree diff
 ---
 ---Caching:
 ---  - fan_out: cached per workspace_root; invalidated on
@@ -237,6 +238,64 @@ function M.show_diff(common_dir, hash)
     lines = out
   end
   _diff_cache[key] = lines
+  return lines
+end
+
+---Uncached `git diff HEAD` for a WORKING TREE, plus each untracked file.
+---
+---Deliberately NOT cached, unlike `show_diff`. A commit's diff is immutable, so
+---caching it by hash is free; the working tree changes under you between every
+---keypress, and a cached answer there would show stale content with no way to
+---know it was stale.
+---
+---Takes a WORKTREE path, not a common dir: there is no working tree to diff
+---without one — the same asymmetry `git.log.working_changes` has.
+---
+---`diff HEAD` covers staged AND unstaged changes to tracked files in one pass.
+---Untracked files are invisible to it, so each is appended as a `--no-index`
+---diff against /dev/null. That matters here: the panel already LISTS untracked
+---files under UNCOMMITTED, so omitting them would show a file in the tree whose
+---diff came back empty.
+---@param worktree string
+---@return string[] lines
+function M.working_diff(worktree)
+  if not worktree or worktree == "" then return {} end
+  local base = {
+    "git", "-C", worktree,
+    "--no-optional-locks", "-c", "core.quotepath=off", "-c", "color.diff=false",
+  }
+
+  local function run(extra)
+    local argv = vim.deepcopy(base)
+    vim.list_extend(argv, extra)
+    local out = vim.fn.systemlist(argv)
+    if vim.v.shell_error ~= 0 then
+      return nil, out
+    end
+    return out
+  end
+
+  local lines, failed = run({ "diff", "--no-color", "HEAD" })
+  if not lines then
+    local msg = { "(auto-core.git.graph: git diff HEAD failed)", "" }
+    vim.list_extend(msg, failed or {})
+    return msg
+  end
+
+  -- Untracked, one `--no-index` diff each. `--no-index` exits 1 when the files
+  -- differ (which they always do against /dev/null), so its output is taken
+  -- regardless of status rather than treated as a failure.
+  local untracked = run({ "ls-files", "--others", "--exclude-standard" }) or {}
+  for _, rel in ipairs(untracked) do
+    if rel ~= "" then
+      local argv = vim.deepcopy(base)
+      vim.list_extend(argv, { "diff", "--no-color", "--no-index", "/dev/null", rel })
+      local out = vim.fn.systemlist(argv)
+      for _, l in ipairs(out) do
+        lines[#lines + 1] = l
+      end
+    end
+  end
   return lines
 end
 
