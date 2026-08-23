@@ -51,15 +51,36 @@ local DEFAULT_CLOSE_KEYS = { "q", "<esc>" }
 ---@param lines string|string[]
 ---@return string[]
 local function to_buffer_lines(lines)
-  local list
+  local list, count
   if type(lines) == "string" then
-    list = { lines }
+    list, count = { lines }, 1
   elseif type(lines) == "table" then
-    -- A table with keys but no array part is almost always a handle passed
-    -- by accident (`h.set_lines(h)`), which used to render as one blank line.
-    if #lines == 0 and next(lines) ~= nil then
-      error("auto-core viewer: `lines` is a table with no array part — "
-        .. "expected a string or a list of strings", 3)
+    -- A REAL contiguous sequence, checked with `pairs` rather than `ipairs`.
+    -- `#lines == 0` plus `ipairs` was not enough: `{[1]="a", extra="lost"}` and
+    -- `{[1]="a", [3]="lost"}` both passed and rendered only "a", silently
+    -- dropping what the caller supplied. For a primitive whose contract is to
+    -- show what it was given, quietly showing LESS is the worst outcome
+    -- available — worse than refusing, and worse than showing it badly.
+    count = 0
+    for k, v in pairs(lines) do
+      if type(k) ~= "number" or k % 1 ~= 0 or k < 1 then
+        error(string.format(
+          "auto-core viewer: `lines` must be a list of strings — found the "
+          .. "non-index key %q, whose value would be silently dropped",
+          tostring(k)), 3)
+      end
+      if type(v) ~= "string" then
+        error(string.format("auto-core viewer: line %d must be a string, got %s",
+          k, type(v)), 3)
+      end
+      count = count + 1
+    end
+    for i = 1, count do
+      if lines[i] == nil then
+        error(string.format(
+          "auto-core viewer: `lines` has a hole at index %d — a sparse table "
+          .. "would render only the leading run and drop the rest", i), 3)
+      end
     end
     list = lines
   else
@@ -68,11 +89,8 @@ local function to_buffer_lines(lines)
   end
 
   local out = {}
-  for i, l in ipairs(list) do
-    if type(l) ~= "string" then
-      error(string.format("auto-core viewer: line %d must be a string, got %s",
-        i, type(l)), 3)
-    end
+  for i = 1, count do
+    local l = list[i]
     -- CRLF and LF are terminators; a bare CR stays in the line.
     for _, part in ipairs(vim.split((l:gsub("\r\n", "\n")), "\n", { plain = true })) do
       out[#out + 1] = part
@@ -157,6 +175,14 @@ return function(lines, opts)
   local handle
   local closed = false
 
+  ---Every handle method is called with `:`. A dot call is a mistake worth
+  ---naming rather than tolerating — see the note on the __index table below.
+  local function check_self(self, name)
+    if self ~= handle then
+      error("auto-core viewer: call " .. name .. " with `:`, not `.`", 3)
+    end
+  end
+
   ---One closer behind every route, so `on_close` cannot fire twice. Modelled
   ---on `help_overlay`'s `do_close` (`float.lua:122-133`); the difference is
   ---that this one is also reachable from `WinClosed`/`BufWipeout`, because
@@ -182,20 +208,30 @@ return function(lines, opts)
   -- rendered one blank line, silently. One calling convention only.
   handle = setmetatable({}, {
     __index = {
-      buf     = function() return buf end,
-      win     = function() return win end,
-      close   = function() return do_close() end,
-      is_open = function()
+      -- EVERY method checks `self`, including the no-arg ones. Without that
+      -- the "one calling convention" claim above was stronger than the code:
+      -- `h.buf()` happened to work because the function ignored its argument,
+      -- so half the surface silently accepted both conventions.
+      buf     = function(self) check_self(self, "buf"); return buf end,
+      win     = function(self) check_self(self, "win"); return win end,
+      close   = function(self) check_self(self, "close"); return do_close() end,
+      is_open = function(self)
+        check_self(self, "is_open")
         return (not closed) and vim.api.nvim_win_is_valid(win)
       end,
       set_lines = function(self, new_lines)
-        if self ~= handle then
-          error("auto-core viewer: call set_lines with `:`, not `.`", 2)
-        end
+        check_self(self, "set_lines")
         if closed or not vim.api.nvim_buf_is_valid(buf) then return end
+        -- Render FIRST, then unlock. Flipping `modifiable` before validating
+        -- left the buffer WRITABLE whenever the input was rejected: the throw
+        -- escaped between the unlock and the re-lock, so a read-only viewer
+        -- silently became editable on a caller's mistake.
+        local rendered = to_buffer_lines(new_lines)
         vim.bo[buf].modifiable = true
-        vim.api.nvim_buf_set_lines(buf, 0, -1, false, to_buffer_lines(new_lines))
+        local ok_write, err = pcall(vim.api.nvim_buf_set_lines,
+          buf, 0, -1, false, rendered)
         vim.bo[buf].modifiable = false
+        if not ok_write then error(err, 2) end
       end,
     },
   })

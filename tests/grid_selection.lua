@@ -41,11 +41,20 @@ local NL, TAB = string.char(10), string.char(9)
 ---mid-run — real detection, but of the silent-truncation kind. This turns it
 ---into one legible failure per section with the rest still reported.
 ---@return boolean ok_to_continue
+local VIEWER_METHODS = { "buf", "win", "close", "is_open", "set_lines" }
 local function handle_shape_ok(tag)
   local h = viewer({ "probe" })
-  local shaped = type(h.buf) == "function" and type(h.win) == "function"
+  -- EVERY method, not just buf/win. A guard that checks two of five does not
+  -- prevent the aborts it exists to prevent — a regression in `close` or
+  -- `is_open` would still take the section down mid-run.
+  local missing = {}
+  for _, name in ipairs(VIEWER_METHODS) do
+    if type(h[name]) ~= "function" then missing[#missing + 1] = name end
+  end
+  local shaped = #missing == 0
   if shaped then h:close() else pcall(function() h.close() end) end
-  ok(tag .. " the viewer handle exposes buf/win as METHODS", shaped)
+  ok(tag .. " the viewer handle exposes every method",
+    shaped, "missing/wrong: " .. table.concat(missing, ", "))
   if not shaped then
     ok(tag .. " SKIPPING this section — the handle shape is wrong", false)
   end
@@ -384,6 +393,42 @@ end)()
     not pcall(viewer, { "a", 7 }))
   ok("[11] a table with no array part is rejected (the accidental-self case)",
     not pcall(viewer, { title = "x", lines = { "y" } }))
+
+  -- A SPARSE or MIXED table is rejected, not quietly truncated. `#lines == 0`
+  -- plus `ipairs` was not enough: both of these used to render only "a" and
+  -- drop the rest, which for a show-what-you-were-given primitive is the
+  -- worst outcome available — worse than refusing and worse than rendering
+  -- it badly, because the caller cannot tell.
+  ok("[11] a table with a non-index key is rejected",
+    not pcall(viewer, { [1] = "a", extra = "lost" }))
+  ok("[11] a SPARSE table (a hole) is rejected",
+    not pcall(viewer, { [1] = "a", [3] = "lost" }))
+  ok("[11] an empty table is still fine (one blank line)",
+    pcall(function() local e = viewer({}); e:close() end))
+  ok("[11] and a plain two-element list is still fine",
+    pcall(function() local e = viewer({ "a", "b" }); e:close() end))
+
+  -- Dot calls are rejected on EVERY method, including the no-arg ones. They
+  -- used to work by accident, because the function ignored its argument.
+  local h6 = viewer({ "z" })
+  ok("[11] a dot call on a no-arg method is rejected too",
+    not pcall(function() return h6.buf() end)
+      and not pcall(function() return h6.is_open() end))
+  ok("[11] while the colon call works", h6:buf() ~= nil)
+
+  -- STATE AFTER A REJECTED WRITE. `modifiable` used to be flipped before
+  -- validation, so a rejected input left the read-only buffer WRITABLE — the
+  -- throw escaped between the unlock and the re-lock.
+  local before_mod = vim.bo[h6:buf()].modifiable
+  local raised = not pcall(function() h6:set_lines({ "valid", 7 }) end)
+  ok("[11] a bad set_lines raises", raised)
+  ok("[11] and leaves the buffer NOT modifiable",
+    vim.bo[h6:buf()].modifiable == false,
+    string.format("before=%s after=%s", before_mod, vim.bo[h6:buf()].modifiable))
+  ok("[11] and leaves the old content intact",
+    vim.deep_equal(vim.api.nvim_buf_get_lines(h6:buf(), 0, -1, false), { "z" }),
+    vim.inspect(vim.api.nvim_buf_get_lines(h6:buf(), 0, -1, false)))
+  h6:close()
 
   local custom = false
   local h5 = viewer({ "x" }, { keymaps = { ["y"] = function() custom = true end } })
