@@ -349,7 +349,18 @@ end
 function M.row_detail_lines(entries, sep)
   sep = sep or " = "
   local lines, map = {}, {}
-  for _, e in ipairs(entries or {}) do
+  for i, e in ipairs(entries or {}) do
+    -- Validated, not defaulted. Flattening below is defensive on purpose, but
+    -- a MISSING half is a different thing from an unflattened one: silently
+    -- substituting "" would render a line that looks fine and carries no
+    -- column name, so the reader cannot tell which column they are looking at.
+    if type(e) ~= "table" or type(e.label) ~= "string" or type(e.text) ~= "string" then
+      error(string.format(
+        "auto-core grid: row_detail_lines entry %d needs string `label` and `text` "
+        .. "(got label=%s text=%s)", i,
+        type(e) == "table" and type(e.label) or "n/a",
+        type(e) == "table" and type(e.text) or "n/a"), 2)
+    end
     -- Flattened AGAIN, deliberately. `label` and `text` are already
     -- single-line when the entries come from `row_entries`, so for that path
     -- this is a no-op. It is here because the alternative is an invariant

@@ -199,7 +199,20 @@ function M.attach(model, opts)
   -- the consumer's own persisted mode arriving (the view is disposed and
   -- re-attached on every query), so echoing it straight back out would make
   -- attach-order a source of writes for something that never changed.
-  self._sel_mode = SEL_MODES[opts.selection_mode] and opts.selection_mode or DEFAULT_SEL_MODE
+  --
+  -- `nil` selects the default; an invalid non-nil value is REJECTED, loudly.
+  -- It used to coerce to `cell`, which contradicted the very rule this
+  -- boundary exists to enforce — a typo in a consumer's persisted mode must
+  -- not silently become a mode. `attach` is construction, where a bad
+  -- argument is a programming error and failing fast is the whole point;
+  -- `set_selection_mode` stays a soft no-op because it is called from a
+  -- keymap at runtime, where refusing is better than throwing at the user.
+  if opts.selection_mode ~= nil and not SEL_MODES[opts.selection_mode] then
+    error(string.format(
+      "auto-core grid: invalid selection_mode %q — expected \"cell\", \"row\", or nil",
+      tostring(opts.selection_mode)), 2)
+  end
+  self._sel_mode = opts.selection_mode or DEFAULT_SEL_MODE
   self._on_selection_mode = opts.on_selection_mode
   self._disposed = false
   self._ns = vim.api.nvim_create_namespace(NS_PREFIX .. self._id)
