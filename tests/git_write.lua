@@ -362,6 +362,89 @@ end)()
     r2.ok == false and tostring(r2.err):find("nothing staged", 1, true) ~= nil, r2.err)
 end)()
 
+-- ── [7d] push's REFSPEC boundary, against a real remote ──────────────
+--
+-- The second boundary bug, and a different shape from [7b]'s. `opts.branch`
+-- lands in git's refspec position, where the control syntax does not begin with
+-- a dash — so the dash guard passed it straight through:
+--
+--   branch = "+HEAD~1:refs/heads/main"  -> ok=true, remote FORCE-REWOUND
+--   branch = ":refs/heads/main"         -> ok=true, remote branch DELETED
+--
+-- A real bare remote is used because the assertion that matters is the state of
+-- the remote ref, not the refusal. Refusing while still rewinding would pass a
+-- refusal-only test.
+;(function()
+  local d = new_repo()
+  local bare = vim.fn.tempname()
+  vim.fn.mkdir(bare, "p")
+  vim.system({ "git", "init", "-q", "--bare", bare }, { text = true }):wait()
+  vim.system({ "git", "-C", d, "remote", "add", "origin", bare }, { text = true }):wait()
+
+  local function remote_main()
+    return vim.trim(vim.system({ "git", "-C", bare, "rev-parse", "refs/heads/main" },
+      { text = true }):wait().stdout or "")
+  end
+  local function commit(txt)
+    vim.fn.writefile({ txt }, d .. "/a.txt")
+    sync(function(cb) W.stage(d, "a.txt", cb) end)
+    sync(function(cb) W.commit(d, txt, nil, cb) end)
+  end
+
+  commit("one")
+  local up = sync(function(cb)
+    W.push(d, { set_upstream = true, remote = "origin", branch = "main" }, cb) end)
+  ok("[7d] a normal push works", up.ok, up.err)
+  local first = remote_main()
+  commit("two")
+  sync(function(cb) W.push(d, { remote = "origin", branch = "main" }, cb) end)
+  local second = remote_main()
+  ok("[7d] CONTROL — the remote really advances on a normal push",
+    first ~= "" and second ~= "" and first ~= second,
+    first:sub(1, 8) .. " -> " .. second:sub(1, 8))
+
+  -- FORCE syntax.
+  local f = sync(function(cb)
+    W.push(d, { remote = "origin", branch = "+HEAD~1:refs/heads/main" }, cb) end)
+  ok("[7d] a leading '+' force refspec is REFUSED", f.ok == false, f.err)
+  ok("[7d] and the remote ref is UNCHANGED — not rewound",
+    remote_main() == second, remote_main():sub(1, 8) .. " want " .. second:sub(1, 8))
+
+  -- DELETE syntax.
+  local del = sync(function(cb)
+    W.push(d, { remote = "origin", branch = ":refs/heads/main" }, cb) end)
+  ok("[7d] a leading ':' delete refspec is REFUSED", del.ok == false, del.err)
+  ok("[7d] and the remote branch still EXISTS",
+    remote_main() == second, vim.inspect(remote_main()))
+
+  -- Other refspec-ish spellings that a dash guard would also miss.
+  -- NOT in this list: "refs/heads/main". check-ref-format accepts it, and
+  -- `git push origin refs/heads/main` is an ordinary non-destructive push to the
+  -- matching remote ref — no force, no delete. My first version of this test
+  -- asserted it should be refused, which would have meant tightening the guard
+  -- past what the danger actually is.
+  for _, bad in ipairs({ "HEAD~1", "main:main", "@{-1}", "a b", "" }) do
+    local r = sync(function(cb)
+      W.push(d, { remote = "origin", branch = bad }, cb) end)
+    ok("[7d] branch " .. string.format("%q", bad) .. " is refused", r.ok == false, r.err)
+  end
+  ok("[7d] and after all of those the remote is STILL where it was",
+    remote_main() == second, remote_main():sub(1, 8))
+
+  -- A legitimate branch name still pushes, so the guard is not just "refuse".
+  vim.system({ "git", "-C", d, "checkout", "-q", "-b", "feature/x" }, { text = true }):wait()
+  commit("three")
+  local okp = sync(function(cb)
+    W.push(d, { set_upstream = true, remote = "origin", branch = "feature/x" }, cb) end)
+  ok("[7d] a real branch name with a slash still pushes", okp.ok, okp.err)
+
+  -- remote is validated too: a plain name only.
+  local br = sync(function(cb)
+    W.push(d, { remote = "origin;touch /tmp/pwned", branch = "main" }, cb) end)
+  ok("[7d] a non-plain remote name is refused",
+    br.ok == false and tostring(br.err):find("plain remote name", 1, true) ~= nil, br.err)
+end)()
+
 -- ── [6] the read/write hardening split is real ───────────────────────
 ;(function()
   -- The claim in the module header: reads carry --no-optional-locks, writes
