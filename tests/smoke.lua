@@ -11987,9 +11987,30 @@ print("\n[marks] auto-core.ui.marks — line/range/gutter/virt_lines (ADR-0060 P
   ok("[marks] paint_diff_column colours the add and leaves context alone",
     painted == 1, tostring(painted))
   local pm = vim.api.nvim_buf_get_extmarks(buf2, ns, 0, -1, { details = true })
-  ok("[marks] and it used the diff-add group",
-    #pm == 1 and pm[1][4].line_hl_group == "AutoCoreDiffAdd",
+  -- ADR-0065 §2.9: the painter now uses the BACKGROUND-ONLY group, below
+  -- treesitter's priority, so foreground belongs to the syntax and background
+  -- to the diff. Asserting the group NAME alone would not catch the thing that
+  -- matters, so the fg-free invariant is asserted too.
+  ok("[marks] and it used the background-only diff-add group",
+    #pm == 1 and pm[1][4].line_hl_group == "AutoCoreDiffAddBg",
     vim.inspect(pm[1] and pm[1][4].line_hl_group))
+  ok("[marks] painted below treesitter, so it cannot win the foreground",
+    #pm == 1 and pm[1][4].priority == 90, vim.inspect(pm[1] and pm[1][4].priority))
+  ok("[marks] and that group carries NO foreground",
+    (function()
+      require("auto-core.ui.highlights").ensure()
+      local h = vim.api.nvim_get_hl(0, { name = "AutoCoreDiffAddBg", link = false })
+      return h.fg == nil and h.bg ~= nil
+    end)(), "AutoCoreDiffAddBg must be bg-only")
+  ok("[marks] legacy_hl restores the old group for non-treesitter consumers",
+    (function()
+      local b3 = vim.api.nvim_create_buf(false, true)
+      vim.api.nvim_buf_set_lines(b3, 0, -1, false, text)
+      local ns3 = marks.ns("smoke-legacy")
+      marks.paint_diff_column(b3, ns3, sides.after, { legacy_hl = true })
+      local m3 = vim.api.nvim_buf_get_extmarks(b3, ns3, 0, -1, { details = true })
+      return m3[1] and m3[1][4].line_hl_group == "AutoCoreDiffAdd"
+    end)())
   ok("[marks] painting an over-long column does not throw",
     (function()
       local okp = pcall(marks.paint_diff_column, buf2, ns, sides.after, { offset = 500 })
@@ -12073,8 +12094,27 @@ print("\n[diffview] auto-core.ui.diffview — three columns, git a/ b/ (ADR-0060
     a_side:find("two", 1, true) and not a_side:find("inserted", 1, true), a_side)
   ok("[diffview] the b/ pane holds context + insertions, not deletions",
     b_side:find("inserted", 1, true) and b_side:find("two%-edited"), b_side)
-  ok("[diffview] both panes carry line numbers (a comment anchors to one)",
-    a_side:match("%s+1 │ one") ~= nil and b_side:match("%s+1 │ one") ~= nil, a_side)
+  -- ADR-0065 §2.9 moved the line numbers OUT of the buffer text and into the
+  -- `statuscolumn`, because a `%5s │ ` prefix inside the buffer is what stopped
+  -- treesitter being usable at all. The requirement is unchanged — a comment
+  -- anchors to a line and the reader must be able to find it — so it is now
+  -- asserted where the numbers actually live.
+  ok("[diffview] the panes hold PURE file text, with no gutter in the buffer",
+    a_side:match("│") == nil and b_side:match("│") == nil,
+    vim.inspect({ a_side, b_side }))
+  ok("[diffview] both panes still carry line numbers (a comment anchors to one)",
+    (function()
+      for _, pane in ipairs({ "middle", "preview" }) do
+        local w = st.float:winid(pane)
+        if not (w and vim.wo[w].number and vim.wo[w].statuscolumn:find("diffview", 1, true)) then
+          return false
+        end
+        vim.g.statusline_winid = w
+        vim.v.lnum = 1
+        if not dv.statuscolumn():find("1") then return false end
+      end
+      return true
+    end)(), "statuscolumn must resolve row 1 to file line 1 on both panes")
 
   -- annotations: the whole point of the view
   local marks = require("auto-core.ui").marks
@@ -12107,7 +12147,7 @@ print("\n[diffview] auto-core.ui.diffview — three columns, git a/ b/ (ADR-0060
   local painted = 0
   for _, m in ipairs(vim.api.nvim_buf_get_extmarks(st.float:bufnr("preview"), ns, 0, -1,
     { details = true })) do
-    if m[4] and m[4].line_hl_group == "AutoCoreDiffAdd" then painted = painted + 1 end
+    if m[4] and m[4].line_hl_group == "AutoCoreDiffAddBg" then painted = painted + 1 end
   end
   ok("[diffview] insertions are coloured on the b/ side", painted == 2, tostring(painted))
 

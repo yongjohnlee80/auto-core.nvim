@@ -76,6 +76,59 @@ local DEFAULTS = {
   AutoCoreReviewResolved  = { link = "Comment",     default = true },
 }
 
+-- Background-only diff groups (ADR-0065 §2.9).
+--
+-- They are NOT in DEFAULTS, because they are DERIVED from whatever
+-- `DiffAdd`/`DiffDelete` the active colorscheme provides rather than linked to
+-- it. A link would inherit the theme's FOREGROUND too, and a `line_hl_group`
+-- carrying a foreground competes directly with treesitter's — which is the
+-- whole reason the diff panes could not be highlighted before.
+local DERIVED_BG = {
+  AutoCoreDiffAddBg    = "DiffAdd",
+  AutoCoreDiffDeleteBg = "DiffDelete",
+}
+
+-- Used when the theme's DiffAdd/DiffDelete carries no `bg` at all — some
+-- minimal and monochrome schemes define only a foreground. Painting an
+-- attribute-less group would be an invisible no-op that reads as "the diff
+-- colouring broke", so we supply our own, chosen to be legible on both a dark
+-- and a light background.
+local FALLBACK_BG = {
+  AutoCoreDiffAddBg    = { dark = "#20303b", light = "#d7f0dd" },
+  AutoCoreDiffDeleteBg = { dark = "#3b2028", light = "#f7d9de" },
+}
+
+---derive_bg_groups recomputes the background-only diff groups from the ACTIVE
+---colorscheme. Idempotent, and safe to call on every `ColorScheme`.
+---
+---`link = false` is load-bearing: `nvim_get_hl` DEFAULTS to returning
+---`{ link = "DiffAdd" }` with no attributes at all, and `AutoCoreDiffAdd` is
+---itself a link — so the obvious call would silently yield an empty background
+---and simply look unstyled. That failure would not have raised anything.
+---
+---A group claimed by `theme_override` is skipped: that API exists precisely to
+---beat colorscheme defaults, so re-deriving over it would undo the one thing it
+---promises.
+function M.derive_bg_groups()
+  for name, source in pairs(DERIVED_BG) do
+    if not M._overridden[name] then
+      local bg
+      local ok, hl = pcall(vim.api.nvim_get_hl, 0, { name = source, link = false })
+      if ok and type(hl) == "table" then bg = hl.bg end
+      if not bg then
+        local fb = FALLBACK_BG[name]
+        bg = (vim.o.background == "light") and fb.light or fb.dark
+      end
+      -- No `fg`, deliberately: a line highlight that carries no foreground
+      -- cannot compete with treesitter's, whatever the theme does.
+      pcall(vim.api.nvim_set_hl, 0, name, { bg = bg })
+    end
+  end
+end
+
+-- Groups an explicit `theme_override` has claimed.
+M._overridden = {}
+
 local _ensured = false
 
 ---Register every default group. Idempotent — safe to call from
@@ -87,6 +140,19 @@ function M.ensure()
   for name, spec in pairs(DEFAULTS) do
     pcall(vim.api.nvim_set_hl, 0, name, vim.deepcopy(spec))
   end
+  M.derive_bg_groups()
+
+  -- `ensure()` is once-only, so a background copied out of the theme would go
+  -- stale the moment the user runs `:colorscheme`. Re-derive on the event.
+  --
+  -- Only the DERIVED groups are recomputed. An explicit `theme_override` is a
+  -- deliberate user/consumer choice and must survive a theme switch — that API
+  -- exists precisely to beat colorscheme defaults, so clobbering it here would
+  -- undo the one thing it promises.
+  pcall(vim.api.nvim_create_autocmd, "ColorScheme", {
+    group = vim.api.nvim_create_augroup("AutoCoreDerivedHighlights", { clear = true }),
+    callback = function() M.derive_bg_groups() end,
+  })
   _ensured = true
 end
 
@@ -104,6 +170,8 @@ function M.theme_override(name, attrs)
   -- Drop `default` — explicit overrides should always take effect.
   local spec = vim.deepcopy(attrs)
   spec.default = nil
+  -- Remembered so the ColorScheme re-derivation leaves it alone.
+  M._overridden[name] = true
   pcall(vim.api.nvim_set_hl, 0, name, spec)
 end
 
@@ -120,6 +188,7 @@ end
 ---Test-only — clears the ensure-once memo so tests can re-exercise
 ---the registration path.
 function M._reset_for_tests()
+  M._overridden = {}
   _ensured = false
 end
 
