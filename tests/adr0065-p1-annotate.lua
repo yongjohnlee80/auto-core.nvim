@@ -153,12 +153,88 @@ ok("*** and the authoring keys are NOT on the Files pane ***",
   vim.inspect(vim.tbl_keys(keys_on("left"))))
 ok("a consumer keymap reaches the content panes",
   k["s"] == true and kp["s"] == true, vim.inspect(vim.tbl_keys(k)))
--- Consumer keymaps are deliberately bound on Files too: `s` submits a review
--- and the file list is a legitimate place to press it, unlike an anchor key.
-ok("and a consumer keymap IS available from Files (submit is not row-anchored)",
-  keys_on("left")["s"] == true, vim.inspect(vim.tbl_keys(keys_on("left"))))
+-- ADR-0065 §2.4 binds c/x/s on middle and preview ONLY. An earlier version
+-- also put consumer keymaps on Files, arguing a submit key is not
+-- row-anchored — a reasonable UX case, but one a code comment cannot make
+-- against an accepted ADR. Restricted, and asserted so it stays that way.
+ok("*** consumer keymaps are NOT on the Files pane either (§2.4) ***",
+  keys_on("left")["s"] == nil, vim.inspect(vim.tbl_keys(keys_on("left"))))
+
+io.stdout:write("\n[4b] a normal-mode anchor ignores STALE visual marks\n")
+do
+  -- The regression: `'<`/`'>` are ambient and outlive visual mode, so a plain
+  -- `c` with the cursor merely inside an old selection emitted a multi-line
+  -- range the user never asked for (observed: start_line=10, line=12).
+  local win = dv._state_for_tests().float:winid("preview")
+  vim.api.nvim_set_current_win(win)
+  vim.fn.setpos("'<", { 0, 1, 1, 0 })
+  vim.fn.setpos("'>", { 0, 3, 1, 0 })
+  vim.api.nvim_win_set_cursor(win, { 2, 0 })
+
+  local a = dv._anchor_for_tests(false)
+  ok("*** normal mode yields a SINGLE line despite stale '< '> ***",
+    a ~= nil and a.start_line == nil, vim.inspect(a))
+  ok("and it is the CURSOR's line, not the stale selection's start",
+    a ~= nil and a.line == (function()
+      local col = gitdiff.sides(files[1]).after
+      return col[2] and col[2].lineno
+    end)(), vim.inspect(a))
+  ok("the stale marks really were set (positive control)",
+    vim.fn.getpos("'<")[2] == 1 and vim.fn.getpos("'>")[2] == 3)
+
+  -- And a REAL visual selection still produces the range it names.
+  vim.api.nvim_win_set_cursor(win, { 1, 0 })
+  vim.cmd("normal! Vj")
+  local v = dv._anchor_for_tests(true)
+  vim.cmd("normal! \27")
+  ok("*** a LIVE visual selection still yields a range ***",
+    v ~= nil and v.start_line ~= nil and v.line ~= v.start_line, vim.inspect(v))
+  ok("with both sides set for GitHub", v ~= nil and v.side == "RIGHT"
+    and v.start_side == "RIGHT", vim.inspect(v))
+end
+
+io.stdout:write("\n[4c] row maps are released on EVERY close path\n")
+do
+  local paths = {
+    ["q"] = function(st, b)
+      for _, m in ipairs(vim.api.nvim_buf_get_keymap(b, "n")) do
+        if m.lhs == "q" and m.callback then m.callback() end
+      end
+    end,
+    ["<Esc>"] = function(st, b)
+      for _, m in ipairs(vim.api.nvim_buf_get_keymap(b, "n")) do
+        if m.lhs == "<Esc>" and m.callback then m.callback() end
+      end
+    end,
+    ["pane-lost"] = function(st, b)
+      pcall(vim.api.nvim_win_close, st.float:winid("preview"), true)
+      vim.wait(50, function() return not dv.is_open() end)
+    end,
+    ["dispose"] = function(st) st.float:dispose() end,
+    ["M.close"] = function() dv.close() end,
+  }
+  for name, how in pairs(paths) do
+    dv.close()
+    dv.open({ files = files })
+    local st2 = dv._state_for_tests()
+    local b1, b2 = st2.float:bufnr("middle"), st2.float:bufnr("preview")
+    local populated = dv._rowmap[b1] ~= nil and dv._rowmap[b2] ~= nil
+    how(st2, b2)
+    vim.wait(50, function() return not dv.is_open() end)
+    ok(("*** %s releases both row maps ***"):format(name),
+      populated and dv._rowmap[b1] == nil and dv._rowmap[b2] == nil,
+      ("populated=%s left=%s/%s"):format(tostring(populated),
+        tostring(dv._rowmap[b1] ~= nil), tostring(dv._rowmap[b2] ~= nil)))
+  end
+end
 
 io.stdout:write("\n[5] pending annotations paint, and the footer counts them\n")
+dv.close()
+dv.open({ files = files, annotate = {
+    on_add = function(a) added[#added + 1] = a end,
+    on_remove = function() end,
+    pending = function() return added end,
+  } })
 added[#added + 1] = { path = "foo.lua", line = 11, side = "RIGHT", severity = "nit", body = "pending one" }
 dv._render_footer()
 local st = dv._state_for_tests()

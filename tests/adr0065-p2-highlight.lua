@@ -20,6 +20,21 @@ local function ok(n, c, d)
   io.stdout:flush()
 end
 
+-- Wrap the real treesitter entry points BEFORE anything opens a view, so the
+-- assertions below observe actual calls rather than self-reported ones.
+local seen = { start = 0, stop = 0, last_ft = nil }
+do
+  local real_start, real_stop = vim.treesitter.start, vim.treesitter.stop
+  vim.treesitter.start = function(b, ft)
+    seen.start = seen.start + 1; seen.last_ft = ft
+    return real_start(b, ft)
+  end
+  vim.treesitter.stop = function(b)
+    seen.stop = seen.stop + 1
+    return real_stop(b)
+  end
+end
+
 local hl = require("auto-core.ui.highlights")
 local gitdiff = require("auto-core.git.diff")
 local dv = require("auto-core.ui.diffview")
@@ -169,8 +184,43 @@ ok("*** switching file re-resolves the filetype PER SIDE in the SAME buffers ***
     vim.bo[mid_b].filetype, vim.bo[prev_b].filetype, mid_b, prev_b))
 ok("the buffers really were reused, not replaced (positive control)",
   st.float:bufnr("middle") == mid_b and st.float:bufnr("preview") == prev_b)
-ok("a parser is attached after the switch when one exists",
-  (ts_active(prev_b) or vim.bo[prev_b].filetype == "go"), tostring(had_parser))
+-- The parser claim, asserted against something a stub can move.
+--
+-- "is a parser attached OR is the filetype go" was vacuous: the filetype is
+-- already asserted above, and a machine with no go grammar satisfies the
+-- clause without either call ever happening. Stubbing start/stop to no-ops
+-- left the suite green. The REQUEST counters are the observable.
+-- Observed through the REAL API, not through the module's own report. A
+-- counter the module increments proves what it INTENDED; wrapping
+-- vim.treesitter.start/stop proves what it actually called. If diffview ever
+-- stopped calling them but kept bookkeeping, only this catches it.
+ok("*** the switch actually invoked treesitter stop AND start ***",
+  seen.stop >= 2 and seen.start >= 2, vim.inspect(seen))
+ok("and the last start asked for the NEW side's language",
+  seen.last_ft == "go", vim.inspect(seen))
+ok("the module's own bookkeeping agrees with the real calls (no drift)",
+  dv._ts_calls and dv._ts_calls.start == seen.start
+  and dv._ts_calls.stop == seen.stop, vim.inspect({ dv._ts_calls, seen }))
+do
+  -- Negative control: a path with no filetype must stop the old parser and NOT
+  -- request a start, so "degrades without error" is a real branch and not an
+  -- unexercised comment.
+  local before = { stop = seen.stop, start = seen.start }
+-- `README` matches `text`, so it is NOT filetype-less — the extension has to
+  -- be one nvim genuinely cannot resolve, or this control asserts nothing.
+  local NOFT = "diff --git a/x.zzzq b/x.zzzq\n--- a/x.zzzq\n+++ b/x.zzzq\n"
+    .. "@@ -1,2 +1,2 @@\n one\n-two\n+three\n"
+  dv.close()
+  dv.open({ files = gitdiff.parse(NOFT) })
+  ok("*** an unknown extension stops the old parser but requests no start ***",
+    seen.stop > before.stop and seen.start == before.start,
+    vim.inspect({ before = before, after = seen }))
+  ok("and the view still renders its text (degrade, not fail)",
+    #vim.api.nvim_buf_get_lines(dv._state_for_tests().float:bufnr("preview"), 0, -1, false) > 0)
+  dv.close()
+  dv.open({ files = both })
+  st = dv._state_for_tests()
+end
 -- The row map is keyed by buffer and the buffers are reused, so a leak here
 -- would be unbounded across a session.
 local live = {}
