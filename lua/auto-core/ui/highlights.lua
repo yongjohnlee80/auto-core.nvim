@@ -106,12 +106,19 @@ local FALLBACK_BG = {
 ---itself a link — so the obvious call would silently yield an empty background
 ---and simply look unstyled. That failure would not have raised anything.
 ---
----A group claimed by `theme_override` is skipped: that API exists precisely to
----beat colorscheme defaults, so re-deriving over it would undo the one thing it
----promises.
+---A group claimed by `theme_override` is REAPPLIED, not skipped.
+---
+---Skipping was wrong and silently destructive: `:colorscheme` CLEARS every
+---highlight group before the new scheme defines its own, so a derivation that
+---declines to touch an overridden group leaves it **empty** — the override is
+---not preserved, it is erased. Reapplying the stored spec is what actually
+---keeps the promise that `theme_override` beats colorscheme defaults.
 function M.derive_bg_groups()
   for name, source in pairs(DERIVED_BG) do
-    if not M._overridden[name] then
+    local spec = M._overridden[name]
+    if spec then
+      pcall(vim.api.nvim_set_hl, 0, name, vim.deepcopy(spec))
+    else
       local bg
       local ok, hl = pcall(vim.api.nvim_get_hl, 0, { name = source, link = false })
       if ok and type(hl) == "table" then bg = hl.bg end
@@ -126,7 +133,10 @@ function M.derive_bg_groups()
   end
 end
 
--- Groups an explicit `theme_override` has claimed.
+-- Groups an explicit `theme_override` has claimed, and the SPEC it claimed them
+-- with. The spec is kept, not just a flag: `:colorscheme` clears every group, so
+-- surviving a theme switch means reapplying the attributes, not declining to
+-- overwrite them.
 M._overridden = {}
 
 local _ensured = false
@@ -162,6 +172,7 @@ end
 ---wins over colorscheme defaults.
 ---@param name  string
 ---@param attrs vim.api.keyset.highlight
+---@see M.derive_bg_groups for why an override is reapplied rather than skipped
 function M.theme_override(name, attrs)
   assert(type(name) == "string" and #name > 0,
     "auto-core.ui.highlights.theme_override: name required")
@@ -170,8 +181,9 @@ function M.theme_override(name, attrs)
   -- Drop `default` — explicit overrides should always take effect.
   local spec = vim.deepcopy(attrs)
   spec.default = nil
-  -- Remembered so the ColorScheme re-derivation leaves it alone.
-  M._overridden[name] = true
+  -- Remembered WITH its attributes, so the ColorScheme re-derivation can put
+  -- it back after the scheme clears it.
+  M._overridden[name] = vim.deepcopy(spec)
   pcall(vim.api.nvim_set_hl, 0, name, spec)
 end
 

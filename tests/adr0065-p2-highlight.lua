@@ -55,11 +55,17 @@ ok("*** a theme switch re-derives the background ***", before ~= after,
   ("%s -> %s"):format(tostring(before), tostring(after)))
 hl.theme_override("AutoCoreDiffDeleteBg", { bg = "#abcdef" })
 local pinned = vim.api.nvim_get_hl(0, { name = "AutoCoreDiffDeleteBg", link = false }).bg
-vim.api.nvim_set_hl(0, "DiffDelete", { fg = "#ff0000", bg = "#010101" })
-hl.derive_bg_groups()
-ok("*** but an explicit theme_override SURVIVES it ***",
-  vim.api.nvim_get_hl(0, { name = "AutoCoreDiffDeleteBg", link = false }).bg == pinned,
-  tostring(pinned))
+-- A REAL `:colorscheme`, not a direct derive_bg_groups() call. The distinction
+-- is the whole finding: `:colorscheme` CLEARS every highlight group first, so a
+-- derivation that merely declines to overwrite an override leaves it EMPTY.
+-- Calling the deriver directly never exercises that clear, and the earlier
+-- version of this test passed against code that erased the override.
+vim.cmd("colorscheme default")
+local after_scheme = vim.api.nvim_get_hl(0, { name = "AutoCoreDiffDeleteBg", link = false })
+ok("*** an explicit theme_override survives a REAL :colorscheme ***",
+  after_scheme.bg == pinned, vim.inspect(after_scheme) .. " vs " .. tostring(pinned))
+ok("and the derived (non-overridden) group is still populated after it",
+  vim.api.nvim_get_hl(0, { name = "AutoCoreDiffAddBg", link = false }).bg ~= nil)
 
 io.stdout:write("\n[4] the buffer holds pure file text; numbers come from statuscolumn\n")
 local PATCH = table.concat({
@@ -114,11 +120,11 @@ ok("the fixture really produced a pad AND a gap (positive control)",
   padrow ~= nil and gaprow ~= nil, ("pad=%s gap=%s"):format(tostring(padrow), tostring(gaprow)))
 vim.g.statusline_winid = gw
 vim.v.lnum = padrow
-ok("*** a PAD row renders BLANK, never a synthetic number ***",
-  dv.statuscolumn():find("%d") == nil, "[" .. dv.statuscolumn() .. "]")
+ok("*** a PAD row renders EXACTLY empty (criterion 16) ***",
+  dv.statuscolumn() == "", "[" .. dv.statuscolumn() .. "]")
 vim.v.lnum = gaprow
-ok("*** a GAP row renders BLANK too ***",
-  dv.statuscolumn():find("%d") == nil, "[" .. dv.statuscolumn() .. "]")
+ok("*** a GAP row renders EXACTLY empty too ***",
+  dv.statuscolumn() == "", "[" .. dv.statuscolumn() .. "]")
 -- and a real row in the SAME buffer still resolves, so "blank" is not "broken"
 local realrow
 for i, e in ipairs(gcol) do if e.lineno and not realrow then realrow = i end end
@@ -137,14 +143,34 @@ local RENAME = table.concat({
   "@@ -1,2 +1,2 @@", " package main", "-func a() {}", "+func b() {}",
 }, "\n")
 local rfiles = gitdiff.parse(RENAME)
+-- Both files in ONE view, switched by moving the cursor in the Files pane —
+-- the reuse path that actually happens. Closing and reopening gives fresh
+-- buffers and proves nothing about restarting a parser on a reused one.
 dv.close()
-dv.open({ files = rfiles })
+local both = { gfiles[1], rfiles[1] }
+dv.open({ files = both })
 st = dv._state_for_tests()
-ok("*** a rename that changes extension resolves the sides SEPARATELY ***",
-  vim.bo[st.float:bufnr("middle")].filetype == "lua"
-  and vim.bo[st.float:bufnr("preview")].filetype == "go",
-  ("a/=%s b/=%s"):format(vim.bo[st.float:bufnr("middle")].filetype,
-                        vim.bo[st.float:bufnr("preview")].filetype))
+local mid_b, prev_b = st.float:bufnr("middle"), st.float:bufnr("preview")
+local function ts_active(b)
+  local okp, p2 = pcall(vim.treesitter.get_parser, b)
+  return okp and p2 ~= nil
+end
+ok("file 1 (.lua) resolves both sides to lua",
+  vim.bo[mid_b].filetype == "lua" and vim.bo[prev_b].filetype == "lua",
+  ("a/=%s b/=%s"):format(vim.bo[mid_b].filetype, vim.bo[prev_b].filetype))
+local had_parser = ts_active(prev_b)
+-- switch to file 2 IN THE SAME buffers
+local left_win = st.float:winid("left")
+vim.api.nvim_win_set_cursor(left_win, { 2, 0 })
+vim.api.nvim_exec_autocmds("CursorMoved", { buffer = st.float:bufnr("left") })
+ok("*** switching file re-resolves the filetype PER SIDE in the SAME buffers ***",
+  vim.bo[mid_b].filetype == "lua" and vim.bo[prev_b].filetype == "go",
+  ("a/=%s b/=%s (bufs %d/%d unchanged)"):format(
+    vim.bo[mid_b].filetype, vim.bo[prev_b].filetype, mid_b, prev_b))
+ok("the buffers really were reused, not replaced (positive control)",
+  st.float:bufnr("middle") == mid_b and st.float:bufnr("preview") == prev_b)
+ok("a parser is attached after the switch when one exists",
+  (ts_active(prev_b) or vim.bo[prev_b].filetype == "go"), tostring(had_parser))
 -- The row map is keyed by buffer and the buffers are reused, so a leak here
 -- would be unbounded across a session.
 local live = {}
