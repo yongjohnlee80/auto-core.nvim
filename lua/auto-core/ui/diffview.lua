@@ -19,6 +19,14 @@
 ---
 ---A panel cannot do this: auto-core's panel model is one docked window with N
 ---swappable buffers, so three simultaneous columns must be a float.
+---
+---AUTHORING (ADR-0065). `opts.annotate` turns the view from read-only into a
+---place a reader can originate an anchored annotation. The surface is
+---deliberately GENERIC: it speaks of annotations, severities, rows and sides,
+---and knows nothing about reviews, repos, commits or files on disk. The
+---consumer owns the draft and the persistence — which is also what makes the
+---float safe to close, since work the float never held is work it cannot
+---destroy.
 ---@module 'auto-core.ui.diffview'
 
 local multi = require("auto-core.ui.float.multi")
@@ -38,6 +46,13 @@ local M = {}
 M.MIN_COLUMNS = 100
 
 local NAME = "auto-core-diffview"
+
+---SEVERITIES is the normative order for the composer's picker.
+---
+---NOT derived from `marks.SEVERITY_HL`, which is a hash: `pairs()` would give
+---the user a different order on different runs. The values match the review
+---ladder the painter already colours; the ORDER is this list.
+M.SEVERITIES = { "must-fix", "should-fix", "nit", "question" }
 
 local _state = nil
 
@@ -183,6 +198,22 @@ local function _show(idx)
     or (f.old_path and (_state.annotations or {})[f.old_path])
     or {}
 
+  -- Pending (unsaved) annotations are the CONSUMER's, fetched fresh on every
+  -- render rather than mirrored here: the draft has exactly one owner, and a
+  -- copy in the view would be a second one that could disagree.
+  --
+  -- They paint through the same path stored ones do, so what you see before
+  -- submitting is what the file will render after. `author = "pending"` is what
+  -- distinguishes them — `marks.annotate` already prints the author in the
+  -- block header, so this needs no change there.
+  local pending = M._pending_for(f)
+  if #pending > 0 then
+    local merged = {}
+    for _, a in ipairs(anns) do merged[#merged + 1] = a end
+    for _, a in ipairs(pending) do merged[#merged + 1] = a end
+    anns = merged
+  end
+
   for _, spec in ipairs({
     { buf = before_buf, col = sides.before, side = "a" },
     { buf = after_buf, col = sides.after, side = "b" },
@@ -212,8 +243,147 @@ local function _show(idx)
   end
 end
 
+---_pending_for returns the consumer's unsaved annotations for one file,
+---tagged so the painter can tell them from stored ones.
+---@param f table  a parsed diff file
+---@return table[]
+function M._pending_for(f)
+  local a = _state and _state.annotate
+  if not (a and type(a.pending) == "function") then return {} end
+  local ok, list = pcall(a.pending)
+  if not (ok and type(list) == "table") then return {} end
+  local out = {}
+  for _, e in ipairs(list) do
+    if type(e) == "table" and (e.path == f.path or e.path == f.new_path or e.path == f.old_path) then
+      local copy = vim.deepcopy(e)
+      copy.author = "pending"
+      out[#out + 1] = copy
+    end
+  end
+  return out
+end
+
+---_side_for maps the focused pane onto a diff column and a GitHub side.
+---
+---`middle` is the `a/` column and `preview` the `b/` one — the same two names
+---the pane titles use, so there is no second vocabulary to keep in step.
+---@return table? column, string? side, string? reason
+local function _side_for(pane)
+  if not _state then return nil, nil, "no view" end
+  local f = _state.files[_state.idx]
+  if not f then return nil, nil, "no file" end
+  local sides = gitdiff.sides(f)
+  if pane == "middle" then return sides.before, "LEFT", nil end
+  if pane == "preview" then return sides.after, "RIGHT", nil end
+  return nil, nil, "put the cursor in a content pane to annotate a line"
+end
+
+---_focused_pane names the pane the cursor is in.
+---@return string?
+local function _focused_pane()
+  if not _state then return nil end
+  local win = vim.api.nvim_get_current_win()
+  for _, name in ipairs({ "middle", "preview", "left" }) do
+    if _state.float:winid(name) == win then return name end
+  end
+  return nil
+end
+
+---_anchor_here resolves the cursor (or a visual selection) to an anchor.
+---
+---`path` is ALWAYS `f.path`, on both sides. `f.path` is the new path when the
+---file has one, it is what the renderer looks up first, and it is what GitHub
+---expects even for a LEFT-side comment — so anchoring a rename's LEFT comment
+---to `old_path` would render only through a fallback and upload to the wrong
+---file.
+---@return table? anchor, string? reason
+local function _anchor_here()
+  local pane = _focused_pane()
+  local column, side, reason = _side_for(pane)
+  if not column then return nil, reason end
+  local f = _state.files[_state.idx]
+  local win = _state.float:winid(pane)
+  if not (win and vim.api.nvim_win_is_valid(win)) then return nil, "pane is gone" end
+
+  -- A visual selection is read from the '< and '> marks, so this works from
+  -- normal mode straight after one, which is when the mapping actually fires.
+  local mode = vim.fn.mode()
+  local vstart = vim.fn.getpos("'<")[2]
+  local vend = vim.fn.getpos("'>")[2]
+  local cursor = vim.api.nvim_win_get_cursor(win)[1]
+  local is_visual = (mode:sub(1, 1) == "v" or mode:sub(1, 1) == "V")
+    or (vstart > 0 and vend > 0 and vstart ~= vend
+        and cursor >= math.min(vstart, vend) and cursor <= math.max(vstart, vend))
+
+  if is_visual and vstart > 0 and vend > 0 and vstart ~= vend then
+    local span, rerr = gitdiff.range(column, vstart - 1, vend - 1)
+    if not span then return nil, rerr end
+    return {
+      path = f.path, side = side, start_side = side,
+      start_line = span.start_line, line = span.line,
+    }
+  end
+
+  local lineno, aerr = gitdiff.anchor(column, cursor - 1)
+  if not lineno then return nil, aerr end
+  return { path = f.path, side = side, line = lineno }
+end
+
+---_compose asks for a severity and a body, then hands the annotation over.
+---
+---The body is a scratch FLOAT, not `vim.ui.input`: a review body is prose and
+---frequently multi-line, which `vim.ui.input` cannot carry at all.
+local function _compose(anchor, on_done)
+  local a = _state and _state.annotate
+  local severities = (a and a.severities) or M.SEVERITIES
+  vim.ui.select(severities, { prompt = "severity:" }, function(sev)
+    if not sev then return end
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.bo[buf].bufhidden = "wipe"
+    vim.bo[buf].filetype = "markdown"
+    local width = math.min(76, math.max(40, math.floor(vim.o.columns * 0.5)))
+    local height = 8
+    local win = vim.api.nvim_open_win(buf, true, {
+      relative = "editor", width = width, height = height,
+      row = math.max(0, math.floor((vim.o.lines - height) / 2)),
+      col = math.max(0, math.floor((vim.o.columns - width) / 2)),
+      style = "minimal", border = "rounded",
+      title = (" %s · %s:%d "):format(sev, anchor.path, anchor.line),
+      title_pos = "center",
+    })
+    vim.wo[win].wrap = true
+    local function finish(accept)
+      local lines = vim.api.nvim_buf_is_valid(buf)
+        and vim.api.nvim_buf_get_lines(buf, 0, -1, false) or {}
+      if vim.api.nvim_win_is_valid(win) then pcall(vim.api.nvim_win_close, win, true) end
+      if not accept then return end
+      local body = vim.trim(table.concat(lines, "\n"))
+      -- An empty body ABANDONS rather than storing a comment the schema would
+      -- later reject. Refusing at the point of entry is the only place the
+      -- reviewer still has the context to fix it.
+      if body == "" then
+        vim.notify("diffview: empty body — annotation abandoned", vim.log.levels.WARN)
+        return
+      end
+      local ann = vim.tbl_extend("force", anchor, { severity = sev, body = body })
+      on_done(ann)
+    end
+    vim.keymap.set({ "n", "i" }, "<C-s>", function() finish(true) end, { buffer = buf, nowait = true })
+    vim.keymap.set("n", "q", function() finish(false) end, { buffer = buf, nowait = true })
+    vim.keymap.set("n", "<Esc>", function() finish(false) end, { buffer = buf, nowait = true })
+    vim.cmd("startinsert")
+  end)
+end
+
 ---open renders `files` with optional `annotations`.
----@param opts { files: table[], annotations: table<string, table[]>?, title: string?, on_close: function? }
+---@param opts { files: table[], annotations: table<string, table[]>?, title: string?, on_close: function?, annotate: table?, keymaps: table[]? }
+---
+---`opts.annotate` has THREE states, and which keys exist is how they differ:
+---  * absent            — no authoring surface at all; nothing is bound, and
+---                        every existing consumer behaves exactly as before
+---  * `disabled_reason` — `c` alone is bound and EXPLAINS; `x` stays unbound so
+---                        nothing implies a draft exists
+---  * enabled           — `c` and `x`, plus whatever `opts.keymaps` adds
 ---@return table? handle, string? err
 function M.open(opts)
   opts = opts or {}
@@ -243,13 +413,17 @@ function M.open(opts)
       footer = { height = 1 },
     },
     initial_focus = "left",
+    -- The consumer owns the draft, so it is the only thing that can say whether
+    -- closing loses anything. Only a "key" close is vetoable (ADR-0065 §2.3).
+    before_close = opts.annotate and opts.annotate.before_close or nil,
     on_close = function()
       _state = nil
       if opts.on_close then pcall(opts.on_close) end
     end,
   })
 
-  _state = { float = float, files = files, annotations = opts.annotations, idx = 1 }
+  _state = { float = float, files = files, annotations = opts.annotations, idx = 1,
+             annotate = opts.annotate }
   float:open()
 
   local left = float:bufnr("left")
@@ -259,14 +433,7 @@ function M.open(opts)
     vim.bo[left].modifiable = false
   end
 
-  local foot = float:bufnr("footer")
-  if foot and vim.api.nvim_buf_is_valid(foot) then
-    vim.bo[foot].modifiable = true
-    vim.api.nvim_buf_set_lines(foot, 0, -1, false, {
-      "  j/k file   <Tab> pane   a/ = old, b/ = new   q close",
-    })
-    vim.bo[foot].modifiable = false
-  end
+  M._render_footer()
 
   -- Follow the cursor in the file list, the same wiring autodb's history modal
   -- uses. One autocmd on the left buffer, disposed with the float.
@@ -297,8 +464,105 @@ function M.open(opts)
     end
   end
 
+  -- Authoring keys. Bound on the CONTENT panes only: the file list has no
+  -- lines to anchor to.
+  local ann = opts.annotate
+  if ann then
+    local disabled = ann.disabled_reason
+    for _, pane in ipairs({ "middle", "preview" }) do
+      local b = float:bufnr(pane)
+      if b and vim.api.nvim_buf_is_valid(b) then
+        pcall(vim.keymap.set, { "n", "x" }, "c", function()
+          if disabled then
+            vim.notify("diffview: " .. tostring(disabled), vim.log.levels.WARN)
+            return
+          end
+          local anchor, reason = _anchor_here()
+          if not anchor then
+            vim.notify("diffview: " .. tostring(reason), vim.log.levels.WARN)
+            return
+          end
+          _compose(anchor, function(a)
+            local okc = pcall(ann.on_add, a)
+            if not okc then
+              vim.notify("diffview: the consumer refused the annotation", vim.log.levels.ERROR)
+              return
+            end
+            _show(_state.idx)
+            M._render_footer()
+          end)
+        end, { buffer = b, silent = true, nowait = true, desc = "auto-core.diffview: annotate" })
+
+        -- `x` is NOT bound while disabled: a key that removes from a draft
+        -- implies a draft exists.
+        if not disabled and type(ann.on_remove) == "function" then
+          pcall(vim.keymap.set, "n", "x", function()
+            local anchor, reason = _anchor_here()
+            if not anchor then
+              vim.notify("diffview: " .. tostring(reason), vim.log.levels.WARN)
+              return
+            end
+            pcall(ann.on_remove, anchor)
+            _show(_state.idx)
+            M._render_footer()
+          end, { buffer = b, silent = true, nowait = true, desc = "auto-core.diffview: drop pending annotation" })
+        end
+      end
+    end
+  end
+
+  -- Consumer keymaps. This is how a submit key reaches the view without
+  -- auto-core learning what submitting means.
+  for _, km in ipairs(opts.keymaps or {}) do
+    if type(km) == "table" and type(km.key) == "string" and type(km.fn) == "function" then
+      for _, pane in ipairs({ "left", "middle", "preview" }) do
+        local b = float:bufnr(pane)
+        if b and vim.api.nvim_buf_is_valid(b) then
+          pcall(vim.keymap.set, "n", km.key, function()
+            km.fn()
+            if M.is_open() then
+              _show(_state.idx)
+              M._render_footer()
+            end
+          end, { buffer = b, silent = true, nowait = true,
+                 desc = "auto-core.diffview: " .. (km.desc or km.key) })
+        end
+      end
+    end
+  end
+
   _show(1)
   return float, nil
+end
+
+---_render_footer redraws the hint line, including the pending count.
+---
+---An unwritten draft that is invisible is one the reader can lose without ever
+---being told, so the count lives on the surface that is always on screen.
+function M._render_footer()
+  if not _state then return end
+  local foot = _state.float:bufnr("footer")
+  if not (foot and vim.api.nvim_buf_is_valid(foot)) then return end
+  local parts = { "  j/k file   <Tab> pane   a/ = old, b/ = new" }
+  local ann = _state.annotate
+  if ann then
+    parts[#parts + 1] = ann.disabled_reason and "c unavailable" or "c annotate"
+    if not ann.disabled_reason and type(ann.on_remove) == "function" then
+      parts[#parts + 1] = "x drop"
+    end
+  end
+  parts[#parts + 1] = "q close"
+  local line = table.concat(parts, "   ")
+  if ann and type(ann.pending) == "function" then
+    local ok, list = pcall(ann.pending)
+    local n = (ok and type(list) == "table") and #list or 0
+    if n > 0 then
+      line = line .. ("     ● %d pending"):format(n)
+    end
+  end
+  vim.bo[foot].modifiable = true
+  vim.api.nvim_buf_set_lines(foot, 0, -1, false, { line })
+  vim.bo[foot].modifiable = false
 end
 
 ---close disposes the view if it is open. Idempotent.

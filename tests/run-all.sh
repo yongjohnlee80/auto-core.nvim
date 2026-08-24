@@ -148,6 +148,7 @@ run_standalone "git write (ADR-0060)" tests/git_write.lua
 # left to a glob because this runner names its suites explicitly: an
 # unregistered file under tests/ is simply never run.
 run_standalone "close-contract (ADR-0065 P0)" tests/adr0065-p0-close-contract.lua
+run_standalone "annotate surface (ADR-0065 P1)" tests/adr0065-p1-annotate.lua
 run_pty
 run_bench
 
