@@ -454,18 +454,59 @@ function Panel:open(force)
   return winid
 end
 
+---Perform the panel's closed-state transition EXACTLY ONCE.
+---
+---Both `Panel:close()` and the `WinClosed` autocmd route through here,
+---which is what makes an external close (`:q`, `:close`, a layout
+---change, another plugin) behave the same as an API close. Before
+---this, `WinClosed` only LOGGED: `self.winid` kept pointing at a dead
+---window and the consumer's `on_close` never fired, so any mirror of
+---the winid went stale with no signal, and consumers never got the
+---chance to release resources tied to the panel.
+---
+---Guarding on `self.winid` is what gives exactly-once. `Panel:close()`
+---calls `nvim_win_close`, which fires `WinClosed` SYNCHRONOUSLY; that
+---handler transitions first, and `close()`'s own call then finds
+---`winid == nil` and does nothing. Delivering `on_close` twice for one
+---close would be its own bug -- consumers tear down real resources in
+---it.
+---@param p table               the panel
+---@param winid integer|nil     the window that went away
+---@return boolean fired
+local function finish_close(p, winid)
+  if p.winid == nil then return false end
+  p.winid = nil
+  events.publish("panel:closed",
+    { name = p.opts.name, winid = winid or -1 })
+  if p.opts.on_close then pcall(p.opts.on_close, winid or -1) end
+  return true
+end
+
 ---Close the panel. Section-cached buffers (managed by ui.section)
 ---are torn down via the section module's `on_close` hooks; this
 ---method just closes the window and clears state.
 function Panel:close()
   local winid = self.winid
   if winid and vim.api.nvim_win_is_valid(winid) then
+    -- Suppress the WinClosed handler for THIS close.
+    --
+    -- `nvim_win_close` fires WinClosed synchronously, so without this
+    -- flag the handler would run the transition from INSIDE the
+    -- close call -- i.e. `on_close` would execute while the window is
+    -- still being torn down, rather than after. That is an ordering
+    -- change, not just a duplicate: consumers delete buffers and
+    -- release resources in `on_close`, and doing that re-entrantly
+    -- inside `nvim_win_close` does not behave the same. Traced it
+    -- causing two auto-finder assertion failures.
+    --
+    -- So the API path keeps its original ordering (window gone, THEN
+    -- transition) and WinClosed is left to do what only it can:
+    -- handle a close this method did not initiate.
+    self._api_closing = true
     pcall(vim.api.nvim_win_close, winid, true)
+    self._api_closing = nil
   end
-  self.winid = nil
-  events.publish("panel:closed",
-    { name = self.opts.name, winid = winid or -1 })
-  if self.opts.on_close then pcall(self.opts.on_close, winid or -1) end
+  finish_close(self, winid)
   log_panel.info("panel closed",
     { fields = { panel = self.opts.name, winid = winid or -1 } })
 end
@@ -848,7 +889,14 @@ function M.new(opts)
     callback = function(args)
       local closed = tonumber(args.match)
       if not closed then return end
-      if closed == p.winid then
+      if closed == p.winid and not p._api_closing then
+        -- An EXTERNAL close: `:q`, `:close`, a layout change, another
+        -- plugin. Perform the same state transition an API close does,
+        -- rather than only noting that it happened. `Panel:close()`
+        -- sets `_api_closing` for the duration of its own
+        -- `nvim_win_close`, so its ordering is preserved and this never
+        -- pre-empts it.
+        finish_close(p, closed)
         log_panel.info("panel window closed externally",
           { fields = {
               panel       = opts.name,
