@@ -373,6 +373,17 @@ function Panel:open(force)
   local existing = self:_find_existing_in_tab()
   if existing then
     self.winid = existing
+    -- Fire `on_open` on the adopt path too. Returning here without it
+    -- refreshed `self.winid` but left the CONSUMER's mirror untouched,
+    -- so a consumer that had already seen an `on_close` kept a nil
+    -- winid while the panel held a perfectly valid one. auto-finder
+    -- reaches exactly that state, and its `state.panel_winid` readers
+    -- then silently no-op.
+    --
+    -- `on_open` may therefore fire more than once for the same window:
+    -- it says "this is the panel window", it is not edge-triggered, and
+    -- consumers must treat it as idempotent.
+    if self.opts.on_open then pcall(self.opts.on_open, existing) end
     return existing
   end
 

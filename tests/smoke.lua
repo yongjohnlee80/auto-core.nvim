@@ -12149,6 +12149,66 @@ print("\n[diffview] auto-core.ui.diffview — three columns, git a/ b/ (ADR-0060
   vim.o.columns = saved_cols
 end)()
 
+
+-- ───── [84] ui.panel — adopt-on-open refreshes the consumer mirror ─────
+-- Consumers mirror the panel's winid via the on_open/on_close pair
+-- (auto-finder keeps `state.panel_winid` that way, and several of its
+-- readers trust it). `Panel:open()`'s singleton guard did
+-- `self.winid = existing; return existing`, returning BEFORE the
+-- on_open call: the panel refreshed, the consumer did not. A consumer
+-- that had already seen an on_close then held nil while the panel held
+-- a valid window, and its readers silently no-opped.
+--
+-- KNOWN REMAINING GAP, deliberately not fixed here: an EXTERNAL close
+-- (`:q`, a layout change, another plugin) still leaves `panel.winid`
+-- stale and never fires `on_close`, because the WinClosed autocmd only
+-- logs. Making WinClosed perform the transition is correct but is a
+-- cross-repo behaviour change -- auto-finder's on_close tears down
+-- cached section buffers, so external closes would start doing that
+-- too (which is the point, and also breaks assertions written against
+-- the silent behaviour). Tracked on the panel-mirror task; see the PR
+-- for the measured consumer impact.
+print("\n[84] ui.panel — adopt-on-open refreshes the consumer mirror")
+;(function()
+  local mirror, opens = nil, 0
+  local p = Panel.new({
+    name  = "mirror-probe",
+    side  = "left",
+    width = { default = 30, min = 10, max = 80 },
+    on_open  = function(w) opens = opens + 1; mirror = w end,
+    on_close = function() mirror = nil end,
+  })
+
+  p:open(true)
+  ok("p84: on_open fires on a real open",
+    opens == 1 and mirror == p.winid,
+    ("opens=%d mirror=%s panel=%s"):format(opens, tostring(mirror), tostring(p.winid)))
+
+  -- Control: the probe can observe a desync at all. Force one by hand,
+  -- so the assertion below is not passing on an inert instrument.
+  mirror = nil
+  ok("p84: control — a hand-forced desync IS observable",
+    mirror ~= p.winid, tostring(mirror) .. " vs " .. tostring(p.winid))
+
+  -- The fix: the window still exists, so open() takes the adopt path.
+  local adopted = p:open(true)
+  ok("p84: adopt-on-open refreshes the consumer mirror",
+    mirror == p.winid and mirror == adopted,
+    ("mirror=%s panel=%s returned=%s")
+      :format(tostring(mirror), tostring(p.winid), tostring(adopted)))
+  ok("p84: the adopt path still returns the existing window",
+    adopted == p.winid and vim.api.nvim_win_is_valid(adopted),
+    tostring(adopted))
+
+  p:close()
+  ok("p84: an API close still clears both sides",
+    p.winid == nil and mirror == nil,
+    ("panel=%s mirror=%s"):format(tostring(p.winid), tostring(mirror)))
+
+  Panel._reset_for_tests()
+  events._reset_for_tests()
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 -- Convention §3: emit the `<P> passed, <F> failed` summary and exit
 -- EXPLICITLY — os.exit(1) on any failure, os.exit(0) otherwise. Do not
