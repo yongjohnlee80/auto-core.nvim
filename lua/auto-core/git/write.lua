@@ -56,6 +56,46 @@ local DEFAULT_TIMEOUT_MS = 30000
 local PUSH_TIMEOUT_MS = 120000
 
 ---Normalize a path argument into a list.
+---is_option_shaped reports whether a value would be parsed by git as a FLAG
+---rather than as data.
+---
+---This is the guard that was missing. `reset_soft(cwd, "--hard")` interpolated
+---straight into the argv, git read it as a second mode, the later mode won, and
+---the call returned ok=true having destroyed both the index and the working
+---tree. The module claimed "--hard is not reachable" and a source-grep test
+---asserted the string's absence from the file — which says nothing at all about
+---what a caller may pass in. Every data argument that reaches an argv position
+---goes through here now.
+---@param v any
+---@return boolean
+local function is_option_shaped(v)
+  return type(v) == "string" and v:sub(1, 1) == "-"
+end
+
+---resolve_commit turns a ref into a verified OID, or nil plus a reason.
+---
+---Resolving rather than passing the caller's string through is the belt to that
+---brace: an OID cannot be re-read as a flag, a path, or anything else, so even
+---a ref this guard failed to anticipate arrives at git as 40 hex characters.
+---@param cwd string
+---@param ref string
+---@return string|nil oid, string|nil err
+local function resolve_commit(cwd, ref)
+  if is_option_shaped(ref) then
+    return nil, ("refusing option-shaped ref %q — pass a ref, not a flag"):format(ref)
+  end
+  local r = vim.system(
+    { "git", "--no-optional-locks", "-C", cwd, "rev-parse", "--verify", "--quiet",
+      ref .. "^{commit}" },
+    { text = true }
+  ):wait()
+  local oid = vim.trim(r.stdout or "")
+  if r.code ~= 0 or not oid:match("^%x+$") then
+    return nil, ("cannot resolve ref %q"):format(tostring(ref))
+  end
+  return oid, nil
+end
+
 ---@param paths string|string[]|nil
 ---@return string[]
 local function as_paths(paths)
@@ -66,6 +106,19 @@ local function as_paths(paths)
     if type(p) == "string" and p ~= "" then out[#out + 1] = p end
   end
   return out
+end
+
+---reject_option_args returns an error string when any value is flag-shaped.
+---@param label string
+---@param values table
+---@return string|nil
+local function reject_option_args(label, values)
+  for k, v in pairs(values) do
+    if is_option_shaped(v) then
+      return ("%s: refusing option-shaped %s %q"):format(label, tostring(k), tostring(v))
+    end
+  end
+  return nil
 end
 
 ---Run one git argv in `cwd`, async, callback on the main loop.
@@ -225,7 +278,14 @@ function M.commit(cwd, msg, opts, on_done)
     end
     return
   end
-  run(cwd, { "git", "commit", "-m", msg }, { timeout_ms = opts.timeout_ms },
+  local cargs = { "git", "commit" }
+  -- allow_empty used to skip the has_staged guard and then never pass the flag,
+  -- so the "allowed" empty commit failed anyway in git. Either it works or it
+  -- should not be in the signature.
+  if opts.allow_empty then cargs[#cargs + 1] = "--allow-empty" end
+  cargs[#cargs + 1] = "-m"
+  cargs[#cargs + 1] = msg
+  run(cwd, cargs, { timeout_ms = opts.timeout_ms },
     function(ok, err)
       events.publish("core.git.commit:completed",
         { cwd = cwd, ok = ok, stderr = err })
@@ -235,10 +295,10 @@ end
 
 ---reset_soft moves HEAD back, keeping the index and working tree.
 ---
----`--soft` only: the destructive spellings (`--hard`, `--mixed` losing the
----index) are deliberately not reachable through this surface. A panel key that
----can discard work is a different kind of feature and should have to be written
----on purpose, not reached by passing a flag through.
+---`--soft` only, and now enforced rather than asserted: `ref` is resolved to a
+---verified OID first, so it cannot arrive as another mode. The first version
+---interpolated the caller's string and `reset_soft(cwd, "--hard")` was a
+---working hard reset that reported success.
 ---@param cwd string
 ---@param ref string?  default "HEAD~1"
 ---@param on_done fun(ok: boolean, err: string?)?
@@ -249,7 +309,16 @@ function M.reset_soft(cwd, ref, on_done)
     end
     return
   end
-  run(cwd, { "git", "reset", "--soft", ref or "HEAD~1" }, nil, function(ok, err)
+  -- Resolve to an OID before it reaches the argv. Passing the caller's string
+  -- through is how `reset_soft(cwd, "--hard")` became a working hard reset.
+  local oid, rerr = resolve_commit(cwd, ref or "HEAD~1")
+  if not oid then
+    if on_done then
+      vim.schedule(function() on_done(false, "reset_soft: " .. tostring(rerr)) end)
+    end
+    return
+  end
+  run(cwd, { "git", "reset", "--soft", oid }, nil, function(ok, err)
     events.publish("core.git.index:changed",
       { cwd = cwd, action = "reset_soft", paths = {}, ok = ok, stderr = err })
     if on_done then on_done(ok, err) end
@@ -301,6 +370,13 @@ end
 function M.push(cwd, opts, on_done)
   opts = opts or {}
   local label = opts.label or cwd
+  -- Same option-boundary class as reset_soft's ref: `remote`/`branch` land in
+  -- argv positions where git would read a leading dash as a flag.
+  local oerr = reject_option_args("push", { remote = opts.remote, branch = opts.branch })
+  if oerr then
+    if on_done then vim.schedule(function() on_done(false, oerr) end) end
+    return
+  end
   local args = { "git", "push" }
   if opts.set_upstream then args[#args + 1] = "--set-upstream" end
   if opts.remote then args[#args + 1] = opts.remote end

@@ -279,6 +279,89 @@ end)()
     src:find('"checkout"') == nil)
 end)()
 
+-- ── [7b] the option boundary: data must never become a flag ──────────
+--
+-- The blocker this section exists for. `reset_soft(cwd, "--hard")` used to
+-- interpolate straight into the argv, git read it as a second mode, the later
+-- mode won, and the call returned **ok=true having destroyed the index and the
+-- working tree**. Section [7]'s source-grep for `--hard` passed the whole time,
+-- because the absence of a string from a file says nothing about what a caller
+-- can pass in. These assert on STATE, adversarially.
+;(function()
+  local function repo_with_work()
+    local d = new_repo()
+    sync(function(cb) W.stage(d, "a.txt", cb) end)
+    sync(function(cb) W.commit(d, "c1", nil, cb) end)
+    vim.fn.writefile({ "SECOND" }, d .. "/a.txt")
+    sync(function(cb) W.stage(d, "a.txt", cb) end)
+    sync(function(cb) W.commit(d, "c2", nil, cb) end)
+    vim.fn.writefile({ "PRECIOUS UNCOMMITTED WORK" }, d .. "/a.txt")
+    sync(function(cb) W.stage(d, "a.txt", cb) end)
+    return d
+  end
+  local function state(d)
+    return vim.fn.readfile(d .. "/a.txt")[1], W.has_staged(d),
+      vim.trim(vim.system({ "git", "-C", d, "rev-list", "--count", "HEAD" },
+        { text = true }):wait().stdout or "")
+  end
+
+  for _, bad in ipairs({ "--hard", "--mixed", "--merge", "-q" }) do
+    local d = repo_with_work()
+    local c0, s0, n0 = state(d)
+    local r = sync(function(cb) W.reset_soft(d, bad, cb) end)
+    local c1, s1, n1 = state(d)
+    ok("[7b] reset_soft(" .. bad .. ") is REFUSED", r.ok == false, r.err)
+    ok("[7b] " .. bad .. ": working tree UNCHANGED",
+      c0 == c1 and c1 == "PRECIOUS UNCOMMITTED WORK", tostring(c1))
+    ok("[7b] " .. bad .. ": index UNCHANGED", s0 == s1 and s1 == true)
+    ok("[7b] " .. bad .. ": HEAD did not move", n0 == n1, n0 .. " -> " .. n1)
+  end
+
+  -- A legitimate ref still works, and resolves through an OID.
+  local d = repo_with_work()
+  local _, _, before = state(d)
+  local good = sync(function(cb) W.reset_soft(d, "HEAD~1", cb) end)
+  local _, staged_after, after = state(d)
+  ok("[7b] a real ref still works", good.ok, good.err)
+  ok("[7b] and HEAD moved back exactly one",
+    tonumber(after) == tonumber(before) - 1, before .. " -> " .. after)
+  ok("[7b] with the change kept in the index", staged_after == true)
+
+  -- A nonsense ref is refused with a reason, not passed to git raw.
+  local junk = sync(function(cb) W.reset_soft(d, "no-such-ref-xyz", cb) end)
+  ok("[7b] an unresolvable ref is refused",
+    junk.ok == false and tostring(junk.err):find("cannot resolve", 1, true) ~= nil, junk.err)
+
+  -- push carries the same class of boundary.
+  local pd = repo_with_work()
+  local p1 = sync(function(cb) W.push(pd, { remote = "--upload-pack=touch /tmp/x" }, cb) end)
+  ok("[7b] push refuses an option-shaped remote",
+    p1.ok == false and tostring(p1.err):find("option%-shaped") ~= nil, p1.err)
+  local p2 = sync(function(cb) W.push(pd, { branch = "--force" }, cb) end)
+  ok("[7b] push refuses an option-shaped branch",
+    p2.ok == false and tostring(p2.err):find("option%-shaped") ~= nil, p2.err)
+end)()
+
+-- ── [7c] allow_empty actually allows an empty commit ─────────────────
+--
+-- It used to skip the has_staged guard and then never pass `--allow-empty`, so
+-- the "allowed" commit failed in git anyway. An option that does not work is
+-- worse than an absent one: the caller believes it did something.
+;(function()
+  local d = new_repo()
+  sync(function(cb) W.stage(d, "a.txt", cb) end)
+  sync(function(cb) W.commit(d, "c1", nil, cb) end)
+  ok("[7c] nothing staged now", W.has_staged(d) == false)
+  local r = sync(function(cb) W.commit(d, "empty on purpose", { allow_empty = true }, cb) end)
+  ok("[7c] commit with allow_empty succeeds", r.ok, r.err)
+  local n = vim.trim(vim.system({ "git", "-C", d, "rev-list", "--count", "HEAD" },
+    { text = true }):wait().stdout or "")
+  ok("[7c] and a second commit really exists", n == "2", n)
+  local r2 = sync(function(cb) W.commit(d, "no flag", nil, cb) end)
+  ok("[7c] CONTROL — without the option it is still refused",
+    r2.ok == false and tostring(r2.err):find("nothing staged", 1, true) ~= nil, r2.err)
+end)()
+
 -- ── [6] the read/write hardening split is real ───────────────────────
 ;(function()
   -- The claim in the module header: reads carry --no-optional-locks, writes
