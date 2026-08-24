@@ -190,6 +190,33 @@ local M = {
   -- External git-state mutations (commit / checkout / reset / staging /
   -- merge / rebase performed outside this process). Coarse-grained;
   -- subscribers refresh git-derived UI state. Per ADR 0025.
+  -- In-process git WRITES (auto-core.git.write, ADR-0060). Distinct from
+  -- `core.git.state:changed` below, which means a mutation this process did
+  -- NOT make: conflating them would make the external-change signal
+  -- untrustworthy. A `:started`/`:completed` pair for the network-bound push,
+  -- a single past-tense topic for the fast local ones — matching the
+  -- granularity fetch/pull/checkout already use above.
+  ["core.git.index:changed"] = {
+    doc = "The index was written by THIS process (stage / unstage / stage_all). Published by auto-core.git.write.",
+    payload = "{ cwd = string, action = 'stage'|'unstage'|'stage_all'|'reset_soft'|'restore', paths = string[], ok = boolean, stderr = string? }",
+    publishers = { "auto-core" },
+  },
+  ["core.git.commit:completed"] = {
+    doc = "A commit made by THIS process finished. Published by auto-core.git.write.",
+    payload = "{ cwd = string, ok = boolean, stderr = string? }",
+    publishers = { "auto-core" },
+  },
+  ["core.git.push:started"] = {
+    doc = "auto-core.git.write.push began publishing to a remote.",
+    payload = "{ cwd = string, label = string }",
+    publishers = { "auto-core" },
+  },
+  ["core.git.push:completed"] = {
+    doc = "auto-core.git.write.push finished; `ok` false carries git's stderr.",
+    payload = "{ cwd = string, label = string, ok = boolean, stderr = string? }",
+    publishers = { "auto-core" },
+  },
+
   ["core.git.state:changed"] = {
     doc = "Repo's .git/ plumbing mutated externally. Published by auto-core.git.watch on libuv fs_event firings under git_dir/ (HEAD/index/ORIG_HEAD/MERGE_HEAD) or git_dir/logs/HEAD (reflog tip).",
     payload = "{ repo_root = string, git_dir = string, kind = 'head'|'index'|'merge'|'reflog'|'other', path = string }",
