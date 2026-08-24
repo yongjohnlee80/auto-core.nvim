@@ -12678,6 +12678,101 @@ print("\n[84] ui.panel — adopt-on-open refreshes the consumer mirror")
   events._reset_for_tests()
 end)()
 
+-- ── [87] ui.panel — an EXTERNAL close performs the transition, once ──
+--
+-- Direction 1 of the winid-mirror desync. Panel:close() was the only path
+-- that cleared self.winid and invoked on_close, so `:q`, `:close`, a layout
+-- change or another plugin closing the window left BOTH panel.winid and the
+-- consumer's mirror pointing at a dead window with on_close never fired.
+--
+-- The count matters as much as the end state. Panel:close() calls
+-- nvim_win_close, which fires WinClosed SYNCHRONOUSLY — so a WinClosed
+-- handler that transitions unconditionally fires on_close TWICE for one API
+-- close, and a cell asserting only "mirror is nil" would pass on that.
+-- Hence closes is asserted as a number throughout.
+print("\n[87] ui.panel — an external close clears both sides exactly once")
+;(function()
+  local mirror, opens, closes = nil, 0, 0
+  -- Recorded INSIDE on_close: was the window still alive when the consumer
+  -- was told it had gone? That is the property `_api_closing` exists for.
+  -- nvim_win_close fires WinClosed synchronously, so a handler that
+  -- transitions during an API close runs on_close from INSIDE the teardown,
+  -- and a consumer deleting buffers there does it re-entrantly.
+  local valid_at_close = nil
+  local p = Panel.new({
+    name  = "extclose-probe",
+    side  = "left",
+    width = { default = 30, min = 10, max = 80 },
+    on_open  = function(w) opens = opens + 1; mirror = w end,
+    on_close = function(w)
+      closes = closes + 1
+      mirror = nil
+      valid_at_close = type(w) == "number" and w > 0
+        and vim.api.nvim_win_is_valid(w) or false
+    end,
+  })
+
+  local w = p:open(true)
+  ok("p87: open established both sides",
+    opens == 1 and closes == 0 and mirror == w and p.winid == w,
+    ("opens=%d closes=%d mirror=%s panel=%s"):format(opens, closes, tostring(mirror), tostring(p.winid)))
+
+  -- Control: on_close is reachable AT ALL through this probe. Without it a
+  -- transition that never fires and a probe that cannot see one look the
+  -- same, which is exactly how the original desync went unnoticed.
+  p:close()
+  ok("p87: control — an API close is observable here (closes=1)",
+    closes == 1 and mirror == nil and p.winid == nil,
+    ("closes=%d mirror=%s panel=%s"):format(closes, tostring(mirror), tostring(p.winid)))
+
+  -- THE CASE: close the window behind the panel's back.
+  local w2 = p:open(true)
+  closes = 0
+  ok("p87: reopened for the external case", p.winid == w2 and mirror == w2,
+    ("panel=%s mirror=%s"):format(tostring(p.winid), tostring(mirror)))
+  vim.api.nvim_win_close(w2, true)
+  vim.wait(200, function() return closes > 0 end, 5)
+
+  ok("p87: an external close fires on_close EXACTLY once",
+    closes == 1, ("closes=%d"):format(closes))
+  ok("p87: and clears panel.winid and the consumer mirror together",
+    p.winid == nil and mirror == nil,
+    ("panel=%s mirror=%s"):format(tostring(p.winid), tostring(mirror)))
+
+  -- An API close must not double-fire through its own WinClosed. Same
+  -- assertion as the control above, but now with the external path armed:
+  -- this is the one that catches a missing re-entrancy guard.
+  local w3 = p:open(true)
+  closes = 0
+  p:close()
+  ok("p87: an API close still fires on_close exactly once, not twice",
+    closes == 1 and p.winid == nil and mirror == nil,
+    ("closes=%d panel=%s mirror=%s"):format(closes, tostring(p.winid), tostring(mirror)))
+  ok("p87: and the window it closed is gone",
+    not vim.api.nvim_win_is_valid(w3), tostring(w3))
+  -- ORDERING, not just count. Without the suppression the consumer is
+  -- notified from inside nvim_win_close, with its window still alive —
+  -- and a consumer that deletes buffers there is doing it mid-teardown.
+  -- This is the only cell that observes why `_api_closing` exists; the
+  -- count assertions above pass either way, because finish_close's own
+  -- winid guard covers idempotence on its own.
+  ok("p87: on_close runs AFTER the window is gone, not during the close",
+    valid_at_close == false, "window still valid inside on_close: "
+      .. tostring(valid_at_close))
+
+  -- After an external close the panel must be reopenable, with both sides
+  -- agreeing again — a transition that cleared state but left the panel
+  -- unusable would pass every assertion above.
+  local w4 = p:open(true)
+  ok("p87: reopen after an external close agrees on both sides",
+    p.winid == w4 and mirror == w4 and vim.api.nvim_win_is_valid(w4),
+    ("panel=%s mirror=%s"):format(tostring(p.winid), tostring(mirror)))
+  p:close()
+
+  Panel._reset_for_tests()
+  events._reset_for_tests()
+end)()
+
 -- ─────────────────────── summary ─────────────────────────
 -- ─────────────────────── 85. todo — open buffers follow the bucket move ──
 -- A task file physically MOVES between bucket directories on every status
