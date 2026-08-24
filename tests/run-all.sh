@@ -143,6 +143,7 @@ run_standalone() {
 run_smoke
 run_standalone "diff-align (r1 MF4)" tests/adr0060-r1-diff-align.lua
 run_standalone "grid selection + viewer (ADR-0066)" tests/grid_selection.lua
+run_standalone "git write (ADR-0060)" tests/git_write.lua
 run_pty
 run_bench
 

@@ -19,5 +19,8 @@ M.diff     = require("auto-core.git.diff")
 M.fetch    = require("auto-core.git.fetch")
 M.pull     = require("auto-core.git.pull")
 M.watch    = require("auto-core.git.watch")
+-- The single owner for git WRITES (ADR-0060). Reads live in the modules
+-- above and are hardened with --no-optional-locks; writes must not be.
+M.write    = require("auto-core.git.write")
 
 return M
