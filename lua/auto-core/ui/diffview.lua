@@ -124,22 +124,20 @@ local function _apply_filetype(bufnr, path)
     local ok, m = pcall(vim.filetype.match, { filename = path })
     if ok then ft = m end
   end
-  -- Requests are recorded INDEPENDENTLY of whether a parser installs.
+  -- Stop before the filetype changes, start after — the two calls the suite
+  -- observes by wrapping `vim.treesitter` itself.
   --
-  -- A test that asks "is a parser attached?" cannot distinguish "we never asked"
-  -- from "we asked and no grammar exists" — and a grammar is absent on most CI
-  -- machines, so that assertion passes either way. It did: stubbing
-  -- `treesitter.start`/`stop` to no-ops left the whole suite green. The counter
-  -- is the observable that the stub actually moves.
-  M._ts_calls = M._ts_calls or { stop = 0, start = 0, last_ft = nil }
-  M._ts_calls.stop = M._ts_calls.stop + 1
+  -- There is deliberately no counter here. An earlier version kept one so a
+  -- test could assert the calls happened, but a number this module increments
+  -- records what it INTENDED, not what it invoked: with `treesitter.start`
+  -- stubbed to a no-op the counter still advanced and the assertion still
+  -- passed. Wrapping the real function is the only version that fails when the
+  -- call goes missing, which leaves nothing for production code to carry.
   pcall(vim.treesitter.stop, bufnr)
   vim.bo[bufnr].filetype = ft or ""
   if ft and ft ~= "" then
     -- A missing parser is the common case, not an error: degrade to unhighlighted
     -- text rather than surfacing a stack trace over a diff.
-    M._ts_calls.start = M._ts_calls.start + 1
-    M._ts_calls.last_ft = ft
     pcall(vim.treesitter.start, bufnr, ft)
   end
 end
