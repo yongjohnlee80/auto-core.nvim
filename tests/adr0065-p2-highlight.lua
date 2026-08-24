@@ -22,17 +22,35 @@ end
 
 -- Wrap the real treesitter entry points BEFORE anything opens a view, so the
 -- assertions below observe actual calls rather than self-reported ones.
-local seen = { start = 0, stop = 0, last_ft = nil }
+-- An EVENT LIST, not counters. Counters can only be compared as totals, and a
+-- total cannot carry a temporal claim: `stop >= start` stays true when every
+-- start ran first, so an assertion labelled "stop precedes start" would be
+-- green against the opposite order. Recording the sequence lets the order be
+-- asserted by index, which is what the label actually says.
+local seen = { start = 0, stop = 0, last_ft = nil, events = {} }
 do
   local real_start, real_stop = vim.treesitter.start, vim.treesitter.stop
   vim.treesitter.start = function(b, ft)
     seen.start = seen.start + 1; seen.last_ft = ft
+    seen.events[#seen.events + 1] = { op = "start", buf = b, ft = ft }
     return real_start(b, ft)
   end
   vim.treesitter.stop = function(b)
     seen.stop = seen.stop + 1
+    seen.events[#seen.events + 1] = { op = "stop", buf = b }
     return real_stop(b)
   end
+end
+
+---last_pair_for returns the indices of the final stop/start recorded for `buf`.
+local function last_pair_for(buf)
+  local istop, istart
+  for i, e in ipairs(seen.events) do
+    if e.buf == buf then
+      if e.op == "stop" then istop = i else istart = i end
+    end
+  end
+  return istop, istart
 end
 
 local hl = require("auto-core.ui.highlights")
@@ -198,8 +216,18 @@ ok("*** the switch actually invoked treesitter stop AND start ***",
   seen.stop >= 2 and seen.start >= 2, vim.inspect(seen))
 ok("and the last start asked for the NEW side's language",
   seen.last_ft == "go", vim.inspect(seen))
-ok("stop precedes start for the switched side (order, not just count)",
-  seen.stop >= seen.start, vim.inspect(seen))
+do
+  -- Order asserted BY INDEX on the same buffer. A parser must be stopped
+  -- before the filetype changes and started after, or the new language is
+  -- handed to a parser still attached for the old one.
+  local istop, istart = last_pair_for(prev_b)
+  ok("*** stop PRECEDES start on the switched buffer (index order, not totals) ***",
+    istop ~= nil and istart ~= nil and istop < istart,
+    ("stop@%s start@%s of %d events"):format(tostring(istop), tostring(istart), #seen.events))
+  ok("and the start that followed it named the new language",
+    istart ~= nil and seen.events[istart].ft == "go",
+    vim.inspect(istart and seen.events[istart]))
+end
 do
   -- Negative control: a path with no filetype must stop the old parser and NOT
   -- request a start, so "degrades without error" is a real branch and not an
