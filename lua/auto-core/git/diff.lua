@@ -269,6 +269,78 @@ function M.row_for(column, lineno)
   return nil
 end
 
+---anchor resolves a rendered ROW back to the 1-based FILE line it carries.
+---
+---The reverse of `row_for`, and the whole of what a review comment needs from
+---the renderer: `sides()` already put the real line number on every entry, so
+---anchoring is a lookup rather than arithmetic.
+---
+---A `gap` (hunk boundary) and a `pad` (the absent side of an unequal
+---replacement block) carry no line and CANNOT anchor. That mirrors the painter,
+---which refuses to mark a pad as part of a reviewer's span: marking "nothing
+---here" would be a claim about absent code, and originating a comment there is
+---the same claim.
+---@param column table[]   a `before` or `after` list from sides()
+---@param row integer      0-based rendered row
+---@return integer? lineno, string? reason
+function M.anchor(column, row)
+  local e = column and row and column[row + 1]
+  if not e then return nil, "no such row in this diff" end
+  if e.kind == "gap" then return nil, "a hunk boundary is not a line" end
+  if e.kind == "pad" then return nil, "this side has no line here" end
+  if not e.lineno then return nil, "this row carries no file line" end
+  return e.lineno, nil
+end
+
+---range validates a whole SELECTION and returns its file-line span.
+---
+---Scans every selected row, not just the endpoints. Sampling the ends alone
+---turns a selection spanning two hunks into one contiguous range the reviewer
+---never made — and, more quietly, TRIMS a leading or trailing `gap` instead of
+---refusing it, so `{line 10, line 11, gap}` silently became 10-11.
+---
+---The rules, in order (ADR-0065 §2.2):
+---  1. normalise top-to-bottom
+---  2. both ENDPOINTS must be anchorable — a non-line endpoint is refused, not trimmed
+---  3. ANY selected `gap` refuses, interior or terminal
+---  4. a `pad` is permitted only in the interior
+---  5. the surviving line numbers must increment by exactly 1
+---
+---An interior pad is accepted and an interior gap refused because a pad
+---consumes no file line on that side — the numbers either side still differ by
+---1 — while a gap skips lines. A pad crossing is a discontinuity in the
+---RENDERING; `start_line..line` is a claim about the FILE.
+---@param column table[]
+---@param r1 integer   0-based
+---@param r2 integer   0-based
+---@return { start_line: integer, line: integer }? span, string? reason
+function M.range(column, r1, r2)
+  if not (column and r1 and r2) then return nil, "no selection" end
+  if r1 > r2 then r1, r2 = r2, r1 end
+
+  local first, ferr = M.anchor(column, r1)
+  if not first then return nil, "the selection starts on a row that is not a line (" .. tostring(ferr) .. ")" end
+  local last, lerr = M.anchor(column, r2)
+  if not last then return nil, "the selection ends on a row that is not a line (" .. tostring(lerr) .. ")" end
+
+  local prev
+  for r = r1, r2 do
+    local e = column[r + 1]
+    if not e then return nil, "the selection runs past the end of this diff" end
+    if e.kind == "gap" then
+      return nil, "the selection crosses a hunk boundary, so its lines are not contiguous in the file"
+    end
+    if e.lineno then
+      if prev and e.lineno ~= prev + 1 then
+        return nil, ("the selection is not contiguous in the file (line %d is followed by %d)")
+          :format(prev, e.lineno)
+      end
+      prev = e.lineno
+    end
+  end
+  return { start_line = first, line = last }, nil
+end
+
 ---stats counts added/removed lines per file — the `+12 -3` a tree row shows
 ---without opening the diff.
 ---@param file AutoCoreDiffFile
