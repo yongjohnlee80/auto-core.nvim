@@ -94,12 +94,24 @@ local _registry = {}
 ---@field initial_focus string?                        default "middle" if present, else first available
 ---@field on_open fun(self: AutoCoreMultiFloat)?
 ---@field on_close fun()?
+---@field before_close fun(reason: string): string?
+---  Consulted before every teardown. Return "cancel" to abandon the close;
+---  anything else (including nil) proceeds. `reason` is one of:
+---    "key"          `q` or `<Esc>` inside a pane — the only VETOABLE reason
+---    "pane-lost"    a pane emitted WinClosed; the window is already gone
+---    "programmatic" close()/dispose() called directly
+---    "resume"       a deferred close finishing after an async prompt
+---  A veto only makes sense while there is still something to keep open, so
+---  EVERY other reason is a NOTIFICATION: the hook runs, its answer is ignored.
+---  See the note on Float:close for why the prompt must not block.
 ---@field on_click table<string, fun(row, col, button, mods)>?
 
 ---@class AutoCoreMultiFloat
 ---@field opts AutoCoreMultiFloatOpts
 ---@field panes table<string, { winid: integer?, bufnr: integer?, _spawned_buf: boolean? }>
 ---@field _augroup integer?
+---@field _closing boolean?
+---@field _closed boolean?
 local Float = {}
 Float.__index = Float
 
@@ -282,11 +294,17 @@ function Float:_open_pane(name, geom)
 
   _stamp(winid, self.opts.name)
   -- Buffer-local q closes the whole instance unless overridden.
-  pcall(vim.keymap.set, "n", "q", function() self:close() end, {
+  --
+  -- Both keys carry the reason "key", which is the ONLY vetoable one: a
+  -- consumer holding unsaved work answers "cancel" here and finishes the close
+  -- itself later with close("resume"). `<Esc>` was previously wired straight to
+  -- close() while consumers guarded `q` alone, so a draft could be destroyed by
+  -- the key nobody thought to intercept (ADR-0065 §1.6).
+  pcall(vim.keymap.set, "n", "q", function() self:close("key") end, {
     buffer = bufnr, silent = true, nowait = true,
     desc = "auto-core.multi: close",
   })
-  pcall(vim.keymap.set, "n", "<Esc>", function() self:close() end, {
+  pcall(vim.keymap.set, "n", "<Esc>", function() self:close("key") end, {
     buffer = bufnr, silent = true, nowait = true,
     desc = "auto-core.multi: close (Esc)",
   })
@@ -333,7 +351,7 @@ function Float:_install_autocmds()
       local closed = tonumber(ev.match)
       for _, p in pairs(self.panes) do
         if p.winid == closed then
-          vim.schedule(function() self:close() end)
+          vim.schedule(function() self:close("pane-lost") end)
           return
         end
       end
@@ -352,6 +370,12 @@ function Float:open()
     self:focus(self.opts.initial_focus or "middle")
     return
   end
+  -- Clear the once-only close guard. Without this, reopening an instance that
+  -- had already been closed would leave `_closed` set and make the NEXT close a
+  -- silent no-op — the windows would stay on screen forever. Instances are
+  -- normally one-shot (`multi.new` per open), which is exactly why this would
+  -- have gone unnoticed until someone reused one.
+  self._closed, self._closing = false, false
   -- v0.1.28: capture the originating window so `Float:close()`
   -- can restore focus to it. Without this, nvim's default
   -- "which window is current after we just closed three at once"
@@ -399,7 +423,45 @@ end
 
 ---Close every pane window and wipe auto-spawned buffers. Safe to
 ---call multiple times.
-function Float:close()
+---Tear the instance down.
+---
+---`reason` is passed to `opts.before_close`, which may return "cancel" to
+---abandon the teardown. Three things make that safe:
+---
+---  * ONCE-ONLY. `_closed` guards the whole body, so a second close() — from
+---    dispose(), from a queued WinClosed, from a consumer finishing an async
+---    prompt — cannot publish `float:closed` or run `on_close` twice.
+---  * REENTRANCY. `_closing` suppresses the hook while we are already tearing
+---    down, so closing our own panes (which fires WinClosed) cannot re-enter
+---    the veto and deadlock against a consumer that always cancels.
+---  * NON-BLOCKING. A consumer that needs to ask the user something CANNOT
+---    answer synchronously — `vim.ui.select` returns immediately. It must
+---    return "cancel" now and call close("resume") from its callback. That is
+---    why "resume" exists as a distinct reason rather than reusing "key": a
+---    hook that prompted on "key" would prompt again on the finishing call and
+---    never close. ADR-0065 §2.3.
+---@param reason string?  default "programmatic"
+function Float:close(reason)
+  if self._closed then return end
+  if not self._closing then
+    reason = reason or "programmatic"
+    local hook = self.opts and self.opts.before_close
+    if hook then
+      -- EVERY reason notifies; only "key" may veto.
+      --
+      -- A veto is a promise that the float can still be kept open, and only a
+      -- keypress leaves that true. A lost pane is already gone. A programmatic
+      -- close()/dispose() is a caller that has decided — letting a hook refuse
+      -- it would mean a consumer could pin a float open against the code that
+      -- owns it, and `M._reset_for_tests` and the registry teardown could never
+      -- guarantee a clean slate. Consumers keep their work by OWNING it rather
+      -- than by refusing to close (ADR-0065 §2.1/§2.3).
+      local ok, answer = pcall(hook, reason)
+      if ok and answer == "cancel" and reason == "key" then return end
+    end
+  end
+  self._closing = true
+  self._closed = true
   if self._augroup then
     pcall(vim.api.nvim_del_augroup_by_id, self._augroup)
     self._augroup = nil
@@ -442,11 +504,17 @@ function Float:close()
     win  = -1,
   })
   if self.opts.on_close then pcall(self.opts.on_close) end
+  self._closing = false
 end
 
 ---Final cleanup. Removes from the registry too.
-function Float:dispose()
-  self:close()
+---
+---`dispose` is deliberately NOT vetoable by default: a caller reaching for it
+---wants the instance gone. It still routes through the hook so a consumer is
+---TOLD, which is what lets it keep work the float was displaying.
+---@param reason string?  default "programmatic"
+function Float:dispose(reason)
+  self:close(reason or "programmatic")
   _registry[self.opts.name] = nil
 end
 
@@ -577,9 +645,11 @@ function M.get(name) return _registry[name] end
 
 ---Dispose by name (removes from registry + closes if open).
 ---@param name string
-function M.dispose(name)
+---@param name string
+---@param reason string?
+function M.dispose(name, reason)
   local m = _registry[name]
-  if m then m:dispose() end
+  if m then m:dispose(reason) end
 end
 
 ---Test-only.
