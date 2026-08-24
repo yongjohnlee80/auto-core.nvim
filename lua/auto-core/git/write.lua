@@ -125,36 +125,59 @@ end
 ---pattern: it accepts `main` and `feature/x` and rejects `+a:b`, `:b`, `HEAD~1`,
 ---`--force`, embedded spaces, the empty string and `@{-1}`. Writing that
 ---character class myself is how the next spelling gets missed.
+---Returns git's NORMALIZED branch name, or nil plus a reason.
+---
+---The normalization is consumed rather than discarded, which is the same
+---principle as resolving a ref to an OID: whatever git accepts arrives at the
+---argv as a concrete branch name. The first version threw the stdout away and
+---passed the caller's original token, so `@{-1}` — which check-ref-format
+---resolves to the previous branch after a real switch — reached git as the
+---literal `@{-1}`. It could not force or delete anything, but a branch-only
+---field should not pass through checkout-stack syntax unresolved.
 ---@param cwd string
 ---@param branch string
----@return string|nil err
-local function validate_branch(cwd, branch)
+---@return string|nil name, string|nil err
+local function resolve_branch(cwd, branch)
   local r = vim.system(
     { "git", "--no-optional-locks", "-C", cwd, "check-ref-format", "--branch", branch },
     { text = true }
   ):wait()
-  if r.code ~= 0 then
-    return ("push: %q is not a valid branch name — this field takes a branch, "
+  local name = vim.trim(r.stdout or "")
+  if r.code ~= 0 or name == "" then
+    return nil, ("push: %q is not a valid branch name — this field takes a branch, "
       .. "not a refspec (no leading '+' force, no leading ':' delete)"):format(
         tostring(branch))
   end
-  return nil
+  return name, nil
 end
 
----validate_remote checks `remote` is a plain remote name.
+---validate_remote requires `remote` to be one this repo actually has.
 ---
----Deliberately a conservative charset rather than `check-ref-format`, which
----answers a question about refs and not about remote names. A remote cannot
----contain `:` or `+` in any legitimate use here, and anything outside
----`[A-Za-z0-9._-]` is far more likely to be an injection attempt than a real
----remote someone configured.
+---Membership, not a character class. The first version used
+---`^[%w._%-]+$`, which refuses git-VALID remote names — `foo/bar` and `foo+bar`
+---are both configurable and both were rejected. That is the third time in this
+---module that hand-writing a piece of git's grammar was wrong, so it stops:
+---`git remote` is enumerated through a hardened read and the requested name has
+---to match one of them exactly.
+---
+---It also gives a strictly better interpretation boundary than any pattern
+---could. A name that is not a configured remote is refused whatever characters
+---it contains, so there is nothing left to smuggle through.
+---@param cwd string
 ---@param remote string
 ---@return string|nil err
-local function validate_remote(remote)
-  if not remote:match("^[%w._%-]+$") then
-    return ("push: %q is not a plain remote name"):format(tostring(remote))
+local function validate_remote(cwd, remote)
+  local r = vim.system(
+    { "git", "--no-optional-locks", "-C", cwd, "remote" }, { text = true }
+  ):wait()
+  if r.code ~= 0 then
+    return ("push: cannot list remotes in %s"):format(tostring(cwd))
   end
-  return nil
+  for line in (r.stdout or ""):gmatch("[^\r\n]+") do
+    if vim.trim(line) == remote then return nil end
+  end
+  return ("push: %q is not a configured remote of this repository"):format(
+    tostring(remote))
 end
 
 ---reject_option_args returns an error string when any value is flag-shaped.
@@ -430,8 +453,11 @@ function M.push(cwd, opts, on_done)
   -- neither starts with a dash. So `branch` is additionally validated as a real
   -- branch name, and `remote` as a plain remote name.
   local oerr = reject_option_args("push", { remote = opts.remote, branch = opts.branch })
-  if not oerr and opts.remote then oerr = validate_remote(opts.remote) end
-  if not oerr and opts.branch then oerr = validate_branch(cwd, opts.branch) end
+  if not oerr and opts.remote then oerr = validate_remote(cwd, opts.remote) end
+  local branch_name
+  if not oerr and opts.branch then
+    branch_name, oerr = resolve_branch(cwd, opts.branch)
+  end
   if oerr then
     if on_done then vim.schedule(function() on_done(false, oerr) end) end
     return
@@ -439,7 +465,8 @@ function M.push(cwd, opts, on_done)
   local args = { "git", "push" }
   if opts.set_upstream then args[#args + 1] = "--set-upstream" end
   if opts.remote then args[#args + 1] = opts.remote end
-  if opts.branch then args[#args + 1] = opts.branch end
+  -- The RESOLVED name, never the caller's token.
+  if branch_name then args[#args + 1] = branch_name end
 
   events.publish("core.git.push:started", { cwd = cwd, label = label })
   run(cwd, args, { timeout_ms = opts.timeout_ms or PUSH_TIMEOUT_MS },

@@ -438,11 +438,42 @@ end)()
     W.push(d, { set_upstream = true, remote = "origin", branch = "feature/x" }, cb) end)
   ok("[7d] a real branch name with a slash still pushes", okp.ok, okp.err)
 
-  -- remote is validated too: a plain name only.
+  -- remote is checked for MEMBERSHIP, not against a character class.
   local br = sync(function(cb)
     W.push(d, { remote = "origin;touch /tmp/pwned", branch = "main" }, cb) end)
-  ok("[7d] a non-plain remote name is refused",
-    br.ok == false and tostring(br.err):find("plain remote name", 1, true) ~= nil, br.err)
+  ok("[7d] an unconfigured remote is refused",
+    br.ok == false and tostring(br.err):find("not a configured remote", 1, true) ~= nil, br.err)
+
+  -- r3 note 1: the previous character-class whitelist refused git-VALID remote
+  -- names. `foo/bar` and `foo+bar` are both configurable, and both were
+  -- rejected. Membership against `git remote` accepts whatever git accepted.
+  for _, name in ipairs({ "foo/bar", "foo+bar" }) do
+    vim.system({ "git", "-C", d, "remote", "add", name, bare }, { text = true }):wait()
+  end
+  local listed = vim.system({ "git", "-C", d, "remote" }, { text = true }):wait().stdout or ""
+  ok("[7d] CONTROL — git really configured the odd remote names",
+    listed:find("foo/bar", 1, true) and listed:find("foo+bar", 1, true), vim.inspect(listed))
+  for _, name in ipairs({ "foo/bar", "foo+bar" }) do
+    local r = sync(function(cb)
+      W.push(d, { remote = name, branch = "feature/x" }, cb) end)
+    -- It must get PAST validation. Whether the push itself succeeds depends on
+    -- the remote, so the assertion is that the refusal is not ours.
+    ok("[7d] a git-valid remote " .. string.format("%q", name) .. " is not refused by us",
+      tostring(r.err or ""):find("not a configured remote", 1, true) == nil, r.err)
+  end
+
+  -- r3 note 2: check-ref-format's NORMALIZED name is used, not the caller's
+  -- token. After a real branch switch `@{-1}` resolves to the previous branch;
+  -- the first version discarded that and passed the literal `@{-1}` through.
+  vim.system({ "git", "-C", d, "checkout", "-q", "main" }, { text = true }):wait()
+  vim.system({ "git", "-C", d, "checkout", "-q", "feature/x" }, { text = true }):wait()
+  local resolved = vim.trim(vim.system(
+    { "git", "-C", d, "check-ref-format", "--branch", "@{-1}" }, { text = true }
+  ):wait().stdout or "")
+  ok("[7d] CONTROL — git resolves @{-1} after a real switch", resolved == "main", resolved)
+  local at = sync(function(cb) W.push(d, { remote = "origin", branch = "@{-1}" }, cb) end)
+  ok("[7d] @{-1} is accepted only as its RESOLVED name",
+    tostring(at.err or ""):find("@{%-1}") == nil, at.err)
 end)()
 
 -- ── [6] the read/write hardening split is real ───────────────────────
