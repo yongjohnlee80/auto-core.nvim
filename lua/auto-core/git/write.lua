@@ -108,6 +108,55 @@ local function as_paths(paths)
   return out
 end
 
+---validate_branch checks that `branch` really is a branch NAME.
+---
+---A dash-prefix guard is the wrong shape for this field, and that was the second
+---boundary bug here. `opts.branch` lands in git's REFSPEC position, where the
+---control syntax does not begin with a dash at all:
+---
+---    branch = "+HEAD~1:refs/heads/main"   -- force-rewinds the remote
+---    branch = ":refs/heads/main"          -- DELETES the remote branch
+---
+---Both were accepted and both worked, returning ok=true; a probe rewound a bare
+---remote and then deleted its `main`. The panel's confirmation names only the
+---repository, so neither was anything the user agreed to.
+---
+---`git check-ref-format --branch` is the authority rather than a hand-rolled
+---pattern: it accepts `main` and `feature/x` and rejects `+a:b`, `:b`, `HEAD~1`,
+---`--force`, embedded spaces, the empty string and `@{-1}`. Writing that
+---character class myself is how the next spelling gets missed.
+---@param cwd string
+---@param branch string
+---@return string|nil err
+local function validate_branch(cwd, branch)
+  local r = vim.system(
+    { "git", "--no-optional-locks", "-C", cwd, "check-ref-format", "--branch", branch },
+    { text = true }
+  ):wait()
+  if r.code ~= 0 then
+    return ("push: %q is not a valid branch name — this field takes a branch, "
+      .. "not a refspec (no leading '+' force, no leading ':' delete)"):format(
+        tostring(branch))
+  end
+  return nil
+end
+
+---validate_remote checks `remote` is a plain remote name.
+---
+---Deliberately a conservative charset rather than `check-ref-format`, which
+---answers a question about refs and not about remote names. A remote cannot
+---contain `:` or `+` in any legitimate use here, and anything outside
+---`[A-Za-z0-9._-]` is far more likely to be an injection attempt than a real
+---remote someone configured.
+---@param remote string
+---@return string|nil err
+local function validate_remote(remote)
+  if not remote:match("^[%w._%-]+$") then
+    return ("push: %q is not a plain remote name"):format(tostring(remote))
+  end
+  return nil
+end
+
 ---reject_option_args returns an error string when any value is flag-shaped.
 ---@param label string
 ---@param values table
@@ -365,14 +414,24 @@ end
 ---there, where the repo being published can be named. Putting a prompt in here
 ---would make every programmatic caller fight a modal it cannot answer.
 ---@param cwd string
+---`branch` is a branch NAME, not a refspec — force and delete syntax are
+---refused. If an arbitrary refspec is ever needed, that belongs in an explicit
+---`refspec`/`force` API whose caller confirms what it is about to rewrite,
+---rather than smuggled through a field documented as a branch.
 ---@param opts { remote: string?, branch: string?, set_upstream: boolean?, timeout_ms: integer?, label: string? }?
 ---@param on_done fun(ok: boolean, err: string?)?
 function M.push(cwd, opts, on_done)
   opts = opts or {}
   local label = opts.label or cwd
-  -- Same option-boundary class as reset_soft's ref: `remote`/`branch` land in
-  -- argv positions where git would read a leading dash as a flag.
+  -- Two distinct boundaries, both checked BEFORE argv construction.
+  --
+  -- The dash guard catches a flag in either position. It is NOT sufficient for
+  -- `branch`, which git reads as a refspec: `+a:b` forces and `:b` deletes, and
+  -- neither starts with a dash. So `branch` is additionally validated as a real
+  -- branch name, and `remote` as a plain remote name.
   local oerr = reject_option_args("push", { remote = opts.remote, branch = opts.branch })
+  if not oerr and opts.remote then oerr = validate_remote(opts.remote) end
+  if not oerr and opts.branch then oerr = validate_branch(cwd, opts.branch) end
   if oerr then
     if on_done then vim.schedule(function() on_done(false, oerr) end) end
     return
