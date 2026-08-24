@@ -102,7 +102,11 @@ function M.statuscolumn()
     and vim.api.nvim_win_get_buf(win) or nil
   local map = buf and M._rowmap[buf]
   local n = map and map[vim.v.lnum]
-  if not n then return "     │ " end
+  -- EXACTLY empty for a row that carries no file line (ADR-0065 §2.9,
+  -- criterion 16). A padded blank would still draw the separator, which reads
+  -- as "a line whose number we could not determine" rather than "not a line" —
+  -- and a gap/pad row is not a line at all.
+  if not n then return "" end
   return string.format("%5d │ ", n)
 end
 
@@ -357,8 +361,9 @@ end
 ---expects even for a LEFT-side comment — so anchoring a rename's LEFT comment
 ---to `old_path` would render only through a fallback and upload to the wrong
 ---file.
+---@param visual boolean?  true when invoked from a VISUAL-mode mapping
 ---@return table? anchor, string? reason
-local function _anchor_here()
+local function _anchor_here(visual)
   local pane = _focused_pane()
   local column, side, reason = _side_for(pane)
   if not column then return nil, reason end
@@ -366,18 +371,30 @@ local function _anchor_here()
   local win = _state.float:winid(pane)
   if not (win and vim.api.nvim_win_is_valid(win)) then return nil, "pane is gone" end
 
-  -- A visual selection is read from the '< and '> marks, so this works from
-  -- normal mode straight after one, which is when the mapping actually fires.
-  local mode = vim.fn.mode()
-  local vstart = vim.fn.getpos("'<")[2]
-  local vend = vim.fn.getpos("'>")[2]
   local cursor = vim.api.nvim_win_get_cursor(win)[1]
-  local is_visual = (mode:sub(1, 1) == "v" or mode:sub(1, 1) == "V")
-    or (vstart > 0 and vend > 0 and vstart ~= vend
-        and cursor >= math.min(vstart, vend) and cursor <= math.max(vstart, vend))
 
-  if is_visual and vstart > 0 and vend > 0 and vstart ~= vend then
-    local span, rerr = gitdiff.range(column, vstart - 1, vend - 1)
+  -- Whether this is a RANGE is decided by which mapping fired, never by
+  -- inspecting the '< and '> marks.
+  --
+  -- Those marks are ambient: they hold the LAST visual selection made anywhere
+  -- in the session and survive leaving visual mode entirely. Deriving intent
+  -- from them meant a plain `c` in normal mode, with the cursor merely sitting
+  -- inside a selection made minutes earlier, silently produced a multi-line
+  -- range the user never asked for — observed as start_line=10,line=12 from a
+  -- single-row cursor. The visual mapping passes `visual = true`; nothing else
+  -- can.
+  if visual then
+    -- `v` is the other end of the LIVE selection, and `.` the cursor. Read
+    -- while still in visual mode, so this is the selection on screen rather
+    -- than a remembered one.
+    local vpos = vim.fn.getpos("v")[2]
+    local first, last = math.min(vpos, cursor), math.max(vpos, cursor)
+    if first == last then
+      local lineno, aerr = gitdiff.anchor(column, first - 1)
+      if not lineno then return nil, aerr end
+      return { path = f.path, side = side, line = lineno }
+    end
+    local span, rerr = gitdiff.range(column, first - 1, last - 1)
     if not span then return nil, rerr end
     return {
       path = f.path, side = side, start_side = side,
@@ -461,6 +478,12 @@ function M.open(opts)
 
   M.close()
 
+  -- Captured for teardown. `Float:close` empties `self.panes` BEFORE running
+  -- `on_close`, so asking the float for its buffers at that point returns nil —
+  -- which is exactly how the first attempt at this cleanup silently kept
+  -- leaking. The handles have to be held independently of the float.
+  local content_bufs = {}
+
   local float = multi.new({
     name = NAME,
     outer = {
@@ -478,6 +501,13 @@ function M.open(opts)
     -- closing loses anything. Only a "key" close is vetoable (ADR-0065 §2.3).
     before_close = opts.annotate and opts.annotate.before_close or nil,
     on_close = function()
+      -- Row-map cleanup lives HERE, not in `M.close`. `q`/`<Esc>` and a lost
+      -- pane close the float directly through `float.multi`, never through
+      -- `M.close`, so cleanup hung off `M.close` leaked a dead-buffer map on
+      -- every key close — and the maps are keyed by buffer, so the leak was
+      -- unbounded across a session. `on_close` is the once-only path EVERY
+      -- close route converges on.
+      for _, b in ipairs(content_bufs) do M._rowmap[b] = nil end
       _state = nil
       if opts.on_close then pcall(opts.on_close) end
     end,
@@ -486,6 +516,11 @@ function M.open(opts)
   _state = { float = float, files = files, annotations = opts.annotations, idx = 1,
              annotate = opts.annotate }
   float:open()
+
+  for _, pane in ipairs({ "middle", "preview" }) do
+    local b = float:bufnr(pane)
+    if b then content_bufs[#content_bufs + 1] = b end
+  end
 
   -- `float.multi` opens panes with `style = "minimal"`, which sets
   -- `number = false` AND `statuscolumn = ""` — so a status column string is not
@@ -546,12 +581,12 @@ function M.open(opts)
     for _, pane in ipairs({ "middle", "preview" }) do
       local b = float:bufnr(pane)
       if b and vim.api.nvim_buf_is_valid(b) then
-        pcall(vim.keymap.set, { "n", "x" }, "c", function()
+        local function annotate(visual)
           if disabled then
             vim.notify("diffview: " .. tostring(disabled), vim.log.levels.WARN)
             return
           end
-          local anchor, reason = _anchor_here()
+          local anchor, reason = _anchor_here(visual)
           if not anchor then
             vim.notify("diffview: " .. tostring(reason), vim.log.levels.WARN)
             return
@@ -565,7 +600,12 @@ function M.open(opts)
             _show(_state.idx)
             M._render_footer()
           end)
-        end, { buffer = b, silent = true, nowait = true, desc = "auto-core.diffview: annotate" })
+        end
+        -- TWO mappings, not one shared across modes: the mode is the intent.
+        pcall(vim.keymap.set, "n", "c", function() annotate(false) end,
+          { buffer = b, silent = true, nowait = true, desc = "auto-core.diffview: annotate line" })
+        pcall(vim.keymap.set, "x", "c", function() annotate(true) end,
+          { buffer = b, silent = true, nowait = true, desc = "auto-core.diffview: annotate selection" })
 
         -- `x` is NOT bound while disabled: a key that removes from a draft
         -- implies a draft exists.
@@ -640,13 +680,9 @@ function M._render_footer()
 end
 
 ---close disposes the view if it is open. Idempotent.
-function M.close()
+function M.close(reason)
   if _state and _state.float then
-    for _, pane in ipairs({ "middle", "preview" }) do
-      local b = _state.float:bufnr(pane)
-      if b then M._rowmap[b] = nil end
-    end
-    pcall(function() _state.float:dispose() end)
+    pcall(function() _state.float:dispose(reason) end)
   end
   _state = nil
   pcall(multi.dispose, NAME)

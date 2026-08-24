@@ -108,11 +108,13 @@ end
 
 io.stdout:write("\n[4] the three capability states differ by what is BOUND\n")
 vim.o.columns, vim.o.lines = 200, 50
-local function keys_on(pane)
+local function keys_on(pane, mode)
   local st = dv._state_for_tests()
   local b = st and st.float:bufnr(pane)
   local out = {}
-  if b then for _, m in ipairs(vim.api.nvim_buf_get_keymap(b, "n")) do out[m.lhs] = true end end
+  if b then
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(b, mode or "n")) do out[m.lhs] = true end
+  end
   return out
 end
 
@@ -127,6 +129,8 @@ dv.open({ files = files, annotate = { disabled_reason = "no commit", on_add = fu
 k = keys_on("middle")
 ok("*** disabled: c IS bound (it must explain) ***", k["c"] == true)
 ok("*** disabled: x is NOT bound (nothing implies a draft) ***", not k["x"], vim.inspect(vim.tbl_keys(k)))
+ok("disabled: neither is bound on the preview pane's x either",
+  keys_on("preview")["x"] == nil, vim.inspect(vim.tbl_keys(keys_on("preview"))))
 dv.close()
 
 local added = {}
@@ -136,9 +140,23 @@ dv.open({ files = files, annotate = {
     pending = function() return added end,
   }, keymaps = { { key = "s", desc = "submit", fn = function() end } } })
 k = keys_on("middle")
-ok("enabled: c bound", k["c"] == true)
-ok("enabled: x bound", k["x"] == true)
-ok("a consumer keymap reaches the pane", k["s"] == true, vim.inspect(vim.tbl_keys(k)))
+local kp = keys_on("preview")
+ok("enabled: c bound on BOTH content panes",
+  k["c"] == true and kp["c"] == true, vim.inspect({ vim.tbl_keys(k), vim.tbl_keys(kp) }))
+ok("enabled: x bound on both", k["x"] == true and kp["x"] == true)
+-- MF2: the mode is the intent, so the range mapping is a SEPARATE visual one.
+local kx = keys_on("middle", "x")
+ok("*** `c` is bound in VISUAL mode as its own mapping ***", kx["c"] == true,
+  vim.inspect(vim.tbl_keys(kx)))
+ok("*** and the authoring keys are NOT on the Files pane ***",
+  keys_on("left")["c"] == nil and keys_on("left")["x"] == nil,
+  vim.inspect(vim.tbl_keys(keys_on("left"))))
+ok("a consumer keymap reaches the content panes",
+  k["s"] == true and kp["s"] == true, vim.inspect(vim.tbl_keys(k)))
+-- Consumer keymaps are deliberately bound on Files too: `s` submits a review
+-- and the file list is a legitimate place to press it, unlike an anchor key.
+ok("and a consumer keymap IS available from Files (submit is not row-anchored)",
+  keys_on("left")["s"] == true, vim.inspect(vim.tbl_keys(keys_on("left"))))
 
 io.stdout:write("\n[5] pending annotations paint, and the footer counts them\n")
 added[#added + 1] = { path = "foo.lua", line = 11, side = "RIGHT", severity = "nit", body = "pending one" }
