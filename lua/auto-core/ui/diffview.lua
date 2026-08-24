@@ -63,19 +63,70 @@ local function _fmt(column)
   local lines = {}
   for _, e in ipairs(column or {}) do
     if e.kind == "gap" then
-      lines[#lines + 1] = "      ⋯"
+      lines[#lines + 1] = "⋯"
     elseif e.kind == "pad" then
       -- The absent side of an unequal replacement block (ADR-0060 r1 MF4). A
-      -- blank row, deliberately WITHOUT the `│` gutter, so it reads as "nothing
-      -- here" opposite the added/removed line rather than an empty file line.
+      -- genuinely EMPTY line, so it reads as "nothing here" opposite the
+      -- added/removed line — and so it does not perturb the treesitter parse.
       lines[#lines + 1] = ""
     else
-      lines[#lines + 1] = string.format("%5s │ %s",
-        e.lineno and tostring(e.lineno) or "", e.text or "")
+      -- PURE FILE TEXT (ADR-0065 §2.9). The line number used to live here, in
+      -- the buffer, as a `%5s │ ` prefix — which is why treesitter could not be
+      -- switched on: it would have parsed the gutter as code. Numbers now come
+      -- from `statuscolumn`, which is where Neovim already puts gutters.
+      lines[#lines + 1] = e.text or ""
     end
   end
-  if #lines == 0 then lines = { "      (no lines on this side)" } end
+  if #lines == 0 then lines = { "(no lines on this side)" } end
   return lines
+end
+
+-- Row maps, keyed by BUFFER. The two content buffers are reused as the
+-- selected file changes, so the gutter has to be re-derived on every `_show`
+-- or it shows the previous file's numbering.
+M._rowmap = {}
+
+---statuscolumn resolves the FILE line for the row being drawn.
+---
+---Two things make this more than `%l`. Buffer row *n* is NOT file line *n* —
+---the column carries `gap` and `pad` rows that hold no file line at all — so a
+---plain `%l` would print synthetic buffer numbers beside real code. And the
+---lookup MUST use the window being drawn (`vim.g.statusline_winid`), not the
+---current buffer: both content panes are redrawn while the FILES pane holds
+---focus, so a current-buffer lookup would render every pane's gutter from the
+---focused buffer's map.
+---@return string
+function M.statuscolumn()
+  local win = vim.g.statusline_winid
+  local buf = win and vim.api.nvim_win_is_valid(win)
+    and vim.api.nvim_win_get_buf(win) or nil
+  local map = buf and M._rowmap[buf]
+  local n = map and map[vim.v.lnum]
+  if not n then return "     │ " end
+  return string.format("%5d │ ", n)
+end
+
+---_apply_filetype sets the buffer's filetype from the path this SIDE shows and
+---restarts the parser.
+---
+---Per side, because a rename can change the extension: the `a/` side may be a
+---`.lua` file while `b/` is `.go`. Per switch, because the two scratch buffers
+---are reused — leaving the old parser attached would highlight the new file
+---with the previous file's grammar.
+local function _apply_filetype(bufnr, path)
+  if not (bufnr and vim.api.nvim_buf_is_valid(bufnr)) then return end
+  local ft
+  if path then
+    local ok, m = pcall(vim.filetype.match, { filename = path })
+    if ok then ft = m end
+  end
+  pcall(vim.treesitter.stop, bufnr)
+  vim.bo[bufnr].filetype = ft or ""
+  if ft and ft ~= "" then
+    -- A missing parser is the common case, not an error: degrade to unhighlighted
+    -- text rather than surfacing a stack trace over a diff.
+    pcall(vim.treesitter.start, bufnr, ft)
+  end
 end
 
 ---_paint colours a rendered side and lays its annotations over it.
@@ -222,6 +273,16 @@ local function _show(idx)
       vim.bo[spec.buf].modifiable = true
       vim.api.nvim_buf_set_lines(spec.buf, 0, -1, false, _fmt(spec.col))
       vim.bo[spec.buf].modifiable = false
+
+      -- Rebuild this buffer's gutter map for the file now shown. 1-based, to
+      -- match `v:lnum`; rows with no file line are simply absent.
+      local map = {}
+      for i, e in ipairs(spec.col or {}) do
+        if e.lineno then map[i] = e.lineno end
+      end
+      M._rowmap[spec.buf] = map
+
+      _apply_filetype(spec.buf, spec.side == "a" and f.old_path or (f.new_path or f.path))
       _paint(spec.buf, spec.col, anns, spec.side)
     end
   end
@@ -426,6 +487,19 @@ function M.open(opts)
              annotate = opts.annotate }
   float:open()
 
+  -- `float.multi` opens panes with `style = "minimal"`, which sets
+  -- `number = false` AND `statuscolumn = ""` — so a status column string is not
+  -- enough on its own; each content pane has to claim these window options.
+  for _, pane in ipairs({ "middle", "preview" }) do
+    local w = float:winid(pane)
+    if w and vim.api.nvim_win_is_valid(w) then
+      vim.wo[w].number = true
+      vim.wo[w].relativenumber = false
+      vim.wo[w].numberwidth = 1
+      vim.wo[w].statuscolumn = "%!v:lua.require'auto-core.ui.diffview'.statuscolumn()"
+    end
+  end
+
   local left = float:bufnr("left")
   if left and vim.api.nvim_buf_is_valid(left) then
     vim.bo[left].modifiable = true
@@ -567,7 +641,13 @@ end
 
 ---close disposes the view if it is open. Idempotent.
 function M.close()
-  if _state and _state.float then pcall(function() _state.float:dispose() end) end
+  if _state and _state.float then
+    for _, pane in ipairs({ "middle", "preview" }) do
+      local b = _state.float:bufnr(pane)
+      if b then M._rowmap[b] = nil end
+    end
+    pcall(function() _state.float:dispose() end)
+  end
   _state = nil
   pcall(multi.dispose, NAME)
 end

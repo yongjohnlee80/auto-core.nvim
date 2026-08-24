@@ -236,21 +236,38 @@ end
 ---@param bufnr integer
 ---@param ns integer
 ---@param column table[]        a `before` or `after` list from git.diff.sides()
----@param opts { offset: integer? }?   0-based row of column[1]
+---@param opts { offset: integer?, legacy_hl: boolean?, priority: integer? }?
 ---@return integer painted
 function M.paint_diff_column(bufnr, ns, column, opts)
   local offset = (opts and opts.offset) or 0
+  -- BACKGROUND-ONLY groups, at a priority BELOW treesitter (ADR-0065 §2.9).
+  --
+  -- `AutoCoreDiffAdd`/`Delete` link the THEME's `DiffAdd`/`DiffDelete`, which
+  -- commonly carry a foreground as well as a background — and `M.line` defaults
+  -- to priority 100, exactly what treesitter uses. Painting those groups at that
+  -- priority left the outcome to extmark ordering and to whatever the colorscheme
+  -- happened to define, so a diff pane could not carry syntax highlighting at all.
+  --
+  -- The derived `*Bg` groups have no `fg` by construction and sit at 90, so
+  -- foreground belongs to treesitter and background to the diff. Neither can
+  -- override the other at any priority, because they are different attributes.
+  --
+  -- `opts.legacy_hl = true` restores the pre-ADR-0065 groups for any consumer
+  -- that renders a diff column WITHOUT treesitter and wants the theme's full
+  -- DiffAdd/DiffDelete look.
+  local legacy = opts and opts.legacy_hl
   local hl = {
-    add = "AutoCoreDiffAdd",
-    del = "AutoCoreDiffDelete",
+    add = legacy and "AutoCoreDiffAdd" or "AutoCoreDiffAddBg",
+    del = legacy and "AutoCoreDiffDelete" or "AutoCoreDiffDeleteBg",
     context = nil,                 -- context stays Normal: colouring every
                                    -- line makes the changed ones stop standing out
     gap = "AutoCoreDiffHunk",
   }
+  local prio = (opts and opts.priority) or (legacy and 100 or 90)
   local painted = 0
   for i, entry in ipairs(column or {}) do
     local group = hl[entry.kind]
-    if group and M.line(bufnr, ns, offset + i - 1, group) then
+    if group and M.line(bufnr, ns, offset + i - 1, group, { priority = prio }) then
       painted = painted + 1
     end
   end
