@@ -124,11 +124,22 @@ local function _apply_filetype(bufnr, path)
     local ok, m = pcall(vim.filetype.match, { filename = path })
     if ok then ft = m end
   end
+  -- Requests are recorded INDEPENDENTLY of whether a parser installs.
+  --
+  -- A test that asks "is a parser attached?" cannot distinguish "we never asked"
+  -- from "we asked and no grammar exists" — and a grammar is absent on most CI
+  -- machines, so that assertion passes either way. It did: stubbing
+  -- `treesitter.start`/`stop` to no-ops left the whole suite green. The counter
+  -- is the observable that the stub actually moves.
+  M._ts_calls = M._ts_calls or { stop = 0, start = 0, last_ft = nil }
+  M._ts_calls.stop = M._ts_calls.stop + 1
   pcall(vim.treesitter.stop, bufnr)
   vim.bo[bufnr].filetype = ft or ""
   if ft and ft ~= "" then
     -- A missing parser is the common case, not an error: degrade to unhighlighted
     -- text rather than surfacing a stack trace over a diff.
+    M._ts_calls.start = M._ts_calls.start + 1
+    M._ts_calls.last_ft = ft
     pcall(vim.treesitter.start, bufnr, ft)
   end
 end
@@ -627,9 +638,15 @@ function M.open(opts)
 
   -- Consumer keymaps. This is how a submit key reaches the view without
   -- auto-core learning what submitting means.
+  --
+  -- CONTENT PANES ONLY. An earlier version also bound these on the Files pane,
+  -- on the reasonable-sounding grounds that a submit key is not row-anchored —
+  -- but ADR-0065 §2.4 normatively says `c`/`x`/`s` are bound on middle and
+  -- preview only, and a code comment cannot amend an accepted ADR. If the wider
+  -- binding is wanted, it needs a superseding decision first.
   for _, km in ipairs(opts.keymaps or {}) do
     if type(km) == "table" and type(km.key) == "string" and type(km.fn) == "function" then
-      for _, pane in ipairs({ "left", "middle", "preview" }) do
+      for _, pane in ipairs({ "middle", "preview" }) do
         local b = float:bufnr(pane)
         if b and vim.api.nvim_buf_is_valid(b) then
           pcall(vim.keymap.set, "n", km.key, function()
@@ -693,6 +710,16 @@ end
 function M.is_open()
   return _state ~= nil and _state.float ~= nil and _state.float:is_open()
 end
+
+---_anchor_for_tests resolves an anchor exactly as a keypress would.
+---
+---A seam, because the stale-marks defect lives in the resolution and not in
+---anything the buffer shows: with `'<`/`'>` left over from an earlier
+---selection, a normal-mode `c` produced a RANGE. Asserting that the two
+---mappings merely exist would not have caught it.
+---@param visual boolean?
+---@return table? anchor, string? reason
+function M._anchor_for_tests(visual) return _anchor_here(visual) end
 
 ---_state_for_tests exposes the live state so a suite can assert on pane
 ---contents without synthesising keypresses.
