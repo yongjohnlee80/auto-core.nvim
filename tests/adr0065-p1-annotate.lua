@@ -160,6 +160,51 @@ ok("a consumer keymap reaches the content panes",
 ok("*** consumer keymaps are NOT on the Files pane either (§2.4) ***",
   keys_on("left")["s"] == nil, vim.inspect(vim.tbl_keys(keys_on("left"))))
 
+io.stdout:write("\n[4d] C-h / C-l cycle panes on every pane, like Tab / S-Tab\n")
+-- The family convention (`worktree.graph`, `log.viewer`) binds C-h/C-l to pane
+-- navigation; the diff view had only Tab/S-Tab, so a reader used to h/l had no
+-- directional move. Bound on ALL THREE panes because pane navigation is not
+-- content-anchored -- unlike c/x/s, which live on middle/preview only.
+-- Neovim canonicalises a control-key lhs to upper case in the keymap listing
+-- (`<C-l>` is reported as `<C-L>`), so the assertion has to read the canonical
+-- form -- checking the lower-case string would fail against a correct binding.
+for _, pane in ipairs({ "left", "middle", "preview" }) do
+  local kk = keys_on(pane)
+  ok(("*** <C-l> is bound on the %s pane ***"):format(pane), kk["<C-L>"] == true,
+    vim.inspect(vim.tbl_keys(kk)))
+  ok(("*** <C-h> is bound on the %s pane ***"):format(pane), kk["<C-H>"] == true)
+end
+dv.close()
+
+io.stdout:write("\n[4e] the current file is a public accessor, and consumer keys receive it\n")
+-- `o open this file` cannot be written by the consumer unless it can learn WHICH
+-- file the view is showing at press time -- the file changes under j/k, so an
+-- open-time capture is stale. The accessor is the seam.
+dv.close()
+local seen = {}
+dv.open({ files = files,
+  keymaps = { { key = "o", desc = "open file", fn = function(f) seen[#seen + 1] = f end } } })
+local cf = dv.current_file()
+ok("*** current_file() returns the file at the current index ***",
+  cf ~= nil and cf.path == files[1].path, cf and cf.path)
+-- Drive the consumer key and confirm it was handed the same file.
+local st = dv._state_for_tests()
+for _, pane in ipairs({ "middle", "preview" }) do
+  for _, m in ipairs(vim.api.nvim_buf_get_keymap(st.float:bufnr(pane), "n")) do
+    if m.lhs == "o" and m.callback then m.callback(); break end
+  end
+  break
+end
+ok("*** the consumer key is handed the current file ***",
+  #seen >= 1 and seen[1] ~= nil and seen[1].path == files[1].path,
+  seen[1] and seen[1].path)
+ok("current_file() is nil when the view is closed", (function()
+  dv.close(); return dv.current_file() == nil end)())
+
+-- [4b] below reads the live view, so leave one open exactly as the section
+-- order did before [4d]/[4e] were inserted here.
+dv.open({ files = files })
+
 io.stdout:write("\n[4b] a normal-mode anchor ignores STALE visual marks\n")
 do
   -- The regression: `'<`/`'>` are ambient and outlive visual mode, so a plain
