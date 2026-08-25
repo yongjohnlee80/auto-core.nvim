@@ -3411,6 +3411,51 @@ ok("worktree:removed event invalidates fan_out cache",
     tostring(refreshed2), tostring(refreshed),
     tostring(refreshed2 == refreshed)))
 
+-- Bare-at-root layout regression (the auto-run.nvim case). A bare repo
+-- can live DIRECTLY at its project folder: its git common-dir IS the
+-- folder (`<ws>/pkg.nvim`), not a `.git`/`.bare` container one level
+-- down. fan_out only discovers it via the linked worktree's `.git` FILE,
+-- so the recorded common-dir is the folder itself. _derive_label must
+-- name such a repo after its folder ("pkg.nvim"), not walk one level up
+-- to the workspace root (which produced the wrong "nvim-plugins" label).
+local batr = vim.fs.normalize(vim.fn.tempname() .. "_batr_ws")
+vim.fn.mkdir(batr, "p")
+-- The seed lives OUTSIDE the workspace so fan_out(batr) discovers only
+-- the bare-at-root repo, not the seed's own `.git`.
+local seed2 = vim.fs.normalize(vim.fn.tempname() .. "_batr_seed")
+vim.fn.mkdir(seed2, "p")
+vim.fn.system({ "git", "-C", seed2, "init", "-q", "--initial-branch=main" })
+vim.fn.system({ "git", "-C", seed2,
+  "-c", "user.email=t@t", "-c", "user.name=t",
+  "commit", "--allow-empty", "-m", "init" })
+-- clone --bare INTO the project folder → bare internals sit at
+-- <ws>/pkg.nvim directly, exactly like auto-run.nvim.
+local pkg_bare = batr .. "/pkg.nvim"
+vim.fn.system({ "git", "clone", "--bare", "-q", seed2, pkg_bare })
+vim.fn.system({ "git", "-C", pkg_bare, "worktree", "add", "-q",
+  pkg_bare .. "/main", "main" })
+
+graph._reset_for_tests()
+local batr_repos = graph.fan_out(batr)
+local batr_repo = batr_repos[1]
+ok("fan_out discovers a bare-at-root repo (via its worktree)",
+  #batr_repos == 1, "found=" .. #batr_repos)
+ok("bare-at-root label is the project folder, not the workspace root",
+  batr_repo ~= nil and batr_repo.label == "pkg.nvim",
+  "label=" .. tostring(batr_repo and batr_repo.label))
+ok("bare-at-root common_dir is the folder itself",
+  batr_repo ~= nil and batr_repo.common_dir == pkg_bare,
+  batr_repo and batr_repo.common_dir)
+ok("bare-at-root flagged is_bare",
+  batr_repo ~= nil and batr_repo.is_bare == true)
+ok("bare-at-root sample_worktree is the linked worktree",
+  batr_repo ~= nil and batr_repo.sample_worktree == pkg_bare .. "/main",
+  batr_repo and batr_repo.sample_worktree)
+
+vim.fn.delete(batr, "rf")
+vim.fn.delete(seed2, "rf")
+graph._reset_for_tests()
+
 -- Cleanup.
 vim.fn.delete(tmp, "rf")
 graph._reset_for_tests()
