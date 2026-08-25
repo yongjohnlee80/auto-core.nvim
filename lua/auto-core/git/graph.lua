@@ -90,11 +90,24 @@ end
 ---containers report common_dir = `<project>/{.git|.bare}`; the
 ---project is the dir above. Plain repo containers report
 ---common_dir = `<project>/.git`.
+---
+---A bare repo can also sit DIRECTLY at its project folder — its
+---common-dir IS the folder (`<project>`), with no `.git`/`.bare`
+---container (e.g. `auto-run.nvim`, discovered via its linked
+---worktree's `.git` file). Then the project is the common-dir
+---itself, not its parent. Distinguish by the common-dir's basename:
+---only a `.git`/`.bare` container means "the project is one dir up".
+---Without this, a bare-at-root repo took its PARENT — the workspace
+---root — and rendered under the root's name instead of its own.
 ---@param common_dir string
 ---@param root string
 ---@return string
 local function _derive_label(common_dir, root)
   local project = vim.fn.fnamemodify(common_dir, ":h")
+  local container = vim.fn.fnamemodify(common_dir, ":t")
+  if container ~= ".git" and container ~= ".bare" then
+    project = common_dir
+  end
   if project == root then
     return vim.fn.fnamemodify(project, ":t")
   end
