@@ -523,7 +523,7 @@ function M.open(opts)
   })
 
   _state = { float = float, files = files, annotations = opts.annotations, idx = 1,
-             annotate = opts.annotate }
+             annotate = opts.annotate, keymaps = opts.keymaps }
   float:open()
 
   for _, pane in ipairs({ "middle", "preview" }) do
@@ -672,23 +672,71 @@ function M._render_footer()
   if not _state then return end
   local foot = _state.float:bufnr("footer")
   if not (foot and vim.api.nvim_buf_is_valid(foot)) then return end
-  local parts = { "  j/k file   <Tab> pane   a/ = old, b/ = new" }
+
+  -- PROSE orients a first-time reader; KEYS are what a returning one needs.
+  -- They are assembled separately because a narrow pane has to shed one and not
+  -- the other. The footer is a ONE-LINE pane: anything past its width is simply
+  -- not drawn, and the tail is where the pending count lives — so an untrimmed
+  -- line loses exactly the signal that must never go missing.
+  local prose = { "j/k file", "<Tab> pane", "a/ = old, b/ = new" }
+  local keys = {}
   local ann = _state.annotate
   if ann then
-    parts[#parts + 1] = ann.disabled_reason and "c unavailable" or "c annotate"
+    keys[#keys + 1] = ann.disabled_reason and "c unavailable" or "c annotate"
     if not ann.disabled_reason and type(ann.on_remove) == "function" then
-      parts[#parts + 1] = "x drop"
+      keys[#keys + 1] = "x drop"
     end
   end
-  parts[#parts + 1] = "q close"
-  local line = table.concat(parts, "   ")
+  -- Consumer keys are ADVERTISED, not only bound. `opts.keymaps` is how a
+  -- consumer reaches the view without auto-core learning what its keys mean —
+  -- but a key that appears nowhere on screen is a key nobody finds, and the one
+  -- auto-finder passes is `s submit`: the key that actually writes the review.
+  -- Until now it existed only in the source.
+  for _, km in ipairs(_state.keymaps or {}) do
+    if type(km) == "table" and type(km.key) == "string" and type(km.fn) == "function" then
+      keys[#keys + 1] = km.key .. " " .. (km.desc or km.key)
+    end
+  end
+  keys[#keys + 1] = "q close"
+
+  local tail = ""
   if ann and type(ann.pending) == "function" then
     local ok, list = pcall(ann.pending)
     local n = (ok and type(list) == "table") and #list or 0
     if n > 0 then
-      line = line .. ("     ● %d pending"):format(n)
+      tail = ("     ● %d pending"):format(n)
     end
   end
+
+  local win = _state.float:winid("footer")
+  local width = (win and vim.api.nvim_win_is_valid(win))
+    and vim.api.nvim_win_get_width(win) or math.huge
+
+  local function assemble()
+    local all = {}
+    for _, x in ipairs(prose) do all[#all + 1] = x end
+    for _, x in ipairs(keys) do all[#all + 1] = x end
+    return "  " .. table.concat(all, "   ") .. tail
+  end
+
+  -- Shed prose from the right: `j/k file` survives longest because a reader who
+  -- has lost their bearings still has to move between files.
+  local line = assemble()
+  while vim.fn.strdisplaywidth(line) > width and #prose > 0 do
+    table.remove(prose)
+    line = assemble()
+  end
+  -- No prose left and still over: the keys themselves overflow. Truncate THEM
+  -- and keep the tail, because an unwritten draft the reader cannot see is one
+  -- they can lose without ever being told.
+  if vim.fn.strdisplaywidth(line) > width then
+    local body = "  " .. table.concat(keys, "   ")
+    while #body > 0 and vim.fn.strdisplaywidth(body .. "…" .. tail) > width do
+      body = vim.fn.strcharpart(body, 0, vim.fn.strchars(body) - 1)
+    end
+    line = body .. "…" .. tail
+  end
+
   vim.bo[foot].modifiable = true
   vim.api.nvim_buf_set_lines(foot, 0, -1, false, { line })
   vim.bo[foot].modifiable = false

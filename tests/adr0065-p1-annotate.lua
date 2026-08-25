@@ -246,5 +246,49 @@ ok("*** and is tagged so the painter can tell it apart ***", got[1].author == "p
 ok("without mutating the consumer's own table", added[1].author == nil, tostring(added[1].author))
 dv.close()
 
+io.stdout:write("\n[6] a consumer keymap is ADVERTISED, not just bound\n")
+-- A key that writes the review and appears nowhere on screen is a key nobody
+-- finds. `opts.keymaps` was bound on the content panes and then never named,
+-- so `s submit` existed only in the source.
+dv.close()
+dv.open({ files = files,
+  annotate = {
+    on_add = function() end, on_remove = function() end,
+    pending = function() return {} end,
+  },
+  keymaps = { { key = "s", desc = "submit review", fn = function() end } } })
+local st6 = dv._state_for_tests()
+local foot6 = table.concat(vim.api.nvim_buf_get_lines(st6.float:bufnr("footer"), 0, -1, false), "")
+ok("*** the footer names the consumer's key ***", foot6:find("s submit", 1, true) ~= nil, foot6)
+ok("alongside the keys the view owns", foot6:find("c annotate", 1, true) ~= nil, foot6)
+ok("and the close key stays last", foot6:find("q close", 1, true) ~= nil, foot6)
+
+-- A footer that overflows its pane loses its TAIL, and the tail is where the
+-- pending count lives — so a narrow view must shed prose, not signal.
+local width = vim.api.nvim_win_get_width(st6.float:winid("footer"))
+ok("the assembled line fits the pane", vim.fn.strdisplaywidth(foot6) <= width,
+  ("%d > %d: %q"):format(vim.fn.strdisplaywidth(foot6), width, foot6))
+dv.close()
+
+io.stdout:write("\n[7] a narrow footer keeps the keys and drops the prose\n")
+local many = {}
+for i = 1, 6 do
+  many[i] = { key = tostring(i), desc = "action number " .. i, fn = function() end }
+end
+dv.close()
+dv.open({ files = files,
+  annotate = { on_add = function() end, on_remove = function() end,
+               pending = function() return { { path = "foo.lua", line = 11 } } end },
+  keymaps = many })
+local st7 = dv._state_for_tests()
+local foot7 = table.concat(vim.api.nvim_buf_get_lines(st7.float:bufnr("footer"), 0, -1, false), "")
+local w7 = vim.api.nvim_win_get_width(st7.float:winid("footer"))
+ok("*** an overlong footer is still within its pane ***",
+  vim.fn.strdisplaywidth(foot7) <= w7,
+  ("%d > %d: %q"):format(vim.fn.strdisplaywidth(foot7), w7, foot7))
+ok("*** and the pending count survives the trim ***",
+  foot7:find("1 pending", 1, true) ~= nil, foot7)
+dv.close()
+
 io.stdout:write(string.format("\n%d passed, %d failed\n", pass, fail))
 os.exit(fail > 0 and 1 or 0)
