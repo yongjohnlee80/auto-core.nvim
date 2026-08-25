@@ -86,27 +86,36 @@ local function _probe(dir)
   }
 end
 
----Derive a stable label for a discovered repo. `.git` / `.bare`
----containers report common_dir = `<project>/{.git|.bare}`; the
----project is the dir above. Plain repo containers report
----common_dir = `<project>/.git`.
+---Derive a stable label for a discovered repo from three probed facts:
+---the common-dir, whether the repo is bare, and the worktree it was
+---discovered through. The label is always the PROJECT folder — never the
+---git directory's location, which is storage topology, not identity.
 ---
----A bare repo can also sit DIRECTLY at its project folder — its
----common-dir IS the folder (`<project>`), with no `.git`/`.bare`
----container (e.g. `auto-run.nvim`, discovered via its linked
----worktree's `.git` file). Then the project is the common-dir
----itself, not its parent. Distinguish by the common-dir's basename:
----only a `.git`/`.bare` container means "the project is one dir up".
----Without this, a bare-at-root repo took its PARENT — the workspace
----root — and rendered under the root's name instead of its own.
+---Three layouts, three anchors:
+---  * `.git`/`.bare` **container** (`<project>/.git`, `<project>/.bare`):
+---    the project is the dir above the container. Covers a regular repo's
+---    main worktree and a bare repo in a `.bare` container.
+---  * **bare-at-root** (`is_bare` and NO container — the common-dir IS the
+---    folder, e.g. `auto-run.nvim`, discovered via its worktree's `.git`
+---    file): the project is the common-dir itself.
+---  * **non-bare, non-container** (`git init --separate-git-dir`, whose
+---    common-dir is an arbitrary EXTERNAL metadata dir): the project is the
+---    discovered worktree, NOT the metadata dir. Basename alone cannot tell
+---    this apart from bare-at-root — `is_bare` is what distinguishes them.
 ---@param common_dir string
 ---@param root string
+---@param is_bare boolean
+---@param worktree_dir string?   the working tree the repo was discovered through
 ---@return string
-local function _derive_label(common_dir, root)
-  local project = vim.fn.fnamemodify(common_dir, ":h")
+local function _derive_label(common_dir, root, is_bare, worktree_dir)
   local container = vim.fn.fnamemodify(common_dir, ":t")
-  if container ~= ".git" and container ~= ".bare" then
+  local project
+  if container == ".git" or container == ".bare" then
+    project = vim.fn.fnamemodify(common_dir, ":h")
+  elseif is_bare then
     project = common_dir
+  else
+    project = worktree_dir or vim.fn.fnamemodify(common_dir, ":h")
   end
   if project == root then
     return vim.fn.fnamemodify(project, ":t")
@@ -162,7 +171,7 @@ function M.fan_out(workspace_root, opts)
     end
     results[#results + 1] = {
       common_dir      = info.common_dir,
-      label           = _derive_label(info.common_dir, workspace_root),
+      label           = _derive_label(info.common_dir, workspace_root, info.is_bare, parent_dir),
       sample_worktree = info.is_working_tree and parent_dir or nil,
       is_bare         = info.is_bare,
     }
