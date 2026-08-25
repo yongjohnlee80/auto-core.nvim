@@ -579,6 +579,17 @@ function M.open(opts)
       pcall(vim.keymap.set, "n", "<S-Tab>", function()
         if _state then _state.float:cycle("backward") end
       end, { buffer = b, silent = true, nowait = true, desc = "auto-core.diffview: prev pane" })
+      -- C-l / C-h alias Tab / S-Tab, the family convention for a multi-pane
+      -- float (`worktree.graph`, `log.viewer`): a reader who reaches for h/l to
+      -- move between windows gets the same motion here. Forward and backward,
+      -- not left/right-absolute, so the three keys stay interchangeable and the
+      -- wrap at the ends matches what Tab already does.
+      pcall(vim.keymap.set, "n", "<C-l>", function()
+        if _state then _state.float:cycle("forward") end
+      end, { buffer = b, silent = true, nowait = true, desc = "auto-core.diffview: next pane" })
+      pcall(vim.keymap.set, "n", "<C-h>", function()
+        if _state then _state.float:cycle("backward") end
+      end, { buffer = b, silent = true, nowait = true, desc = "auto-core.diffview: prev pane" })
     end
   end
 
@@ -648,7 +659,10 @@ function M.open(opts)
         local b = float:bufnr(pane)
         if b and vim.api.nvim_buf_is_valid(b) then
           pcall(vim.keymap.set, "n", km.key, function()
-            km.fn()
+            -- The current file is handed to the consumer because its keys fire
+            -- at press time and the file changes under j/k: an open-time capture
+            -- would be stale. `o open this file` is the motivating case.
+            km.fn(M.current_file())
             if M.is_open() then
               _show(_state.idx)
               M._render_footer()
@@ -755,6 +769,18 @@ end
 ---@return boolean
 function M.is_open()
   return _state ~= nil and _state.float ~= nil and _state.float:is_open()
+end
+
+---current_file returns the diff file the view is showing, or nil when closed.
+---
+---The seam a consumer needs to act on "this file": its own keys fire at press
+---time, and the shown file changes under j/k, so nothing an open-time capture
+---holds is still true. Returns the parsed `AutoCoreDiffFile` (path / old_path /
+---new_path / kind), not a copy — read it, do not mutate it.
+---@return AutoCoreDiffFile?
+function M.current_file()
+  if not _state then return nil end
+  return _state.files[_state.idx]
 end
 
 ---_anchor_for_tests resolves an anchor exactly as a keypress would.
