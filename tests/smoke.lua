@@ -3456,6 +3456,40 @@ vim.fn.delete(batr, "rf")
 vim.fn.delete(seed2, "rf")
 graph._reset_for_tests()
 
+-- Regular repo with an EXTERNAL git dir (`git init --separate-git-dir`)
+-- control (Lector PR#7 must-fix). The worktree holds a `.git` FILE pointing
+-- at an arbitrary external metadata dir; `--git-common-dir` returns that
+-- external path and `core.bare` is false. A non-`.git`/`.bare` common-dir
+-- must NOT be assumed bare-at-root: the label is the PROJECT/worktree folder,
+-- never the metadata dir's basename (which is storage topology, not identity).
+local sgd_ws = vim.fs.normalize(vim.fn.tempname() .. "_sgd_ws")
+vim.fn.mkdir(sgd_ws, "p")
+-- Metadata dir lives OUTSIDE the workspace so fan_out(sgd_ws) can't see it
+-- directly and can only discover the repo through its worktree.
+local sgd_meta = vim.fs.normalize(vim.fn.tempname() .. "_sgd_meta")
+local sgd_proj = sgd_ws .. "/project"
+vim.fn.system({ "git", "init", "-q", "--initial-branch=main",
+  "--separate-git-dir=" .. sgd_meta, sgd_proj })
+
+graph._reset_for_tests()
+local sgd_repos = graph.fan_out(sgd_ws)
+local sgd_repo = sgd_repos[1]
+ok("fan_out discovers a --separate-git-dir repo via its worktree",
+  #sgd_repos == 1, "found=" .. #sgd_repos)
+ok("separate-git-dir label is the PROJECT folder, not the metadata dir",
+  sgd_repo ~= nil and sgd_repo.label == "project",
+  "label=" .. tostring(sgd_repo and sgd_repo.label))
+ok("separate-git-dir repo is not flagged bare",
+  sgd_repo ~= nil and sgd_repo.is_bare == false,
+  "is_bare=" .. tostring(sgd_repo and sgd_repo.is_bare))
+ok("separate-git-dir common_dir is the external metadata dir",
+  sgd_repo ~= nil and sgd_repo.common_dir == sgd_meta,
+  sgd_repo and sgd_repo.common_dir)
+
+vim.fn.delete(sgd_ws, "rf")
+vim.fn.delete(sgd_meta, "rf")
+graph._reset_for_tests()
+
 -- Cleanup.
 vim.fn.delete(tmp, "rf")
 graph._reset_for_tests()
