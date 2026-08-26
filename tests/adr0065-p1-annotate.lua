@@ -335,5 +335,77 @@ ok("*** and the pending count survives the trim ***",
   foot7:find("1 pending", 1, true) ~= nil, foot7)
 dv.close()
 
+io.stdout:write("\n[8] the last position is captured on close and reopenable\n")
+do
+  -- Requirement 6: navigate away (open a file, check something) and recall the
+  -- diff where you left it. auto-core owns the position -- which file, which
+  -- line -- and the consumer owns the identity of the diff. So the seam is:
+  -- last_position() on close, and opts.initial to reopen there.
+  local rfiles = gitdiff.parse({
+    "diff --git a/one.lua b/one.lua",
+    "--- a/one.lua",
+    "+++ b/one.lua",
+    "@@ -1,3 +1,3 @@",
+    " a1",
+    "-b1",
+    "+B1",
+    " c1",
+    "diff --git a/two.lua b/two.lua",
+    "--- a/two.lua",
+    "+++ b/two.lua",
+    "@@ -1,3 +1,3 @@",
+    " a2",
+    "-b2",
+    "+B2",
+    " c2",
+  })
+  ok("resume fixture has two files", #rfiles == 2, tostring(#rfiles))
+
+  dv.close()
+  dv.open({ files = rfiles })
+  local st = dv._state_for_tests()
+  local win = st.float:winid("left")
+  vim.api.nvim_set_current_win(win)
+  vim.api.nvim_win_set_cursor(win, { 2, 0 })       -- select file #2
+  vim.api.nvim_exec_autocmds("CursorMoved", { buffer = st.float:bufnr("left") })
+  local prev = st.float:winid("preview")
+  vim.api.nvim_set_current_win(prev)
+  vim.api.nvim_win_set_cursor(prev, { 2, 0 })      -- second rendered row
+  vim.api.nvim_exec_autocmds("CursorMoved", { buffer = st.float:bufnr("preview") })
+
+  local want_path = rfiles[2].new_path or rfiles[2].path
+  dv.close()
+  local pos = dv.last_position()
+  ok("*** last_position() records the file that was shown ***",
+    pos ~= nil and pos.path == want_path, vim.inspect(pos))
+  ok("*** and the cursor line within it ***", pos ~= nil and pos.lnum == 2, vim.inspect(pos))
+
+  dv.open({ files = rfiles, initial = pos })
+  local st2 = dv._state_for_tests()
+  ok("*** opts.initial reopens on the remembered file ***",
+    dv.current_file() ~= nil and (dv.current_file().new_path or dv.current_file().path) == want_path,
+    dv.current_file() and dv.current_file().path)
+  local pw = st2.float:winid("preview")
+  ok("*** and restores the cursor line ***",
+    vim.api.nvim_win_get_cursor(pw)[1] == 2,
+    tostring(vim.api.nvim_win_get_cursor(pw)[1]))
+  dv.close()
+
+  dv.open({ files = rfiles, initial = { path = "does/not/exist.lua", lnum = 3 } })
+  ok("*** an unknown initial path falls back to the first file ***",
+    dv.current_file() ~= nil and dv.current_file().path == rfiles[1].path,
+    dv.current_file() and dv.current_file().path)
+  dv.close()
+
+  local handed
+  dv.open({ files = rfiles, on_close = function(p) handed = p end })
+  local st3 = dv._state_for_tests()
+  local w3 = st3.float:winid("left")
+  vim.api.nvim_set_current_win(w3); vim.api.nvim_win_set_cursor(w3, { 1, 0 })
+  dv.close()
+  ok("*** on_close(pos) receives the captured position ***",
+    handed ~= nil and handed.path ~= nil, vim.inspect(handed))
+end
+
 io.stdout:write(string.format("\n%d passed, %d failed\n", pass, fail))
 os.exit(fail > 0 and 1 or 0)

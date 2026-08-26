@@ -517,8 +517,21 @@ function M.open(opts)
       -- unbounded across a session. `on_close` is the once-only path EVERY
       -- close route converges on.
       for _, b in ipairs(content_bufs) do M._rowmap[b] = nil end
+      -- Snapshot the last position BEFORE dropping _state. Windows are already
+      -- gone here, but the file index and the line (recorded live by the
+      -- content-pane autocmd) are still on _state -- which is exactly why the
+      -- line is tracked as the cursor moves rather than read at close time.
+      local f = _state.files[_state.idx]
+      if f then
+        M._last_position = {
+          path = f.new_path or f.path or f.old_path,
+          lnum = _state.cursor and _state.cursor.lnum or nil,
+          col = _state.cursor and _state.cursor.col or nil,
+        }
+      end
+      local pos = M._last_position
       _state = nil
-      if opts.on_close then pcall(opts.on_close) end
+      if opts.on_close then pcall(opts.on_close, pos) end
     end,
   })
 
@@ -566,6 +579,26 @@ function M.open(opts)
         if row ~= _state.idx then _show(row) end
       end,
     })
+  end
+
+  -- Remember where the reader is, so `last_position()` can hand it back after a
+  -- close (requirement 6: navigate away to check a file, then recall the diff).
+  -- One autocmd per content pane records the line; the file is `_state.idx`.
+  -- Disposed with the float, like the left-pane follower above.
+  for _, pane in ipairs({ "middle", "preview" }) do
+    local cb = float:bufnr(pane)
+    if cb and vim.api.nvim_buf_is_valid(cb) then
+      vim.api.nvim_create_autocmd("CursorMoved", {
+        buffer = cb,
+        callback = function()
+          if not _state then return true end
+          local w = _state.float:winid(pane)
+          if not (w and vim.api.nvim_win_is_valid(w)) then return end
+          local c = vim.api.nvim_win_get_cursor(w)
+          _state.cursor = { pane = pane, lnum = c[1], col = c[2] }
+        end,
+      })
+    end
   end
 
   -- `<Tab>` cycles panes. `float.multi` has always had the method and never a
@@ -674,7 +707,31 @@ function M.open(opts)
     end
   end
 
-  _show(1)
+  -- opts.initial reopens the view where a prior session left it (requirement 6).
+  -- A path that no longer exists in this diff is a SOFT miss -- open at the
+  -- first file, never refuse -- because a stale resume must still show a diff.
+  local start_idx = 1
+  if opts.initial and opts.initial.path then
+    for i, f in ipairs(files) do
+      if (f.new_path or f.path or f.old_path) == opts.initial.path then start_idx = i; break end
+    end
+  end
+  _show(start_idx)
+  -- Move the file-list cursor to the shown file so the two agree.
+  local lw = float:winid("left")
+  if lw and vim.api.nvim_win_is_valid(lw) then
+    pcall(vim.api.nvim_win_set_cursor, lw, { start_idx, 0 })
+  end
+  -- Restore the content-pane line, clamped to what the pane actually holds.
+  if opts.initial and opts.initial.lnum then
+    for _, pane in ipairs({ "middle", "preview" }) do
+      local w, b = float:winid(pane), float:bufnr(pane)
+      if w and b and vim.api.nvim_win_is_valid(w) and vim.api.nvim_buf_is_valid(b) then
+        local last = vim.api.nvim_buf_line_count(b)
+        pcall(vim.api.nvim_win_set_cursor, w, { math.min(opts.initial.lnum, last), 0 })
+      end
+    end
+  end
   return float, nil
 end
 
@@ -781,6 +838,16 @@ end
 function M.current_file()
   if not _state then return nil end
   return _state.files[_state.idx]
+end
+
+---last_position returns where the reader was when the view last closed, or nil
+---if it has never been open. `{ path, lnum, col }` -- the file by path (idx is
+---not stable across a re-parse) and the content-pane line. Pass it straight back
+---as `opts.initial` to reopen there. It survives close (stored on M, not the
+---per-open state), and is overwritten by the next close.
+---@return { path: string, lnum: integer?, col: integer? }?
+function M.last_position()
+  return M._last_position
 end
 
 ---_anchor_for_tests resolves an anchor exactly as a keypress would.
