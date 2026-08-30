@@ -147,7 +147,8 @@ end
 ---winbar are bound to the bufnr `get_buffer()` originally returned.
 ---When a section later does its own `nvim_win_set_buf` (e.g.
 ---auto-finder's dbase view swapping a `shared.loading` placeholder
----for the real dbee drawer in its `vim.schedule`-deferred mount),
+---for the real drawer once its backend answers, in a
+---`vim.schedule`-deferred mount),
 ---the new buffer carries none of those bindings: `0..9` and `q`
 ---don't switch sections / close the panel, and the registry would
 ---next focus() against a stale cached bufnr.
