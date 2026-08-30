@@ -300,53 +300,58 @@ local M = {
     publishers = { "auto-core" },
   },
 
-  -- ── dbase section (auto-finder.dbase wrapping nvim-dbee — ADR 0020) ──
-  -- Lector ADR 0020 §Events + the synthesized preferred method §8
-  -- (white-vision feasibility doc) ratify these six topics for the
-  -- dbase section's event bridge. The bridge subscribes to dbee's
-  -- internal `Handler:register_event_listener` events and forwards
-  -- them here so other auto-family plugins can react without coupling
-  -- to dbee internals.
+  -- ── dbase section (database browsing/querying) ──
+  -- These six topics were registered for the dbase section's original
+  -- nvim-dbee event bridge (ADR 0020). **dbee and that bridge are gone**
+  -- — retired in auto-finder v0.4.0, completing the ADR 0049 → 0052
+  -- Option-C cutover to autodb as the only dbase backend. The topic KEYS
+  -- are a stable cross-plugin contract and stay exactly as they are; only
+  -- the metadata below is corrected to describe who publishes them today.
   --
-  -- Payload shapes below are the contract for slice 2 of Phase 1 to
-  -- conform to; if dbee's actual event payloads expose richer fields
-  -- worth surfacing, extend the payload doc here as an additive
-  -- change and bump the slice 2 wiring accordingly.
+  -- `dbase.connection:changed` is live and published by **autodb**
+  -- (`autodb/lua/autodb/session.lua`, TOPIC_SELECTION).
+  --
+  -- The `dbase.call:*` and `dbase.result:shown` topics currently have
+  -- **no publisher**: the dbee bridge that emitted them was deleted and
+  -- autodb does not yet surface per-call lifecycle. They remain
+  -- registered and reserved so that (a) existing subscribers keep
+  -- resolving, and (b) autodb can adopt them without re-minting names.
+  -- A subscriber to those five will simply never fire today — an honest
+  -- empty `publishers` list is how that is advertised.
   ["dbase.connection:changed"] = {
-    doc = "The active dbee connection switched.",
+    doc = "The active database connection switched.",
     payload = "{ id = string, name = string?, type = string? }",
-    publishers = { "auto-finder.nvim" },
+    publishers = { "autodb" },
   },
-  -- NOTE on `conn_id` on call.* topics: best-effort, may be nil.
-  -- dbee's CallDetails shape (`nvim-dbee/lua/dbee/doc.lua:51-58`) does
-  -- not carry a connection id, so the bridge enriches via
-  -- `get_current_connection()`. For archived calls fired late or while
-  -- a different connection is active, conn_id may not resolve. Marked
-  -- optional per lector review nit §1 (2026-05-16).
+  -- NOTE on `conn_id` on the call.* topics: best-effort, may be nil.
+  -- It was optional because dbee's CallDetails carried no connection id
+  -- and the bridge enriched it after the fact; the field stays optional
+  -- for whoever publishes these next, since a call archived late can
+  -- still outlive the connection it ran under.
   ["dbase.call:started"] = {
-    doc = "A dbee query was submitted (call enters pending/executing state).",
+    doc = "A query was submitted (call enters pending/executing state). No current publisher.",
     payload = "{ call_id = string, conn_id = string?, query = string }",
-    publishers = { "auto-finder.nvim" },
+    publishers = {},
   },
   ["dbase.call:state_changed"] = {
-    doc = "A dbee call's internal state transitioned (e.g. pending → executing → archived). Use this for fine-grained progress UIs; the discrete completed/failed topics below are the standard terminal signals.",
+    doc = "A call's internal state transitioned (e.g. pending → executing → archived). Use this for fine-grained progress UIs; the discrete completed/failed topics below are the standard terminal signals. No current publisher.",
     payload = "{ call_id = string, conn_id = string?, from = string?, to = string }",
-    publishers = { "auto-finder.nvim" },
+    publishers = {},
   },
   ["dbase.call:completed"] = {
-    doc = "A dbee call finished successfully.",
+    doc = "A call finished successfully. No current publisher.",
     payload = "{ call_id = string, conn_id = string?, rows = integer?, duration_ms = integer? }",
-    publishers = { "auto-finder.nvim" },
+    publishers = {},
   },
   ["dbase.call:failed"] = {
-    doc = "A dbee call ended in error.",
+    doc = "A call ended in error. No current publisher.",
     payload = "{ call_id = string, conn_id = string?, err = string }",
-    publishers = { "auto-finder.nvim" },
+    publishers = {},
   },
   ["dbase.result:shown"] = {
-    doc = "The result tile rendered a call's output (or paged within it).",
+    doc = "The result view rendered a call's output (or paged within it). No current publisher.",
     payload = "{ call_id = string, page = integer?, total_pages = integer? }",
-    publishers = { "auto-finder.nvim" },
+    publishers = {},
   },
 
   -- ── doc pinning (md-harpoon — ADR 0006 + auto-core-todos) ───────
