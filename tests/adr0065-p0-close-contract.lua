@@ -124,31 +124,35 @@ do
   ok("[7] *** and its state intact, so the panes still have what drives them ***",
     dv._state_for_tests() ~= nil and dv.current_file() ~= nil,
     tostring(dv.current_file() and dv.current_file().path))
-  -- The REGISTRY half (lector, #15 must-fix). The first fix preserved `_state`
-  -- on veto but let `float:dispose` unregister the instance anyway, so the
-  -- visible float became unreachable by name and a duplicate could be minted.
+  -- The REGISTRY half (lector, #15 r0 must-fix). The first fix preserved
+  -- `_state` on veto but let `float:dispose` unregister the instance anyway, so
+  -- the visible float became unreachable by name and a duplicate could be
+  -- minted. THIS is the load-bearing duplicate-prevention proof: while the
+  -- float is still open after a vetoed close, its name still resolves to the
+  -- SAME handle, so a name-keyed constructor finds it rather than making a
+  -- second. Under the r0 bug `multi.get(NAME)` is nil here.
+  --
+  -- An earlier r1 draft added a `dv.open()` reopen "to prove no duplicate", but
+  -- `open` begins with a programmatic `M.close()` that destroys this very
+  -- handle and starts a fresh lifecycle — so it proved nothing (it passed under
+  -- the bug too) and forced the reason check below to weaken to `contains`
+  -- (lector, #15 r1). Removed: the identity check here already carries it, and
+  -- a real constructor test would call `multi.new` directly, not through the
+  -- wrapper that closes first.
   ok("[7] *** and it is STILL the SAME entry in the registry ***",
     multi.get(NAME) == handle, tostring(multi.get(NAME)))
-  ok("[7] *** so a same-name open does NOT mint a duplicate — it is the same float ***",
-    (function()
-      local before = multi.get(NAME)
-      -- Re-driving open() on a live same-name float must return the existing
-      -- handle, not create a second. dv.open reuses NAME.
-      dv.open({ files = files, annotate = {
-        on_add = function() end, on_remove = function() end,
-        pending = function() return {} end,
-        before_close = function(r) reasons[#reasons + 1] = r; return r == "key" and "cancel" or nil end,
-      } })
-      local after = multi.get(NAME)
-      return after ~= nil and (before == nil or after == before or dv.is_open())
-    end)(), tostring(multi.get(NAME)))
   ok("[7] the hook was consulted with reason=key",
-    reasons[#reasons] == "key" or vim.tbl_contains(reasons, "key"), vim.inspect(reasons))
+    reasons[#reasons] == "key", vim.inspect(reasons))
 
-  -- A second vetoed close must not degrade either — the wrapper is idempotent.
+  -- A SECOND vetoed close, on the SAME handle (no reopen intervened), must not
+  -- degrade — the wrapper is idempotent and still leaves the entry registered.
   dv.close("key")
   ok("[7] a repeated vetoed close is still open with state",
     dv.is_open() == true and dv._state_for_tests() ~= nil)
+  ok("[7] and still the same registry handle after the second veto",
+    multi.get(NAME) == handle, tostring(multi.get(NAME)))
+  ok("[7] the second veto also reported reason=key", reasons[#reasons] == "key",
+    vim.inspect(reasons))
 
   -- "resume" is the reason a consumer uses to finish after its prompt, and it
   -- cannot be vetoed. CONTROL: without this the assertions above would also
