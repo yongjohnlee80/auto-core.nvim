@@ -86,5 +86,56 @@ ok("and the float survived both", k:is_open())
 k:close("resume")
 
 multi._reset_for_tests()
+io.stdout:write("\n[7] diffview.close HONOURS the veto it asked for\n")
+-- The wrapper asked the float to close and then cleared its own `_state` and
+-- disposed the registry entry unconditionally. A consumer whose hook answered
+-- "cancel" therefore kept its WINDOWS (the float layer is correct) while the
+-- state driving them was destroyed: is_open() went false and the panes were
+-- left showing a diff the view no longer knew about. auto-finder only ever
+-- calls close("resume"), which cannot be vetoed, so nothing exercised it.
+do
+  local gitdiff = require("auto-core.git.diff")
+  local dv = require("auto-core.ui.diffview")
+  local files = gitdiff.parse(table.concat({
+    "diff --git a/f.lua b/f.lua", "--- a/f.lua", "+++ b/f.lua",
+    "@@ -1,2 +1,2 @@", " keep", "-old", "+new",
+  }, "\n"))
+  ok("[7] fixture parses", #files == 1, tostring(#files))
+
+  local reasons = {}
+  dv.open({ files = files, annotate = {
+    on_add = function() end, on_remove = function() end,
+    pending = function() return {} end,
+    before_close = function(reason)
+      reasons[#reasons + 1] = reason
+      return reason == "key" and "cancel" or nil
+    end,
+  } })
+  ok("[7] the view opens", dv.is_open() == true)
+
+  dv.close("key")
+  ok("[7] *** a VETOED close leaves the view open ***", dv.is_open() == true,
+    vim.inspect(reasons))
+  ok("[7] *** and its state intact, so the panes still have what drives them ***",
+    dv._state_for_tests() ~= nil and dv.current_file() ~= nil,
+    tostring(dv.current_file() and dv.current_file().path))
+  ok("[7] the hook was consulted with reason=key",
+    reasons[#reasons] == "key", vim.inspect(reasons))
+
+  -- A second vetoed close must not degrade either — the wrapper is idempotent.
+  dv.close("key")
+  ok("[7] a repeated vetoed close is still open with state",
+    dv.is_open() == true and dv._state_for_tests() ~= nil)
+
+  -- "resume" is the reason a consumer uses to finish after its prompt, and it
+  -- cannot be vetoed. CONTROL: without this the assertions above would also
+  -- pass if close() had simply stopped working.
+  dv.close("resume")
+  ok("[7] *** CONTROL: an unvetoable reason still tears the view down ***",
+    dv.is_open() == false and dv._state_for_tests() == nil)
+  ok("[7] and the hook saw that reason too",
+    reasons[#reasons] == "resume", vim.inspect(reasons))
+end
+
 io.stdout:write(string.format("\n%d passed, %d failed\n", pass, fail))
 os.exit(fail > 0 and 1 or 0)

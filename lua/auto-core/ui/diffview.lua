@@ -888,9 +888,28 @@ function M._render_footer()
 end
 
 ---close disposes the view if it is open. Idempotent.
+---close tears the view down. `reason` reaches the consumer's `before_close`
+---hook, and per `Float:close` only `"key"` may be VETOED there.
+---
+---A veto is HONOURED here, which it was not. This wrapper asked the float to
+---close and then cleared `_state` and disposed the registry entry
+---unconditionally — so a consumer whose hook answered "cancel" kept its windows
+---(the float layer respects the veto correctly) while the state those windows
+---are driven from was destroyed underneath them: `is_open()` went false, the
+---row maps and the annotate wiring went away, and the panes were left showing a
+---diff the view no longer knew about. Found by analysis while chasing the
+---review-submit trap, not by the symptom — auto-finder only ever calls
+---`close("resume")`, which cannot be vetoed, so nothing in the family was
+---exercising it (2026-09-02).
+---@param reason string?
 function M.close(reason)
-  if _state and _state.float then
-    pcall(function() _state.float:dispose(reason) end)
+  local float = _state and _state.float
+  if float then
+    pcall(function() float:dispose(reason) end)
+    -- Still open means the hook refused. Leave `_state` exactly as it was: the
+    -- windows are alive and they need it.
+    local ok, open = pcall(function() return float:is_open() end)
+    if ok and open then return end
   end
   _state = nil
   pcall(multi.dispose, NAME)
