@@ -193,10 +193,12 @@ end
 ---2026-08-22) that `skip` pages through.
 ---
 ---Returns the commits plus the resolution, so a caller can render "since
----<base>" versus "last N" honestly instead of guessing which it got.
+---<base>" versus "last N" honestly instead of guessing which it got — and, for
+---a window, whether anything lies past it (`has_more`), so a load-more
+---affordance is offered only when it can do something.
 ---@param common_dir string
 ---@param opts { rev: string, base: string?, limit: integer?, skip: integer? }
----@return AutoCoreCommit[] commits, { mode: string, base: string?, merge_base: string?, limit: integer?, skip: integer? } meta, string? err
+---@return AutoCoreCommit[] commits, { mode: string, base: string?, merge_base: string?, limit: integer?, skip: integer?, has_more: boolean } meta, string? err
 function M.range(common_dir, opts)
   opts = opts or {}
   local rev = opts.rev
@@ -216,9 +218,10 @@ function M.range(common_dir, opts)
         rev = opts.base .. ".." .. rev, skip = skip,
       })
       if not err then
+        -- Complete by definition: `base..rev` is the whole divergence.
         return commits, {
           mode = "since_divergence", base = opts.base,
-          merge_base = mb, skip = skip,
+          merge_base = mb, skip = skip, has_more = false,
         }, nil
       end
       return {}, { mode = "since_divergence", base = opts.base, merge_base = mb }, err
@@ -226,8 +229,24 @@ function M.range(common_dir, opts)
   end
 
   -- Window path: the base branch itself, an unrelated history, or no base.
-  local commits, err = M.commits(common_dir, { rev = rev, limit = limit, skip = skip })
-  return commits, { mode = "window", limit = limit, skip = skip }, err
+  --
+  -- ONE commit past the window is asked for and dropped, so `has_more` is a
+  -- fact rather than a guess. The repos panel used to infer "more to load"
+  -- from the mode alone and offered `m for more commits` on every windowed
+  -- worktree — including a repo with a single commit, where the key could
+  -- never do anything (three of the four repos in one workspace, 2026-09-02).
+  -- Comparing the count against the limit instead would misfire whenever the
+  -- history is an exact multiple of the window; the extra record is free.
+  local bounded = type(limit) == "number" and limit > 0
+  local commits, err = M.commits(common_dir, {
+    rev = rev, limit = bounded and (limit + 1) or limit, skip = skip,
+  })
+  local has_more = false
+  if bounded and #commits > limit then
+    has_more = true
+    commits[#commits] = nil
+  end
+  return commits, { mode = "window", limit = limit, skip = skip, has_more = has_more }, err
 end
 
 ---DEFAULT_WINDOW is the base-branch commit window (ADR-0060 §6.1).
@@ -342,10 +361,21 @@ end
 ---@return AutoCoreWorkingChange[] files, string? err
 function M.commit_files(common_dir, sha)
   if not common_dir or not sha or sha == "" then return {}, "commit_files: needs common_dir and sha" end
-  -- `--no-commit-id --name-status -z -m --first-parent` keeps a merge from
-  -- reporting nothing at all (a plain diff-tree on a merge is empty).
+  -- Two flags keep `diff-tree` from answering "nothing" for a commit that
+  -- changed plenty. Both are no-ops on an ordinary single-parent commit.
+  --
+  --   `-m --first-parent` — a MERGE. A plain diff-tree on a merge prints only
+  --     what differs from EVERY parent, which for a clean merge is nothing.
+  --     `-m` splits it per parent and `--first-parent` keeps "what did this
+  --     merge bring in" — the same pair `graph.show_diff` runs, so the tree
+  --     lists exactly the files the diff view shows.
+  --   `--root` — a ROOT commit. diff-tree has no parent to compare against and
+  --     prints nothing unless told to diff against the empty tree. `git show`
+  --     already does (log.showRoot defaults on), so without this the panel
+  --     said "(no files)" under a repository's first commit while `o` opened
+  --     every file it created (ddex-sftp, 2026-09-02).
   local code, out, errtxt = _run(_git(common_dir, {
-    "diff-tree", "--no-commit-id", "--name-status", "-z", "-r",
+    "diff-tree", "--root", "--no-commit-id", "--name-status", "-z", "-r",
     "-m", "--first-parent", sha,
   }))
   if code ~= 0 then
