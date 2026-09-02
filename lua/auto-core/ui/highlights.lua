@@ -28,6 +28,8 @@
 ---  AutoCoreDiff*          -- Add/Delete/Change/Context/Header/Hunk (ADR-0060)
 ---  AutoCoreGit*           -- Added/Modified/Deleted/Renamed/Untracked/
 ---                            Conflicted: per-file status in the repos tree
+---                            (Modified links to the DERIVED tint
+---                            AutoCoreGitModifiedBg — see DERIVED_TINT)
 ---  AutoCoreReview*        -- Frame/Body/MustFix/ShouldFix/Nit/Question/
 ---                            Resolved: inline review annotations
 ---
@@ -57,11 +59,14 @@ local DEFAULTS = {
   AutoCoreDiffContext     = { link = "Normal",      default = true },
   AutoCoreDiffHeader      = { link = "Title",       default = true },
   AutoCoreDiffHunk        = { link = "Special",     default = true },
-  -- ADR-0060 §2.2: the repos tree's per-file status colours. Johno's scheme is
-  -- deleted RED, modified GREEN, added GREEN with a `+` marker -- so added and
-  -- modified deliberately SHARE the green and the marker distinguishes them.
+  -- ADR-0060 §2.2, colours revised 2026-09-02 (§10): the repos tree's per-file
+  -- status colours — added GREEN, modified YELLOW, deleted RED. Modified used
+  -- to share DiffAdd's green with only the `+` marker telling them apart; it
+  -- now links to AutoCoreGitModifiedBg, a tint DERIVED below from the scheme's
+  -- warning colour, because no built-in Diff* group is reliably yellow. Still
+  -- `default = true`: a scheme that defines AutoCoreGitModified itself wins.
   AutoCoreGitAdded        = { link = "DiffAdd",     default = true },
-  AutoCoreGitModified     = { link = "DiffAdd",     default = true },
+  AutoCoreGitModified     = { link = "AutoCoreGitModifiedBg", default = true },
   AutoCoreGitDeleted      = { link = "DiffDelete",  default = true },
   AutoCoreGitRenamed      = { link = "DiffChange",  default = true },
   AutoCoreGitUntracked    = { link = "DiffAdd",     default = true },
@@ -93,13 +98,61 @@ local DERIVED_BG = {
 -- attribute-less group would be an invisible no-op that reads as "the diff
 -- colouring broke", so we supply our own, chosen to be legible on both a dark
 -- and a light background.
-local FALLBACK_BG = {
-  AutoCoreDiffAddBg    = { dark = "#20303b", light = "#d7f0dd" },
-  AutoCoreDiffDeleteBg = { dark = "#3b2028", light = "#f7d9de" },
+-- Tinted groups: a background BLENDED from a theme foreground. Same idea as
+-- DERIVED_BG, different source — there is no built-in group to copy a
+-- background from.
+--
+-- `AutoCoreGitModifiedBg` is the repos tree's colour for a MODIFIED file:
+-- added GREEN, modified YELLOW, deleted RED (Johno, 2026-09-02, revising
+-- ADR-0060 §2.2, where modified shared the green and only the `+` marker told
+-- them apart). Added/Deleted link to DiffAdd/DiffDelete, whose backgrounds
+-- every scheme themes; nothing in the Diff* family is reliably yellow —
+-- DiffChange and Changed are BLUE in catppuccin, tokyonight and Neovim's own
+-- default — so the yellow is taken from the scheme's warning colour and
+-- blended into Normal's background at about the weight schemes give their own
+-- diff tints (catppuccin-mocha's DiffAdd is its green at ~18%). The result is
+-- a yellow that belongs to the active palette rather than a hardcoded one, and
+-- it sits beside the green and red tints at the same visual weight.
+local DERIVED_TINT = {
+  AutoCoreGitModifiedBg = { from = { "DiagnosticWarn", "WarningMsg" }, ratio = 0.2 },
 }
 
----derive_bg_groups recomputes the background-only diff groups from the ACTIVE
----colorscheme. Idempotent, and safe to call on every `ColorScheme`.
+local FALLBACK_BG = {
+  AutoCoreDiffAddBg     = { dark = "#20303b", light = "#d7f0dd" },
+  AutoCoreDiffDeleteBg  = { dark = "#3b2028", light = "#f7d9de" },
+  -- A transparent scheme gives Normal no background, and a monochrome one may
+  -- give the warning groups no foreground: nothing to blend from.
+  AutoCoreGitModifiedBg = { dark = "#3b3624", light = "#f5ecc4" },
+}
+
+---_blend mixes `fg` into `bg` by `ratio` (0 = bg, 1 = fg). Both are 24-bit RGB
+---integers as `nvim_get_hl` returns them; each channel is rounded.
+local function _blend(fg, bg, ratio)
+  local function channel(shift)
+    local f = bit.band(bit.rshift(fg, shift), 0xff)
+    local b = bit.band(bit.rshift(bg, shift), 0xff)
+    return math.floor(b + (f - b) * ratio + 0.5)
+  end
+  return bit.bor(bit.lshift(channel(16), 16), bit.lshift(channel(8), 8), channel(0))
+end
+
+---_resolved returns a group's EFFECTIVE attributes with links followed, or nil
+---when the group cannot be read. See derive_bg_groups for why `link = false`
+---is load-bearing.
+local function _resolved(name)
+  local ok, hl = pcall(vim.api.nvim_get_hl, 0, { name = name, link = false })
+  if ok and type(hl) == "table" then return hl end
+  return nil
+end
+
+local function _fallback_bg(name)
+  local fb = FALLBACK_BG[name]
+  return (vim.o.background == "light") and fb.light or fb.dark
+end
+
+---derive_bg_groups recomputes the background-only groups from the ACTIVE
+---colorscheme — the DERIVED_BG copies and the DERIVED_TINT blends alike.
+---Idempotent, and safe to call on every `ColorScheme`.
 ---
 ---`link = false` is load-bearing: `nvim_get_hl` DEFAULTS to returning
 ---`{ link = "DiffAdd" }` with no attributes at all, and `AutoCoreDiffAdd` is
@@ -119,16 +172,33 @@ function M.derive_bg_groups()
     if spec then
       pcall(vim.api.nvim_set_hl, 0, name, vim.deepcopy(spec))
     else
-      local bg
-      local ok, hl = pcall(vim.api.nvim_get_hl, 0, { name = source, link = false })
-      if ok and type(hl) == "table" then bg = hl.bg end
-      if not bg then
-        local fb = FALLBACK_BG[name]
-        bg = (vim.o.background == "light") and fb.light or fb.dark
-      end
+      local hl = _resolved(source)
+      local bg = hl and hl.bg or _fallback_bg(name)
       -- No `fg`, deliberately: a line highlight that carries no foreground
       -- cannot compete with treesitter's, whatever the theme does.
       pcall(vim.api.nvim_set_hl, 0, name, { bg = bg })
+    end
+  end
+  for name, tint in pairs(DERIVED_TINT) do
+    local spec = M._overridden[name]
+    if spec then
+      pcall(vim.api.nvim_set_hl, 0, name, vim.deepcopy(spec))
+    else
+      local normal = _resolved("Normal")
+      local base = normal and normal.bg
+      local bg
+      if base then
+        -- First source that carries a foreground wins; the list is ordered
+        -- from the most specifically themed group to the most generic.
+        for _, from in ipairs(tint.from) do
+          local hl = _resolved(from)
+          if hl and hl.fg then
+            bg = _blend(hl.fg, base, tint.ratio)
+            break
+          end
+        end
+      end
+      pcall(vim.api.nvim_set_hl, 0, name, { bg = bg or _fallback_bg(name) })
     end
   end
 end
