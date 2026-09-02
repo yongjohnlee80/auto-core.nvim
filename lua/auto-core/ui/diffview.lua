@@ -416,35 +416,109 @@ local function _anchor_here(visual)
   return { path = f.path, side = side, line = lineno }
 end
 
+---COMPOSE_KEYS is what the composer advertises, in the same `key desc` shape
+---`_render_footer` uses for the view itself.
+local COMPOSE_KEYS = { { "<C-s>", "post" }, { "q / <Esc>", "cancel" } }
+
+---_compose_footer renders COMPOSE_KEYS as border-footer chunks, or nil when the
+---box is too narrow to carry them.
+---
+---Neovim ACCEPTS a footer wider than its window (verified — it does not error),
+---so an oversized one is not refused, it is clipped: the tail goes, and the
+---tail is the cancel key. At every width this view can open at the hints fit —
+---`M.MIN_COLUMNS` is 100 and the box takes 62 columns of it at the narrowest —
+---so this check exists to degrade gracefully if that floor ever drops, rather
+---than to draw half a footer.
+local function _compose_footer(width)
+  local chunks, plain = { { " ", "AutoCoreFloatBorder" } }, " "
+  for i, pair in ipairs(COMPOSE_KEYS) do
+    if i > 1 then
+      chunks[#chunks + 1] = { "   ", "AutoCoreHelpDesc" }
+      plain = plain .. "   "
+    end
+    chunks[#chunks + 1] = { pair[1], "AutoCoreHelpKey" }
+    chunks[#chunks + 1] = { " " .. pair[2], "AutoCoreHelpDesc" }
+    plain = plain .. pair[1] .. " " .. pair[2]
+  end
+  chunks[#chunks + 1] = { " ", "AutoCoreFloatBorder" }
+  plain = plain .. " "
+  if vim.fn.strdisplaywidth(plain) > width then return nil end
+  return chunks
+end
+
 ---_compose asks for a severity and a body, then hands the annotation over.
 ---
 ---The body is a scratch FLOAT, not `vim.ui.input`: a review body is prose and
 ---frequently multi-line, which `vim.ui.input` cannot carry at all.
+---
+---It is SIZED FROM THE EDITOR and CARRIES ITS KEYS in the border footer. The
+---box was a fixed 8 rows by at most 76 columns with nothing on screen naming
+---`<C-s>`, so a reviewer who pressed `c` got a small box and no way to learn
+---how to finish — the keys existed only in this source file (Johno,
+---2026-09-02: "the modal seemed to be too small to begin with, then there was
+---no instruction as to how I can finish and attach my note"). A prose box is
+---where a reviewer spends the most time in this view, and the diff it refers
+---to is hidden behind it, so it takes a share of the editor like every other
+---float in the family — clamped at both ends, since a very wide terminal would
+---otherwise give an unreadable prose column and a short one a box taller than
+---the screen.
 local function _compose(anchor, on_done)
   local a = _state and _state.annotate
   local severities = (a and a.severities) or M.SEVERITIES
   vim.ui.select(severities, { prompt = "severity:" }, function(sev)
     if not sev then return end
+    -- The footer is drawn in AutoCoreHelpKey / AutoCoreHelpDesc, which exist
+    -- only once the registry has run. `open` calls this too, but `_compose` is
+    -- reachable from a test without it.
+    highlights.ensure()
     local buf = vim.api.nvim_create_buf(false, true)
     vim.bo[buf].bufhidden = "wipe"
     vim.bo[buf].filetype = "markdown"
-    local width = math.min(76, math.max(40, math.floor(vim.o.columns * 0.5)))
-    local height = 8
-    local win = vim.api.nvim_open_win(buf, true, {
+    local cols = vim.o.columns
+    -- `lines` counts the whole terminal; the cmdline and the last row are not
+    -- ours to draw over.
+    local rows = math.max(1, vim.o.lines - vim.o.cmdheight - 1)
+    local width = math.max(60, math.min(110, math.floor(cols * 0.62)))
+    local height = math.max(12, math.min(20, math.floor(rows * 0.45)))
+    -- A terminal below the clamp floors still gets a box that fits inside it.
+    width = math.min(width, math.max(20, cols - 4))
+    height = math.min(height, math.max(3, rows - 4))
+    local cfg = {
       relative = "editor", width = width, height = height,
-      row = math.max(0, math.floor((vim.o.lines - height) / 2)),
-      col = math.max(0, math.floor((vim.o.columns - width) / 2)),
+      row = math.max(0, math.floor((rows - height) / 2)),
+      col = math.max(0, math.floor((cols - width) / 2)),
       style = "minimal", border = "rounded",
       title = (" %s · %s:%d "):format(sev, anchor.path, anchor.line),
       title_pos = "center",
-    })
+    }
+    -- The two are set TOGETHER or not at all. A `footer_pos` with no `footer`
+    -- is an error from `nvim_open_win` ("'footer' requires 'footer_pos'"), not
+    -- an ignored field — so passing the position unconditionally turned the
+    -- one case that legitimately has no hints into a thrown keypress. Caught
+    -- by [9]'s 30-column pin, which is the whole reason it is there.
+    local footer = _compose_footer(width)
+    if footer then
+      cfg.footer, cfg.footer_pos = footer, "center"
+    end
+    local win = vim.api.nvim_open_win(buf, true, cfg)
     vim.wo[win].wrap = true
     local function finish(accept)
       local lines = vim.api.nvim_buf_is_valid(buf)
         and vim.api.nvim_buf_get_lines(buf, 0, -1, false) or {}
       if vim.api.nvim_win_is_valid(win) then pcall(vim.api.nvim_win_close, win, true) end
-      if not accept then return end
       local body = vim.trim(table.concat(lines, "\n"))
+      if not accept then
+        -- A cancelled box that held prose is work the reviewer has just lost,
+        -- and the key that cancels sits one keystroke from the key that does
+        -- not: `<Esc>` leaves insert mode, a second `<Esc>` discards. The
+        -- empty-body path below has always announced itself; silence on this
+        -- one was the louder of the two failures.
+        if body ~= "" then
+          vim.notify(("diffview: annotation discarded (%d characters)"):format(#body),
+            vim.log.levels.WARN)
+        end
+        return
+      end
       -- An empty body ABANDONS rather than storing a comment the schema would
       -- later reject. Refusing at the point of entry is the only place the
       -- reviewer still has the context to fix it.
@@ -859,6 +933,17 @@ end
 ---@param visual boolean?
 ---@return table? anchor, string? reason
 function M._anchor_for_tests(visual) return _anchor_here(visual) end
+
+---_compose_for_tests opens the annotation composer exactly as `c` would, so a
+---suite can assert on the box a reviewer actually meets — its size and the keys
+---it advertises — rather than on the keymaps alone.
+---@param anchor table
+---@param on_done fun(annotation: table)
+function M._compose_for_tests(anchor, on_done) return _compose(anchor, on_done) end
+
+---COMPOSE_KEYS_FOR_TESTS is the advertised key list, so a suite pins the footer
+---against the same source the footer is built from.
+M.COMPOSE_KEYS_FOR_TESTS = COMPOSE_KEYS
 
 ---_state_for_tests exposes the live state so a suite can assert on pane
 ---contents without synthesising keypresses.
