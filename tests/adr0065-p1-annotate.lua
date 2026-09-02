@@ -407,5 +407,130 @@ do
     handed ~= nil and handed.path ~= nil, vim.inspect(handed))
 end
 
+io.stdout:write("\n[9] the composer is sized from the editor and advertises its keys\n")
+-- Johno, 2026-09-02: "the modal seemed to be too small to begin with, then
+-- there was no instruction as to how I can finish and attach my note." The box
+-- was a fixed 8x76 and `<C-s>` appeared nowhere on screen. Driven through the
+-- real `_compose`, so the assertions are about the box a reviewer meets.
+do
+  vim.o.columns, vim.o.lines = 200, 50
+  local sel_stub = function(items, _, on_choice) on_choice(items[1]) end
+  local real_select, real_notify = vim.ui.select, vim.notify
+  local notes = {}
+  vim.ui.select = sel_stub
+  vim.notify = function(msg) notes[#notes + 1] = tostring(msg) end
+
+  local function map_cb(buf, mode, lhs)
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, mode)) do
+      -- nvim reports `<C-s>` as `<C-S>`; compare case-insensitively.
+      if type(m.lhs) == "string" and m.lhs:lower() == lhs:lower() and m.callback then
+        return m.callback
+      end
+    end
+  end
+
+  -- The OLD constants, restated here so the pin is against the reported defect
+  -- and not against whatever the implementation currently computes.
+  local WAS_W, WAS_H = 76, 8
+  local anchor = { path = "foo.lua", line = 11, side = "RIGHT" }
+
+  local got
+  dv._compose_for_tests(anchor, function(ann) got = ann end)
+  local win = vim.api.nvim_get_current_win()
+  local buf = vim.api.nvim_win_get_buf(win)
+  local cfg = vim.api.nvim_win_get_config(win)
+  ok("the composer opens a focused float", cfg.relative == "editor", vim.inspect(cfg.relative))
+  ok("*** it is WIDER than the 76 columns Johno called too small ***",
+    cfg.width > WAS_W, ("%d <= %d"):format(cfg.width, WAS_W))
+  ok("*** and TALLER than the 8 rows it was fixed at ***",
+    cfg.height > WAS_H, ("%d <= %d"):format(cfg.height, WAS_H))
+  -- Sized from the editor rather than at a new constant: at 200x50 that is 62%
+  -- of the columns capped at 110, and 45% of the usable rows capped at 20.
+  ok("width is the editor share, capped", cfg.width == 110, tostring(cfg.width))
+  ok("height is the editor share, capped", cfg.height == 20, tostring(cfg.height))
+  ok("the box still fits inside the editor",
+    cfg.width + cfg.col <= vim.o.columns and cfg.height + cfg.row <= vim.o.lines,
+    ("%dx%d at %d,%d"):format(cfg.width, cfg.height, cfg.row, cfg.col))
+  ok("the title still names the severity and the anchor",
+    type(cfg.title) == "table" and tostring(cfg.title[1][1]):find("foo.lua:11", 1, true) ~= nil,
+    vim.inspect(cfg.title))
+
+  -- The footer is the fix for "no instruction": every advertised key must be
+  -- ON the box, sourced from the same list the footer is built from.
+  local footer = ""
+  for _, chunk in ipairs(cfg.footer or {}) do footer = footer .. tostring(chunk[1]) end
+  ok("*** the footer names a POST key and a CANCEL key ***",
+    footer:find("post", 1, true) ~= nil and footer:find("cancel", 1, true) ~= nil,
+    ("%q"):format(footer))
+  local advertised = true
+  for _, pair in ipairs(dv.COMPOSE_KEYS_FOR_TESTS) do
+    if not (footer:find(pair[1], 1, true) and footer:find(pair[2], 1, true)) then
+      advertised = false
+    end
+  end
+  ok("*** and every key it advertises is one the buffer BINDS ***",
+    advertised and map_cb(buf, "n", "<C-s>") ~= nil and map_cb(buf, "i", "<C-s>") ~= nil
+    and map_cb(buf, "n", "q") ~= nil and map_cb(buf, "n", "<Esc>") ~= nil,
+    ("%q"):format(footer))
+  ok("the footer fits the box it is drawn on",
+    vim.fn.strdisplaywidth(footer) <= cfg.width,
+    ("%d > %d"):format(vim.fn.strdisplaywidth(footer), cfg.width))
+
+  -- POST hands the body over and closes.
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "first line", "", "second para" })
+  map_cb(buf, "n", "<C-s>")()
+  ok("*** the advertised post key hands the annotation over ***",
+    got ~= nil and got.body == "first line\n\nsecond para" and got.severity == dv.SEVERITIES[1]
+    and got.line == 11, vim.inspect(got))
+  ok("and it closes the box", not vim.api.nvim_win_is_valid(win))
+
+  -- CANCEL keeps the draft out, and says so rather than losing prose silently.
+  notes, got = {}, nil
+  dv._compose_for_tests(anchor, function(ann) got = ann end)
+  local win2 = vim.api.nvim_get_current_win()
+  local buf2 = vim.api.nvim_win_get_buf(win2)
+  vim.api.nvim_buf_set_lines(buf2, 0, -1, false, { "typed but abandoned" })
+  map_cb(buf2, "n", "q")()
+  ok("*** the advertised cancel key stores nothing ***", got == nil, vim.inspect(got))
+  ok("and the discard is ANNOUNCED, not silent",
+    #notes == 1 and notes[1]:find("discarded", 1, true) ~= nil, vim.inspect(notes))
+  ok("cancel closes the box too", not vim.api.nvim_win_is_valid(win2))
+
+  -- An untouched box is not "lost work": cancelling it says nothing.
+  notes, got = {}, nil
+  dv._compose_for_tests(anchor, function(ann) got = ann end)
+  local win3 = vim.api.nvim_get_current_win()
+  map_cb(vim.api.nvim_win_get_buf(win3), "n", "<Esc>")()
+  ok("cancelling an EMPTY box is silent", got == nil and #notes == 0, vim.inspect(notes))
+
+  -- Posting an empty body still abandons, with the message it always had.
+  notes, got = {}, nil
+  dv._compose_for_tests(anchor, function(ann) got = ann end)
+  local win4 = vim.api.nvim_get_current_win()
+  map_cb(vim.api.nvim_win_get_buf(win4), "n", "<C-s>")()
+  ok("posting an empty body still abandons",
+    got == nil and #notes == 1 and notes[1]:find("abandoned", 1, true) ~= nil,
+    vim.inspect(notes))
+
+  -- A box too narrow to carry the hints drops them rather than drawing half a
+  -- footer. Unreachable through the view (MIN_COLUMNS is 100) — this pins the
+  -- degradation itself.
+  notes, got = {}, nil
+  local cols_before = vim.o.columns
+  vim.o.columns = 30
+  dv._compose_for_tests(anchor, function() end)
+  local win5 = vim.api.nvim_get_current_win()
+  local cfg5 = vim.api.nvim_win_get_config(win5)
+  ok("a 30-column editor still gets a box that fits",
+    cfg5.width <= 30 and cfg5.width + cfg5.col <= 30,
+    ("%d at %d"):format(cfg5.width, cfg5.col))
+  ok("*** and one too narrow for the hints carries none, not half ***",
+    cfg5.footer == nil or #cfg5.footer == 0, vim.inspect(cfg5.footer))
+  map_cb(vim.api.nvim_win_get_buf(win5), "n", "q")()
+  vim.o.columns = cols_before
+
+  vim.ui.select, vim.notify = real_select, real_notify
+end
+
 io.stdout:write(string.format("\n%d passed, %d failed\n", pass, fail))
 os.exit(fail > 0 and 1 or 0)
