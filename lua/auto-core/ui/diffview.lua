@@ -905,9 +905,22 @@ end
 function M.close(reason)
   local float = _state and _state.float
   if float then
-    pcall(function() float:dispose(reason) end)
-    -- Still open means the hook refused. Leave `_state` exactly as it was: the
-    -- windows are alive and they need it.
+    -- CLOSE, not dispose. `Float:dispose` unregisters the instance from the
+    -- multi registry UNCONDITIONALLY — even when the close it wraps was
+    -- vetoed — so disposing here to discover whether the veto held has already
+    -- destroyed the registry entry by the time we look. A vetoed key close then
+    -- leaves the float VISIBLE but unreachable by name: `multi.get(NAME)` is
+    -- nil, a name-based reset cannot reach it, and `multi.new(NAME)` can mint a
+    -- duplicate same-name float. The first cut of this fix preserved `_state`
+    -- on veto but not the registry, because its test looked only at diffview's
+    -- own state (lector, auto-core#15 must-fix, 2026-09-03 — the same repair-
+    -- delta blind spot: the sibling teardown, not the site the finding named).
+    --
+    -- `close(reason)` honours the veto and touches no registry. We unregister
+    -- ONLY once it has actually torn down, via `multi.dispose(NAME)` below —
+    -- which is idempotent against the already-closed float (`_closed` guards
+    -- its second close).
+    pcall(function() float:close(reason) end)
     local ok, open = pcall(function() return float:is_open() end)
     if ok and open then return end
   end

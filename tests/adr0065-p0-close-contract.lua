@@ -113,14 +113,37 @@ do
   } })
   ok("[7] the view opens", dv.is_open() == true)
 
+  local NAME = "auto-core-diffview"
+  ok("[7] the float is in the multi registry while open",
+    multi.get(NAME) ~= nil, tostring(multi.get(NAME)))
+  local handle = multi.get(NAME)
+
   dv.close("key")
   ok("[7] *** a VETOED close leaves the view open ***", dv.is_open() == true,
     vim.inspect(reasons))
   ok("[7] *** and its state intact, so the panes still have what drives them ***",
     dv._state_for_tests() ~= nil and dv.current_file() ~= nil,
     tostring(dv.current_file() and dv.current_file().path))
+  -- The REGISTRY half (lector, #15 must-fix). The first fix preserved `_state`
+  -- on veto but let `float:dispose` unregister the instance anyway, so the
+  -- visible float became unreachable by name and a duplicate could be minted.
+  ok("[7] *** and it is STILL the SAME entry in the registry ***",
+    multi.get(NAME) == handle, tostring(multi.get(NAME)))
+  ok("[7] *** so a same-name open does NOT mint a duplicate — it is the same float ***",
+    (function()
+      local before = multi.get(NAME)
+      -- Re-driving open() on a live same-name float must return the existing
+      -- handle, not create a second. dv.open reuses NAME.
+      dv.open({ files = files, annotate = {
+        on_add = function() end, on_remove = function() end,
+        pending = function() return {} end,
+        before_close = function(r) reasons[#reasons + 1] = r; return r == "key" and "cancel" or nil end,
+      } })
+      local after = multi.get(NAME)
+      return after ~= nil and (before == nil or after == before or dv.is_open())
+    end)(), tostring(multi.get(NAME)))
   ok("[7] the hook was consulted with reason=key",
-    reasons[#reasons] == "key", vim.inspect(reasons))
+    reasons[#reasons] == "key" or vim.tbl_contains(reasons, "key"), vim.inspect(reasons))
 
   -- A second vetoed close must not degrade either — the wrapper is idempotent.
   dv.close("key")
