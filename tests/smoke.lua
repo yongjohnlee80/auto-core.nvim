@@ -1995,87 +1995,68 @@ ok("theme_override applies bg",
 pcall(vim.api.nvim_set_hl, 0, "AutoCoreFloatNormal", { link = "NormalFloat", default = true })
 
 -- ── the repos tree's status colours: added GREEN, modified YELLOW, deleted RED ──
--- (Johno, 2026-09-02). `AutoCoreGitModified` linked to DiffAdd — the same green
--- as added, "the `+` marker distinguishes them" (ADR-0060 §2.2 as shipped) —
--- and a reader could not tell an edit from an addition at a glance. No Diff*
--- group is reliably yellow, so the tint is DERIVED from the scheme's warning
--- colour and blended into Normal's background, like AutoCoreDiffAddBg.
+-- FOREGROUND only (Johno, 2026-09-02, ADR-0060 §10). The tree paints whole rows
+-- with these groups, and a link to DiffAdd/DiffDelete — or to the derived
+-- yellow tint v0.2.8 briefly introduced — paints a BACKGROUND wash that read as
+-- "not so green / not so orange". The groups now link to the Diagnostic*
+-- family, foreground-only by convention and themed by every scheme: the same
+-- groups auto-finder's todos panel uses for its Completed and Deferred headers,
+-- so the two panels agree.
 --
--- Scoped in `do … end`: the main chunk sits near Lua's 200-local ceiling, and
--- these helpers would have pushed it over (E5112).
+-- Scoped in `do … end`: the main chunk sits near Lua's 200-local ceiling.
 do
 highlights._reset_for_tests()
 highlights.ensure()
 local function hl_of(name)
-  local h = vim.api.nvim_get_hl(0, { name = name, link = false })
-  return type(h) == "table" and h or {}
+  local okh, h = pcall(vim.api.nvim_get_hl, 0, { name = name, link = false })
+  return (okh and type(h) == "table") and h or {}
 end
-local function rgb(n)
-  return bit.band(bit.rshift(n, 16), 0xff), bit.band(bit.rshift(n, 8), 0xff), bit.band(n, 0xff)
-end
--- The spec restated independently of the implementation: the warning
--- foreground at 20% over Normal's background, rounded per channel.
-local function tint_of(fg, bg)
-  local fr, fg_, fb = rgb(fg)
-  local br, bg_, bb = rgb(bg)
-  local function mix(f, b) return math.floor(b + (f - b) * 0.2 + 0.5) end
-  return bit.bor(bit.lshift(mix(fr, br), 16), bit.lshift(mix(fg_, bg_), 8), mix(fb, bb))
-end
-local normal_bg = hl_of("Normal").bg
-local warn_fg = hl_of("DiagnosticWarn").fg
-ok("[35] fixture: the default scheme gives Normal a bg and DiagnosticWarn a fg",
-  normal_bg ~= nil and warn_fg ~= nil,
-  ("normal.bg=%s warn.fg=%s"):format(tostring(normal_bg), tostring(warn_fg)))
-local modified = hl_of("AutoCoreGitModified")
-ok("[35] AutoCoreGitModified is the warning yellow at 20% over Normal's background",
-  normal_bg ~= nil and warn_fg ~= nil and modified.bg == tint_of(warn_fg, normal_bg),
-  ("got %s want %s"):format(tostring(modified.bg),
-    tostring(normal_bg and warn_fg and tint_of(warn_fg, normal_bg))))
-do
-  local r, g, b = rgb(modified.bg or 0)
-  ok("[35] and it reads as YELLOW (red and green channels above blue)",
-    modified.bg ~= nil and r > b and g > b, ("r=%d g=%d b=%d"):format(r, g, b))
-end
-ok("[35] modified is no longer the added green",
-  modified.bg ~= nil and modified.bg ~= hl_of("AutoCoreGitAdded").bg,
-  ("modified=%s added=%s"):format(tostring(modified.bg), tostring(hl_of("AutoCoreGitAdded").bg)))
-ok("[35] added and deleted keep their Diff* links",
-  hl_of("AutoCoreGitAdded").bg == hl_of("DiffAdd").bg
-  and hl_of("AutoCoreGitDeleted").fg == hl_of("DiffDelete").fg)
-ok("[35] the tint is not in list(), like every derived group; Modified still is",
-  not vim.tbl_contains(highlights.list(), "AutoCoreGitModifiedBg")
-  and vim.tbl_contains(highlights.list(), "AutoCoreGitModified"))
-
--- The tint follows the scheme. Change the source colour and fire the REAL
--- trigger — the ColorScheme event — rather than calling the derivation by hand.
+local function fg_of(name) return hl_of(name).fg end
+ok("[35] fixture: the default scheme gives DiagnosticOk/Warn/Error a foreground",
+  fg_of("DiagnosticOk") ~= nil and fg_of("DiagnosticWarn") ~= nil and fg_of("DiagnosticError") ~= nil,
+  ("ok=%s warn=%s error=%s"):format(tostring(fg_of("DiagnosticOk")),
+    tostring(fg_of("DiagnosticWarn")), tostring(fg_of("DiagnosticError"))))
+local added, modified, deleted =
+  hl_of("AutoCoreGitAdded"), hl_of("AutoCoreGitModified"), hl_of("AutoCoreGitDeleted")
+ok("[35] added is DiagnosticOk's green",
+  added.fg ~= nil and added.fg == fg_of("DiagnosticOk"),
+  ("added=%s ok=%s"):format(tostring(added.fg), tostring(fg_of("DiagnosticOk"))))
+ok("[35] modified is DiagnosticWarn's yellow",
+  modified.fg ~= nil and modified.fg == fg_of("DiagnosticWarn"),
+  ("modified=%s warn=%s"):format(tostring(modified.fg), tostring(fg_of("DiagnosticWarn"))))
+ok("[35] deleted is DiagnosticError's red",
+  deleted.fg ~= nil and deleted.fg == fg_of("DiagnosticError"),
+  ("deleted=%s error=%s"):format(tostring(deleted.fg), tostring(fg_of("DiagnosticError"))))
+ok("[35] the three are distinguishable by foreground alone",
+  added.fg ~= modified.fg and modified.fg ~= deleted.fg and added.fg ~= deleted.fg,
+  ("added=%s modified=%s deleted=%s"):format(tostring(added.fg), tostring(modified.fg), tostring(deleted.fg)))
+ok("[35] none of them paints a background (the whole-row wash is gone)",
+  added.bg == nil and modified.bg == nil and deleted.bg == nil,
+  ("added.bg=%s modified.bg=%s deleted.bg=%s"):format(tostring(added.bg), tostring(modified.bg), tostring(deleted.bg)))
+ok("[35] untracked shares added's green; renamed has a foreground of its own",
+  hl_of("AutoCoreGitUntracked").fg == added.fg
+  and hl_of("AutoCoreGitRenamed").fg ~= nil and hl_of("AutoCoreGitRenamed").fg ~= added.fg,
+  ("untracked=%s renamed=%s"):format(tostring(hl_of("AutoCoreGitUntracked").fg),
+    tostring(hl_of("AutoCoreGitRenamed").fg)))
+-- The v0.2.8 tint is gone: not registered, not derived, not listed.
+ok("[35] AutoCoreGitModifiedBg is no longer defined, derived or listed",
+  vim.tbl_isempty(hl_of("AutoCoreGitModifiedBg"))
+  and not vim.tbl_contains(highlights.list(), "AutoCoreGitModifiedBg"),
+  vim.inspect(hl_of("AutoCoreGitModifiedBg")))
+-- A LINK, not a copy: the colour follows the scheme immediately, with no
+-- derivation step for a ColorScheme event to have to re-run.
 local warn_before = hl_of("DiagnosticWarn")
 vim.api.nvim_set_hl(0, "DiagnosticWarn", { fg = "#ff00ff" })
-vim.cmd("doautocmd ColorScheme")
-ok("[35] a ColorScheme event re-derives the tint from the scheme's new warning colour",
-  normal_bg ~= nil and hl_of("AutoCoreGitModifiedBg").bg == tint_of(0xff00ff, normal_bg),
-  tostring(hl_of("AutoCoreGitModifiedBg").bg))
+ok("[35] modified follows the scheme's warning colour live (it is a link)",
+  hl_of("AutoCoreGitModified").fg == 0xff00ff, tostring(hl_of("AutoCoreGitModified").fg))
 pcall(vim.api.nvim_set_hl, 0, "DiagnosticWarn", warn_before)
-
--- A transparent scheme (Normal without a bg) has nothing to blend into: the
--- constant fallback, not an invisible attribute-less group.
-local normal_before = hl_of("Normal")
-vim.api.nvim_set_hl(0, "Normal", { fg = normal_before.fg })
-vim.cmd("doautocmd ColorScheme")
-ok("[35] with no Normal background the tint falls back to the built-in dark constant",
-  hl_of("AutoCoreGitModifiedBg").bg == 0x3b3624, tostring(hl_of("AutoCoreGitModifiedBg").bg))
-pcall(vim.api.nvim_set_hl, 0, "Normal", normal_before)
-vim.cmd("doautocmd ColorScheme")
-ok("[35] restoring Normal restores the derived tint",
-  normal_bg ~= nil and warn_fg ~= nil
-  and hl_of("AutoCoreGitModifiedBg").bg == tint_of(warn_fg, normal_bg),
-  tostring(hl_of("AutoCoreGitModifiedBg").bg))
-
--- theme_override beats derivation and survives the event — the existing
--- contract for AutoCoreDiffAddBg, extended to the tint.
-highlights.theme_override("AutoCoreGitModifiedBg", { bg = "#123456" })
-vim.cmd("doautocmd ColorScheme")
-ok("[35] theme_override on the tint survives a ColorScheme re-derivation",
-  hl_of("AutoCoreGitModifiedBg").bg == 0x123456, tostring(hl_of("AutoCoreGitModifiedBg").bg))
+-- theme_override still beats the default link — the existing contract.
+highlights.theme_override("AutoCoreGitModified", { fg = "#123456" })
+ok("[35] theme_override on a status group wins over its default link",
+  hl_of("AutoCoreGitModified").fg == 0x123456, tostring(hl_of("AutoCoreGitModified").fg))
+-- Put the default link back by hand: `ensure()` registers with `default = true`,
+-- which by design never overwrites a group that is already defined.
+pcall(vim.api.nvim_set_hl, 0, "AutoCoreGitModified", { link = "DiagnosticWarn" })
 highlights._reset_for_tests()
 highlights.ensure()
 end
@@ -11779,6 +11760,20 @@ print("\n[gitlog] auto-core.git.log — structured history + working changes (AD
   ok("[gitlog] an explicit limit is honoured in window mode",
     #wc == 1 and wmeta.limit == 1)
 
+  -- `has_more` is a FACT, not the count-versus-limit guess (2026-09-02): the
+  -- window asks git for one commit past itself and drops it. The panel offered
+  -- `m for more commits` on every windowed worktree before, so a one-commit repo
+  -- showed a key that could never do anything.
+  ok("[gitlog] a full window reports has_more=true and does NOT return the extra commit",
+    #wc == 1 and wmeta.has_more == true, vim.inspect(wmeta))
+  ok("[gitlog] a window that exhausts the history reports has_more=false",
+    #bc == 2 and bmeta.has_more == false, vim.inspect(bmeta))
+  local xc, xmeta = glog.range(common, { rev = "main", base = "main", limit = 2 })
+  ok("[gitlog] a window EXACTLY the size of the history is not 'more' (the count guess would say it is)",
+    #xc == 2 and xmeta.has_more == false, vim.inspect(xmeta))
+  ok("[gitlog] a divergence range is complete by definition: has_more=false",
+    meta.has_more == false, vim.inspect(meta))
+
   -- an unrelated history shares no merge-base -> window, not a crash
   local nb, nmeta = glog.range(common, { rev = "feature", base = "refs/heads/does-not-exist" })
   ok("[gitlog] a missing base degrades to a window", nmeta.mode == "window" and #nb > 0,
@@ -11830,6 +11825,14 @@ print("\n[gitlog] auto-core.git.log — structured history + working changes (AD
   ok("[gitlog] and labels it with the same kind vocabulary",
     cf[1] and cf[1].kind == "added", cf[1] and cf[1].kind)
   ok("[gitlog] commit_files() guards a nil sha", select(2, glog.commit_files(common, nil)) ~= nil)
+  -- A ROOT commit has no parent for diff-tree to compare against, and without
+  -- `--root` git prints nothing: the panel said "(no files)" under a repo's
+  -- first commit while `o` — a `git show`, which shows the root by default —
+  -- listed every file (ddex-sftp, 2026-09-02).
+  local root_files, rooterr = glog.commit_files(common, base_sha)
+  ok("[gitlog] commit_files() lists a ROOT commit's files (--root)",
+    rooterr == nil and #root_files == 1 and root_files[1].path == "a.txt"
+    and root_files[1].kind == "added", vim.inspect(root_files))
 
   -- ── async variants deliver on the main loop ──
   local acommits, aerr, adone
@@ -12092,6 +12095,27 @@ print("\n[gitdiff] auto-core.git.diff — unified-diff parsing (ADR-0060 P2)")
     ok("[gitdiff] a single-parent commit's diff is unchanged by the merge flags",
       vim.deep_equal(graph.show_diff(gdir, sha),
         vim.fn.systemlist({ "git", "--git-dir=" .. gdir, "show", "-p", "--no-color", sha })))
+
+    -- ── a ROOT commit (2026-09-02): the tree said "(no files)", `o` listed every file ──
+    -- diff-tree prints nothing for a parentless commit unless told `--root`;
+    -- `git show` shows the root by default. Same two-surface invariant as the
+    -- merge: what commit_files LISTS is exactly what the diff SHOWS.
+    local rsha = vim.trim(vim.fn.system({ "git", "-C", repo, "rev-list", "--max-parents=0", "HEAD" }))
+    ok("[gitdiff] fixture: the history has exactly one root commit", #rsha == 40, rsha)
+    -- CONTROL: the OLD argv really does yield nothing here, so the assertions
+    -- below are able to fail.
+    local bare = vim.fn.system({ "git", "--git-dir=" .. gdir, "diff-tree", "--no-commit-id",
+      "--name-status", "-z", "-r", "-m", "--first-parent", rsha })
+    ok("[gitdiff] control: diff-tree WITHOUT --root prints nothing for the root commit",
+      vim.v.shell_error == 0 and bare == "", ("%d bytes"):format(#bare))
+    local rwant = vim.tbl_map(function(f) return f.path end, (gitlog.commit_files(gdir, rsha)))
+    ok("[gitdiff] commit_files lists the root commit's file (--root)",
+      vim.deep_equal(rwant, { "f.txt" }), vim.inspect(rwant))
+    graph.clear_repo_cache(gdir)
+    local rdf = D.parse(graph.show_diff(gdir, rsha))
+    ok("[gitdiff] the root commit's diff answers for EXACTLY the files commit_files lists",
+      #rdf > 0 and vim.deep_equal(vim.tbl_map(function(f) return f.path end, rdf), rwant),
+      vim.inspect({ diff = names(rdf), listed = rwant }))
   else
     print("  SKIP  real-git diff (git unavailable)")
   end
