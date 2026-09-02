@@ -10,7 +10,8 @@
 ---
 ---  fan_out(workspace_root, opts?)  → repos[]   multi-repo discovery
 ---  show_stat(common_dir, hash)     → string[]  cursor-preview cache
----  show_diff(common_dir, hash)     → string[]  full-diff cache
+---  show_diff(common_dir, hash)     → string[]  full-diff cache (a merge diffs
+---                                              against its FIRST parent)
 ---  working_diff(worktree)          → string[]  UNCACHED working-tree diff
 ---
 ---Caching:
@@ -39,6 +40,29 @@ local _diff_cache = {}
 
 local function _cache_key(common_dir, hash)
   return common_dir .. ":" .. hash
+end
+
+---_show_diff_argv is the ONE argv both `show_diff` and `show_diff_async` run,
+---so the two cannot drift apart.
+---
+---`-m --first-parent` is load-bearing for MERGE commits. A plain `git show -p`
+---on a merge prints a COMBINED diff (`--cc`): only the hunks that differ from
+---EVERY parent, which for a clean merge is nothing at all. `diff.parse` then
+---returned zero files and the repos panel said "no diff" for exactly the
+---commits a PR workflow puts on `main` (auto-finder, 2026-09-02).
+---`log.commit_files` already lists a merge's files with
+---`diff-tree -m --first-parent`; the diff must answer for the SAME files, or
+---the tree lists what the view cannot show. `-m` splits the merge into one
+---diff per parent and `--first-parent` keeps the one against the branch it
+---landed on — "what did this merge bring in". Both flags are no-ops on a
+---single-parent commit, so every other diff is byte-identical to before.
+---Needs git >= 2.31 (2021) for `--first-parent` to select the diff under
+---`git show`; older gits emit a diff per parent instead.
+local function _show_diff_argv(common_dir, hash)
+  return {
+    "git", "--git-dir=" .. common_dir,
+    "show", "-p", "-m", "--first-parent", "--no-color", hash,
+  }
 end
 
 -- ── fan_out: multi-repo discovery ────────────────────────────
@@ -249,10 +273,7 @@ function M.show_diff(common_dir, hash)
   local key = _cache_key(common_dir, hash)
   local lines = _diff_cache[key]
   if lines then return lines end
-  local out = vim.fn.systemlist({
-    "git", "--git-dir=" .. common_dir,
-    "show", "-p", "--no-color", hash,
-  })
+  local out = vim.fn.systemlist(_show_diff_argv(common_dir, hash))
   if vim.v.shell_error ~= 0 then
     lines = { "(auto-core.git.graph: git show -p failed)", "" }
     vim.list_extend(lines, out)
@@ -421,10 +442,8 @@ function M.show_diff_async(common_dir, hash, cb)
     vim.schedule(function() cb({}) end)
     return
   end
-  _show_async("diff", {
-    "git", "--git-dir=" .. common_dir,
-    "show", "-p", "--no-color", hash,
-  }, "(auto-core.git.graph: git show -p failed)",
+  _show_async("diff", _show_diff_argv(common_dir, hash),
+    "(auto-core.git.graph: git show -p failed)",
     _cache_key(common_dir, hash), cb)
 end
 
