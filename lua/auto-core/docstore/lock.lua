@@ -345,7 +345,16 @@ function M.with_lock(path, fn, opts)
     end
   end
 
-  if not ok then return nil, "with_lock: " .. tostring(value) end
+  if not ok then
+    -- BOTH failures, or the recovery fact is lost. A raising callback plus a
+    -- failed unlink reported only "body exploded" while the lock stayed on
+    -- disk, so the caller was never told the store was wedged -- the warning
+    -- log knew and the caller did not (lector MF2). The two failures are
+    -- independent and the conjunction is the dangerous case.
+    local merged = "with_lock: " .. tostring(value)
+    if release_err then merged = merged .. " | " .. release_err end
+    return nil, merged
+  end
   -- A release anomaly is a FAILED operation: nil first, error second, and the
   -- body's completed value carried in a third slot so a diagnostic can still
   -- report what got done. Returning the value in the success slot let a caller

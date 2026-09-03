@@ -185,20 +185,24 @@ function M.rev_exists(common_dir, rev)
   return code == 0
 end
 
----unpushed returns the set of commit shas reachable from `rev` that no REMOTE
----ref contains.
+---unpushed returns the set of commit shas reachable from `rev` that the target
+---REMOTE does not contain.
 ---
----`--not --remotes` asks git the question directly: which of these commits does
----no remote-tracking ref reach? That is the honest form of "have I pushed this
----yet", and it is deliberately not `@{upstream}..HEAD` — a branch with no
----upstream configured makes that form fail outright, and a commit pushed to a
----DIFFERENT remote branch would still be reported as local.
+---SCOPED TO ONE REMOTE, `origin` by default. `--not --remotes` subtracts EVERY
+---remote-tracking ref, so a commit pushed only to a personal fork counted as
+---pushed while no `origin/*` ref contained it — and the question the panel asks,
+---in Johno's words, is whether a commit is "pushed to the origin" (lector MF6).
+---Pass `opts.remote` for a repo whose canonical remote is named something else.
+---
+---Deliberately not `@{upstream}..HEAD`: a branch with no upstream configured
+---makes that form fail outright, and it answers a narrower question (this
+---branch's upstream) than "does the remote have this commit at all".
 ---
 ---A SET, not a list, because every caller asks "is this one pushed?" per row.
----An empty set is also the answer when the repo has no remotes at all: nothing
----is pushed, and the caller renders every hash as local — which is true.
+---An empty set is also the answer when the remote has no refs — nothing is
+---pushed — and the caller renders every hash as local, which is true.
 ---@param common_dir string
----@param opts { rev: string?, limit: integer? }?
+---@param opts { rev: string?, limit: integer?, remote: string? }?
 ---@return table<string, boolean> unpushed, string? err
 function M.unpushed(common_dir, opts)
   opts = opts or {}
@@ -207,7 +211,11 @@ function M.unpushed(common_dir, opts)
     return {}, "unpushed: needs common_dir"
   end
   if not rev or rev == "" then rev = "HEAD" end
-  local args = { "rev-list", rev, "--not", "--remotes" }
+  local remote = opts.remote
+  if type(remote) ~= "string" or remote == "" then remote = "origin" end
+  -- `--remotes=<pattern>` matches refs under refs/remotes/<pattern>; the
+  -- trailing `/*` keeps `origin` from also matching `origin-mirror`.
+  local args = { "rev-list", rev, "--not", "--remotes=" .. remote .. "/*" }
   if opts.limit and opts.limit > 0 then
     args[#args + 1] = "--max-count=" .. tostring(opts.limit)
   end

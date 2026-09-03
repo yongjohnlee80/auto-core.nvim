@@ -104,6 +104,15 @@ do
   end)())
   ok("[1] list of a missing directory is empty, not an error",
     #ds.list(sb .. "/nope") == 0)
+  ok("[1] glob finds files, sorted, and never directories", (function()
+    ds.write(sb .. "/g/a/one.md", "1")
+    ds.write(sb .. "/g/b/two.md", "2")
+    ds.ensure_dir(sb .. "/g/c/three.md")   -- a DIRECTORY that matches
+    local hits = ds.glob(sb .. "/g/*/*.md")
+    return #hits == 2 and hits[1]:find("one%.md$") and hits[2]:find("two%.md$")
+  end)(), vim.inspect(ds.glob(sb .. "/g/*/*.md")))
+  ok("[1] glob guards an empty pattern and returns {} for no matches",
+    #ds.glob("") == 0 and #ds.glob(sb .. "/g/nope/*.md") == 0)
   ok("[1] kind names what is at a path, and nil means ABSENT", (function()
     ds.write(sb .. "/k/f.txt", "x")
     ds.ensure_dir(sb .. "/k/d")
@@ -644,6 +653,20 @@ do
         local mv, merr = ds.read(dir .. "/mf2-not-here.json")
         return mv == nil and merr == nil
       end)())
+    ok("[4] *** MF2: a stat that fails for EACCES is an error, not absence ***",
+      (function()
+        -- The mode-000 FILE above exercises the io.open branch: stat succeeds
+        -- on a file whose own permissions are stripped. Only a locked PARENT
+        -- exercises the stat branch, and without this the ENOENT check there
+        -- could be deleted with no test noticing.
+        local locked = dir .. "/mf2-locked-dir"
+        ds.write(locked .. "/inside.json", "{}")
+        vim.fn.system({ "chmod", "000", locked })
+        local v2, e2 = ds.read(locked .. "/inside.json")
+        local jv, je = ds.read_json(locked .. "/inside.json")
+        vim.fn.system({ "chmod", "755", locked })
+        return v2 == nil and e2 ~= nil and jv == nil and je ~= nil
+      end)())
     ok("[4] MF2: and a readable document is unaffected",
       (ds.read_json(locked) or {}).a == 1, recoverable)
   end
@@ -1042,6 +1065,80 @@ do
     uv.fs_unlink = real_unlink
     return okd == false and err ~= nil
   end)())
+end
+
+io.stdout:write("\n[6] CONTROLS for r2 (lector final review)\n")
+do
+  local uv = vim.uv or vim.loop
+  local dir = sb .. "/r3"
+  ds.ensure_dir(dir)
+
+  -- MF1 -- the revision is validated at the PUBLIC boundary, in every verb.
+  local h = rv.open({ dir = dir, key = "safe", suffix = ".json" })
+  local BAD = { false, true, "garbage", 0, -1, 1.5, 0/0, math.huge, nil, {}, "" }
+  ok("[6] *** MF1: no bad revision ALIASES to r1 through any verb ***",
+    (function()
+      -- `tonumber(revision) or 1` made claim(false) and claim("garbage") both
+      -- take r1, and 0/-1 created key.r0/key.r-1 -- names outside the namespace
+      -- `_scan` tracks, so the allocator could create claims it could neither
+      -- count nor retire.
+      for _, bad in ipairs({ false, true, "garbage", 0, -1, 1.5, math.huge }) do
+        if h:record_path(bad) ~= nil then return false, "record_path " .. tostring(bad) end
+        if h:reserve_path(bad) ~= nil then return false, "reserve_path " .. tostring(bad) end
+        if h:tombstone_path(bad) ~= nil then return false, "tombstone_path " .. tostring(bad) end
+        if h:committed(bad) ~= false then return false, "committed " .. tostring(bad) end
+        if h:owns(bad, "t") ~= false then return false, "owns " .. tostring(bad) end
+        if h:release(bad, "t") ~= false then return false, "release " .. tostring(bad) end
+        local c, cerr = h:claim(bad, "t")
+        if c ~= false or cerr ~= rv.REVISION_ERR then return false, "claim " .. tostring(bad) end
+        local t, terr, f = h:retire(bad, "t")
+        if t ~= false or terr ~= rv.REVISION_ERR or f ~= false then
+          return false, "retire " .. tostring(bad)
+        end
+      end
+      return true
+    end)())
+  ok("[6] *** MF1: and NO record is created for any of them ***",
+    #ds.list(dir, "^safe%.") == 0, vim.inspect(ds.list(dir)))
+  ok("[6] MF1: nan and the infinities are refused too", (function()
+    local nan = 0 / 0
+    return h:record_path(nan) == nil and h:record_path(math.huge) == nil
+      and h:record_path(-math.huge) == nil
+  end)())
+  ok("[6] MF1: a VALID revision still works, and a numeric string is accepted",
+    h:record_path(3) == dir .. "/safe.r3.json"
+    and h:record_path("3") == dir .. "/safe.r3.json")
+  ok("[6] MF1: nil is refused rather than defaulting", h:record_path(nil) == nil)
+  ok("[6] CONTROL: after all that, the allocator still starts at r1",
+    select(1, h:claim_next()) == 1)
+
+  -- MF2 -- a raising body AND a failed release: both facts, one error.
+  ok("[6] *** MF2: a throw plus a failed unlink reports BOTH ***", (function()
+    local guarded = dir .. "/mf2.txt"
+    local lockpath = guarded .. ".lock"
+    local real_unlink = uv.fs_unlink
+    uv.fs_unlink = function(path, ...)
+      if path == lockpath then return nil, "forced unlink failure" end
+      return real_unlink(path, ...)
+    end
+    local v, err = ds.with_lock(guarded, function() error("body exploded") end)
+    uv.fs_unlink = real_unlink
+    local wedged = ds.exists(lockpath)
+    ds.delete(lockpath)
+    -- r2 reported only "body exploded" while the lock stayed on disk, so the
+    -- caller was never told the store was wedged. The conjunction is the
+    -- dangerous case, and each failure alone was already covered.
+    return v == nil and err ~= nil
+      and tostring(err):find("body exploded", 1, true) ~= nil
+      and tostring(err):find("COULD NOT be released", 1, true) ~= nil
+      and wedged == true
+  end)())
+  ok("[6] MF2: a throw with a CLEAN release still reports just the throw",
+    (function()
+      local v, err = ds.with_lock(dir .. "/mf2b.txt", function() error("just me") end)
+      return v == nil and tostring(err):find("just me", 1, true)
+        and tostring(err):find("COULD NOT be released", 1, true) == nil
+    end)())
 end
 
 vim.fn.delete(sb, "rf")

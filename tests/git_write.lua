@@ -573,6 +573,45 @@ end)()
   ok("[8] *** pushed to ANOTHER remote branch still counts as pushed ***",
     side[third] ~= true, vim.inspect(side))
 
+  -- MF6: "pushed" means pushed to ORIGIN, not reachable from ANY remote. With
+  -- origin behind and the commit pushed only to a fork, `--not --remotes`
+  -- subtracted the fork's ref too and the panel painted it as pushed.
+  do
+    local fork = vim.fn.tempname()
+    vim.fn.mkdir(fork, "p")
+    vim.system({ "git", "init", "-q", "--bare", fork }, { text = true }):wait()
+    vim.system({ "git", "-C", d, "remote", "add", "fork", fork }, { text = true }):wait()
+    vim.fn.writefile({ "FORK ONLY" }, d .. "/a.txt")
+    sync(function(cb) W.stage(d, "a.txt", cb) end)
+    sync(function(cb) W.commit(d, "fork only", nil, cb) end)
+    local forked = vim.trim(vim.system({ "git", "-C", d, "rev-parse", "HEAD" },
+      { text = true }):wait().stdout or "")
+    vim.system({ "git", "-C", d, "push", "-q", "fork", "HEAD:refs/heads/main" },
+      { text = true }):wait()
+    local og = L.unpushed(d .. "/.git")
+    ok("[8] *** MF6: pushed to a FORK only is still UNPUSHED to origin ***",
+      og[forked] == true, vim.inspect(og))
+    ok("[8] MF6: and an explicit remote= scopes it to that remote instead",
+      (L.unpushed(d .. "/.git", { remote = "fork" }))[forked] ~= true)
+    ok("[8] MF6: a remote name is not a PREFIX match (origin vs origin-mirror)",
+      (function()
+        -- `--remotes=origin` alone would also match `origin-mirror/*`, so a
+        -- mirror could report a commit as pushed to origin.
+        local mirror = vim.fn.tempname(); vim.fn.mkdir(mirror, "p")
+        vim.system({ "git", "init", "-q", "--bare", mirror }, { text = true }):wait()
+        vim.system({ "git", "-C", d, "remote", "add", "origin-mirror", mirror },
+          { text = true }):wait()
+        vim.fn.writefile({ "MIRROR ONLY" }, d .. "/a.txt")
+        sync(function(cb) W.stage(d, "a.txt", cb) end)
+        sync(function(cb) W.commit(d, "mirror only", nil, cb) end)
+        local m = vim.trim(vim.system({ "git", "-C", d, "rev-parse", "HEAD" },
+          { text = true }):wait().stdout or "")
+        vim.system({ "git", "-C", d, "push", "-q", "origin-mirror",
+          "HEAD:refs/heads/main" }, { text = true }):wait()
+        return (L.unpushed(d .. "/.git"))[m] == true
+      end)())
+  end
+
   ok("[8] an empty common_dir is refused, not guessed",
     select(2, L.unpushed("")) ~= nil)
   ok("[8] an unknown rev yields no answer rather than a crash", (function()

@@ -311,6 +311,24 @@ function M.delete(path)
   return true, nil
 end
 
+---glob returns the paths matching a shell-style pattern, sorted.
+---
+---auto-core owns filesystem reads, so a caller that must SEARCH for documents
+---asks here rather than reaching for `vim.fn.glob` itself — which is how a
+---delegate module quietly grows its own I/O back (AC1). Files only: a directory
+---matching the pattern is not a document, the same rule `list` follows.
+---@param pattern string
+---@return string[]
+function M.glob(pattern)
+  if type(pattern) ~= "string" or pattern == "" then return {} end
+  local out = {}
+  for _, path in ipairs(vim.fn.glob(pattern, false, true) or {}) do
+    if M.kind(path) == "file" then out[#out + 1] = path end
+  end
+  table.sort(out)
+  return out
+end
+
 ---list returns the entry names in `dir`, optionally filtered by a Lua pattern.
 ---Names only, sorted, never paths — the caller owns path construction.
 ---@param dir string

@@ -268,11 +268,37 @@ function M.open(opts)
   return h, nil
 end
 
+---_rev validates a revision at the PUBLIC BOUNDARY: an integer >= 1, or nil.
+---
+---`tonumber(revision) or 1` silently ALIASED every unusable value to revision 1
+---— `claim(false, tok)` and `claim("garbage", tok)` both took r1 — while `0` and
+---`-1` created `key.r0.reserve` and `key.r-1.reserve`, names outside the
+---positive namespace `_scan` tracks. The allocator could therefore create
+---claims it could neither count nor retire (lector MF1).
+---
+---Returns nil rather than raising, and every verb below refuses on nil, so the
+---check cannot be bypassed by reaching for a different verb.
+---@param revision any
+---@return integer?
+local function _rev(revision)
+  if type(revision) == "boolean" then return nil end
+  local n = tonumber(revision)
+  if type(n) ~= "number" then return nil end
+  -- Rejects nan (n ~= n), the infinities, fractions and everything below 1.
+  if n ~= n or n == math.huge or n == -math.huge then return nil end
+  if n < 1 or n ~= math.floor(n) then return nil end
+  return math.floor(n)
+end
+
+M.REVISION_ERR = "revision must be an integer >= 1"
+
 ---_base is the shared stem of all three record kinds for one revision.
 ---@param revision integer
----@return string
+---@return string?
 function Handle:_base(revision)
-  return string.format("%s.r%d", _own(self).key, tonumber(revision) or 1)
+  local r = _rev(revision)
+  if not r then return nil end
+  return string.format("%s.r%d", _own(self).key, r)
 end
 
 ---record_path names a COMMITTED record, using the handle's suffix.
@@ -280,20 +306,26 @@ end
 ---@return string
 function Handle:record_path(revision)
   local p = _own(self)
-  return p.dir .. "/" .. self:_base(revision) .. p.suffix
+  local base = self:_base(revision)
+  if not base then return nil end
+  return p.dir .. "/" .. base .. p.suffix
 end
 
 ---reserve_path / tombstone_path name the two control records.
 ---@param revision integer
 ---@return string
 function Handle:reserve_path(revision)
-  return _own(self).dir .. "/" .. self:_base(revision) .. M.RESERVE_SUFFIX
+  local base = self:_base(revision)
+  if not base then return nil end
+  return _own(self).dir .. "/" .. base .. M.RESERVE_SUFFIX
 end
 
 ---@param revision integer
 ---@return string
 function Handle:tombstone_path(revision)
-  return _own(self).dir .. "/" .. self:_base(revision) .. M.TOMBSTONE_SUFFIX
+  local base = self:_base(revision)
+  if not base then return nil end
+  return _own(self).dir .. "/" .. base .. M.TOMBSTONE_SUFFIX
 end
 
 ---token mints an opaque claim token.
@@ -384,8 +416,10 @@ end
 ---@param revision integer
 ---@return boolean
 function Handle:committed(revision)
+  local r = _rev(revision)
+  if not r then return false end
   local kinds = self:_scan()
-  return (kinds[tonumber(revision) or -1] or {}).committed == true
+  return (kinds[r] or {}).committed == true
 end
 
 ---_reservation reads the reservation at `revision` and CLASSIFIES it.
@@ -398,6 +432,7 @@ end
 function Handle:_reservation(revision)
   local store = _store()
   local path = self:reserve_path(revision)
+  if not path then return nil, M.REVISION_ERR, "indeterminate" end
   local data, err = store.read_json(path)
   if err then return nil, err, "indeterminate" end
   if data == nil then return nil, nil, "absent" end
@@ -417,6 +452,7 @@ end
 ---@param token string
 ---@return boolean
 function Handle:owns(revision, token)
+  if not _rev(revision) then return false end
   if _store().exists(self:tombstone_path(revision)) then return false end
   local r = self:_reservation(revision)
   return r ~= nil and r.owner == token
@@ -428,6 +464,7 @@ end
 ---@return boolean claimed, string? err
 function Handle:claim(revision, token)
   local store = _store()
+  if not _rev(revision) then return false, M.REVISION_ERR end
   if store.exists(self:tombstone_path(revision)) then return false, nil end
   return store.create_exclusive(self:reserve_path(revision),
     store.encode_pretty({ owner = token, created_at = _now(),
@@ -461,6 +498,7 @@ end
 ---@param token string
 ---@return boolean
 function Handle:release(revision, token)
+  if not _rev(revision) then return false end
   local r = self:_reservation(revision)
   if not (r and r.owner == token) then return false end
   local ok = _store().delete(self:reserve_path(revision))
@@ -481,6 +519,7 @@ end
 ---@return boolean tombstoned, string? err, boolean fenced
 function Handle:retire(revision, token)
   local store = _store()
+  if not _rev(revision) then return false, M.REVISION_ERR, false end
   local ok, err = store.create_exclusive(self:tombstone_path(revision),
     store.encode_pretty({ retired_at = _now(), by = token }))
   if ok then
