@@ -532,5 +532,46 @@ do
   vim.ui.select, vim.notify = real_select, real_notify
 end
 
+io.stdout:write("\n[10] the left file list is coloured by git status\n")
+-- Johno, 2026-09-03: the diff view's file list should read the same colours as
+-- the repos tree it was opened from — added GREEN, modified YELLOW, deleted RED,
+-- the fg-only AutoCoreGit* groups (ADR-0060 §10).
+do
+  local gitdiff2 = require("auto-core.git.diff")
+  local files = gitdiff2.parse(table.concat({
+    "diff --git a/added.lua b/added.lua", "new file mode 100644",
+    "--- /dev/null", "+++ b/added.lua", "@@ -0,0 +1,1 @@", "+new",
+    "diff --git a/gone.lua b/gone.lua", "deleted file mode 100644",
+    "--- a/gone.lua", "+++ /dev/null", "@@ -1,1 +0,0 @@", "-old",
+    "diff --git a/edit.lua b/edit.lua", "--- a/edit.lua", "+++ b/edit.lua",
+    "@@ -1,1 +1,1 @@", "-a", "+b",
+  }, "\n"))
+  local lines, hls = dv._file_rows_for_tests(files)
+  ok("[10] one row per file", #lines == 3, tostring(#lines))
+  local byrow = {}
+  for _, h in ipairs(hls) do byrow[h.lnum] = h.hl end
+  local kind_of = {}
+  for i, f in ipairs(files) do kind_of[i - 1] = f.kind end
+  local function row_for(kind)
+    for r, k in pairs(kind_of) do if k == kind then return byrow[r] end end
+  end
+  ok("[10] *** an added file's row is AutoCoreGitAdded ***",
+    row_for("added") == "AutoCoreGitAdded", vim.inspect({ byrow = byrow, kinds = kind_of }))
+  ok("[10] *** a deleted file's row is AutoCoreGitDeleted ***",
+    row_for("deleted") == "AutoCoreGitDeleted", vim.inspect(byrow))
+  ok("[10] *** a modified file's row is AutoCoreGitModified ***",
+    row_for("modified") == "AutoCoreGitModified", vim.inspect(byrow))
+  ok("[10] every file row carries a status highlight", #hls == 3, tostring(#hls))
+  local hl = require("auto-core.ui.highlights"); hl.ensure()
+  local function attrs(n)
+    local h = vim.api.nvim_get_hl(0, { name = n, link = false })
+    return type(h) == "table" and h or {}
+  end
+  ok("[10] *** the status groups are foreground-only (no background) ***",
+    attrs("AutoCoreGitAdded").fg ~= nil and attrs("AutoCoreGitAdded").bg == nil
+    and attrs("AutoCoreGitDeleted").bg == nil and attrs("AutoCoreGitModified").bg == nil,
+    vim.inspect({ added = attrs("AutoCoreGitAdded") }))
+end
+
 io.stdout:write(string.format("\n%d passed, %d failed\n", pass, fail))
 os.exit(fail > 0 and 1 or 0)

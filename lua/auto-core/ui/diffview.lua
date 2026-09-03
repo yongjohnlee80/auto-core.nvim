@@ -217,17 +217,36 @@ local function _paint(bufnr, column, annotations, side)
   return placed
 end
 
----_file_rows renders the left column: path plus its +/- counts.
+-- The left pane's per-file status colour. The SAME foreground-only groups the
+-- repos tree paints its file rows with (ADR-0060 §10) — added GREEN, modified
+-- YELLOW, deleted RED — so a file reads the same colour in the diff view's file
+-- list as it does in the tree it was opened from (Johno, 2026-09-03). A rename
+-- shows on both its `a/` and `b/` sides, so it takes the renamed hue.
+local FILE_KIND_HL = {
+  added     = "AutoCoreGitAdded",
+  modified  = "AutoCoreGitModified",
+  deleted   = "AutoCoreGitDeleted",
+  renamed   = "AutoCoreGitRenamed",
+  copied    = "AutoCoreGitRenamed",
+}
+
+---_file_rows renders the left column: path plus its +/- counts, and the
+---status highlight for each row (fg-only, so the selection's line highlight
+---still shows through).
+---@param files table[]
+---@return string[] lines, { lnum: integer, hl: string }[] hls
 local function _file_rows(files)
-  local lines = {}
+  local lines, hls = {}, {}
   for _, f in ipairs(files) do
     local st = gitdiff.stats(f)
     local tag = f.kind == "modified" and "" or (" [" .. f.kind .. "]")
     lines[#lines + 1] = string.format("%s  +%d -%d%s",
       f.path, st.added, st.removed, tag)
+    local hl = FILE_KIND_HL[f.kind]
+    if hl then hls[#hls + 1] = { lnum = #lines - 1, hl = hl } end
   end
   if #lines == 0 then lines = { "(no files)" } end
-  return lines
+  return lines, hls
 end
 
 ---_pane_title retitles a live pane. `float.multi` sets titles at creation, so
@@ -633,9 +652,19 @@ function M.open(opts)
 
   local left = float:bufnr("left")
   if left and vim.api.nvim_buf_is_valid(left) then
+    local flines, fhls = _file_rows(files)
     vim.bo[left].modifiable = true
-    vim.api.nvim_buf_set_lines(left, 0, -1, false, _file_rows(files))
+    vim.api.nvim_buf_set_lines(left, 0, -1, false, flines)
     vim.bo[left].modifiable = false
+    -- Paint each row its git-status colour, in a namespace of its own so the
+    -- per-file colour and the selection line highlight (a different ns, applied
+    -- in `_show`) coexist rather than overwrite each other. Foreground-only
+    -- groups, so the selection's highlight still reads underneath.
+    local fns = marks.ns("diffview-files")
+    marks.clear(left, fns)
+    for _, h in ipairs(fhls) do
+      pcall(marks.line, left, fns, h.lnum, h.hl)
+    end
   end
 
   M._render_footer()
@@ -955,6 +984,10 @@ end
 function M.last_position()
   return M._last_position
 end
+
+---_file_rows_for_tests exposes the left-pane renderer so a suite can assert the
+---per-file status colour without a window.
+function M._file_rows_for_tests(files) return _file_rows(files) end
 
 ---_anchor_for_tests resolves an anchor exactly as a keypress would.
 ---
