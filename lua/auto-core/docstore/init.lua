@@ -124,17 +124,29 @@ end
 ---document belongs needs this, and the alternative — handing back a raw stat
 ---table — would put filesystem details back in the caller that this module
 ---exists to hold. Only ENOENT is absence, as everywhere else here.
+---
+---The THIRD return is libuv's errno NAME, and it exists because a caller that
+---must treat one specific failure differently has to be able to ASK. `glob`
+---inferred it by string-searching this function's formatted message instead —
+---and since that message contains the path, a path component containing the
+---literal token `ENOTDIR` made an unrelated EACCES look tolerated, reopening
+---the false-absence bug three rounds after it was first closed (lector r7).
+---
+---That is the same defect this family already documented in the lock, where
+---control flow once keyed off `status:find("STILL RUNNING")` so that rewording
+---a sentence could advertise repair for a live holder. **A diagnostic string is
+---for a human; a branch needs a code.**
 ---@param path string
----@return string? kind, string? err
+---@return string? kind, string? err, string? errno
 function M.kind(path)
-  if type(path) ~= "string" or path == "" then return nil, "no path" end
+  if type(path) ~= "string" or path == "" then return nil, "no path", nil end
   local st, serr, scode = uv.fs_stat(path)
   if not st then
-    if scode == "ENOENT" then return nil, nil end
+    if scode == "ENOENT" then return nil, nil, scode end
     return nil, ("unreadable: %s (%s: %s)")
-      :format(path, tostring(scode or "?"), tostring(serr or "stat failed"))
+      :format(path, tostring(scode or "?"), tostring(serr or "stat failed")), scode
   end
-  return st.type, nil
+  return st.type, nil, nil
 end
 
 ---mtime returns a comparable modification time in nanoseconds, or nil.
@@ -422,10 +434,12 @@ function M.glob(pattern)
 
   local out = {}
   for _, path in ipairs(cur) do
-    local kind, kerr = M.kind(path)
-    if kerr and tostring(kerr):find("ENOTDIR", 1, true) then
+    local kind, kerr, kcode = M.kind(path)
+    if kcode == "ENOTDIR" then
       -- A candidate under a path that turned out to be a file: the same
-      -- non-branch, discovered at classification time instead.
+      -- non-branch, discovered at classification time instead. Branched on the
+      -- ERRNO, never on the message -- the message contains the path, so a
+      -- directory named `...-ENOTDIR-...` made an EACCES read as tolerated.
       kind, kerr = nil, nil
     end
     if kerr then

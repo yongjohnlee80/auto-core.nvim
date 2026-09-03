@@ -252,6 +252,45 @@ do
       local hits, err = ds.glob(n .. "/file/inner.md")
       return #hits == 0 and err == nil
     end)(), vim.inspect({ ds.glob(sb .. "/g/litparent/file/inner.md") }))
+  ok("[1] *** glob: a path containing the TOKEN 'ENOTDIR' does not fake tolerance ***",
+    (function()
+      -- lector r7: the classification branch inferred the errno by searching
+      -- `kind`'s formatted message -- which contains the PATH -- so a directory
+      -- named `weird-ENOTDIR-name` made an unrelated EACCES read as tolerated
+      -- and reopened false absence three rounds after it was first closed.
+      -- Branch on the CODE; a diagnostic string is for a human.
+      local d = sb .. "/g/weird-ENOTDIR-name"
+      ds.write(d .. "/locked/secret.md", "x")
+      vim.fn.system({ "chmod", "000", d .. "/locked" })
+      local hits, err = ds.glob(d .. "/locked/secret.md")
+      vim.fn.system({ "chmod", "755", d .. "/locked" })
+      return #hits == 0 and err ~= nil
+    end)())
+  ok("[1] *** PAIRED: a REAL ENOTDIR is still a non-branch ***", (function()
+      -- Without this half, "make every classification failure fatal" would
+      -- pass the assertion above while breaking r6 again.
+      local d = sb .. "/g/realnotdir"
+      ds.write(d .. "/file", "y")
+      local hits, err = ds.glob(d .. "/file/inner.md")
+      return #hits == 0 and err == nil
+    end)())
+  ok("[1] kind returns libuv's ERRNO as a third value, for branching",
+    (function()
+      -- The structured fact the branch needs. Asserted directly so a future
+      -- caller does not have to rediscover that the message is not the code.
+      local d = sb .. "/g/errno"
+      ds.write(d .. "/f", "x")
+      local _, _, c_absent = ds.kind(d .. "/nope")
+      local _, _, c_notdir = ds.kind(d .. "/f/inner")
+      vim.fn.system({ "chmod", "000", d })
+      local _, _, c_denied = ds.kind(d .. "/f")
+      vim.fn.system({ "chmod", "755", d })
+      return c_absent == "ENOENT" and c_notdir == "ENOTDIR" and c_denied == "EACCES"
+    end)(), (function()
+      local d = sb .. "/g/errno"
+      return tostring(select(3, ds.kind(d .. "/nope"))) .. "/" ..
+             tostring(select(3, ds.kind(d .. "/f/inner")))
+    end)())
   ok("[1] glob: a relative pattern and a character class are refused",
     select(2, ds.glob("relative/*.md")) ~= nil
     and select(2, ds.glob("/tmp/[ab].md")) ~= nil)
