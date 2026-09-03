@@ -59,14 +59,19 @@ function M.encode_pretty(value, indent)
     end
     return "[\n" .. table.concat(parts, ",\n") .. "\n" .. indent .. "]"
   end
+  -- Carry the ORIGINAL key beside its rendered name. Stringifying the key and
+  -- then indexing the table by that string loses non-string keys entirely:
+  -- `{ [2] = "x" }` looked up value["2"], found nil, and encoded {"2": null} --
+  -- a persistence encoder silently changing the value it was handed (lector
+  -- SF1). Sparse and mixed-key tables failed the same way.
   local keys = {}
-  for k in pairs(value) do keys[#keys + 1] = tostring(k) end
+  for k in pairs(value) do keys[#keys + 1] = { name = tostring(k), key = k } end
   if #keys == 0 then return "{}" end
-  table.sort(keys)
+  table.sort(keys, function(a, b) return a.name < b.name end)
   local parts = {}
-  for _, k in ipairs(keys) do
-    parts[#parts + 1] = child .. vim.json.encode(k) .. ": "
-      .. M.encode_pretty(value[k], child)
+  for _, entry in ipairs(keys) do
+    parts[#parts + 1] = child .. vim.json.encode(entry.name) .. ": "
+      .. M.encode_pretty(value[entry.key], child)
   end
   return "{\n" .. table.concat(parts, ",\n") .. "\n" .. indent .. "}"
 end
@@ -144,8 +149,30 @@ end
 ---@return string? content, string? err
 function M.read(path)
   if type(path) ~= "string" or path == "" then return nil, "no path" end
-  local fd = io.open(path, "r")
-  if not fd then return nil, nil end
+  -- STAT FIRST. `io.open` alone cannot tell the two cases apart: it returns nil
+  -- both for a document that does not exist and for one that exists but cannot
+  -- be opened (EACCES, a directory in the way, an exhausted fd table). This
+  -- function reported BOTH as (nil, nil) — "absent" — so a review that is
+  -- present and unreadable read back as "no review here". Reproduced against a
+  -- chmod-000 document before this was written; the migration gate found it by
+  -- comparing against worktree.store, which has always stated first.
+  -- ONLY ENOENT MEANS ABSENT (lector MF2). `io.open` alone cannot tell the two
+  -- cases apart: it returns nil both for a document that does not exist and for
+  -- one that exists but cannot be opened. This function reported BOTH as
+  -- (nil, nil) -- "absent" -- so a review that was present and unreadable read
+  -- back as "no review here". Stat is not enough either: a stat that fails for
+  -- EACCES on a parent directory is also not absence, so libuv's errno name is
+  -- bound and only ENOENT is allowed through.
+  local st, serr, scode = uv.fs_stat(path)
+  if not st then
+    if scode == "ENOENT" then return nil, nil end
+    return nil, ("unreadable: %s (%s: %s)")
+      :format(path, tostring(scode or "?"), tostring(serr or "stat failed"))
+  end
+  local fd, oerr = io.open(path, "r")
+  if not fd then
+    return nil, ("unreadable: %s (%s)"):format(path, tostring(oerr or "open failed"))
+  end
   local content = fd:read("*a")
   fd:close()
   if content == nil then return nil, "unreadable: " .. path end
@@ -179,18 +206,38 @@ function M.create_exclusive(path, content)
   if not M.ensure_dir(vim.fn.fnamemodify(path, ":h")) then
     return false, "could not create " .. vim.fn.fnamemodify(path, ":h")
   end
-  local fd, oerr, ecode = uv.fs_open(path, "wx", 384) -- 0600
-  if not fd then
-    -- EEXIST is the ordinary "someone else has it" answer, not a failure.
-    if ecode == "EEXIST" or tostring(oerr):find("EEXIST", 1, true) then
-      return false, nil
-    end
-    return false, tostring(oerr or "open failed")
-  end
-  local ok_w, werr = pcall(uv.fs_write, fd, content, 0)
+  if uv.fs_stat(path) then return false, nil end -- cheap pre-check; link is the real gate
+
+  -- WRITE THEN LINK, not open-O_EXCL-then-write. `O_EXCL` publishes the name
+  -- before the content exists, so a reader between the open and the write sees
+  -- a claim record with no owner in it — and this store's whole promise is that
+  -- what it hands back was written on purpose. `link` fails with EEXIST when
+  -- the target is taken, which makes "claim this name" a single atomic step
+  -- that can never publish a partially-written file. `rename` cannot do this:
+  -- it overwrites.
+  local tmp = path .. ".claim." .. tostring(uv.os_getpid and uv.os_getpid() or 0)
+  local fd, oerr = uv.fs_open(tmp, "w", 384) -- 0600
+  if not fd then return false, "temp open failed: " .. tostring(oerr) end
+  -- BIND libuv's result AND compare the byte count. `pcall(uv.fs_write, ...)`
+  -- reports only whether Lua threw, so a normal (nil, err, EIO) return read as
+  -- success -- fault injection published an empty record with claimed=true.
+  -- A partial write is the same defect with a subtler shape.
+  local wrote, werr, wcode = uv.fs_write(fd, content, 0)
+  pcall(uv.fs_fsync, fd)
   pcall(uv.fs_close, fd)
-  if not ok_w then return false, tostring(werr) end
-  return true, nil
+  if wrote ~= #content then
+    pcall(uv.fs_unlink, tmp)
+    return false, ("write failed: %s of %d bytes (%s: %s)"):format(
+      tostring(wrote), #content, tostring(wcode or "?"),
+      tostring(werr or "short write"))
+  end
+
+  local linked, lerr = uv.fs_link(tmp, path)
+  pcall(uv.fs_unlink, tmp)
+  if linked then return true, nil end
+  -- EEXIST is the expected "someone else claimed it" outcome, not a failure.
+  if tostring(lerr):match("EEXIST") then return false, nil end
+  return false, "link failed: " .. tostring(lerr)
 end
 
 ---delete removes a document.
@@ -219,50 +266,49 @@ function M.list(dir, pattern)
   local h = uv.fs_scandir(dir)
   if not h then return out end
   while true do
-    local name = uv.fs_scandir_next(h)
+    local name, typ = uv.fs_scandir_next(h)
     if not name then break end
-    if not pattern or name:match(pattern) then out[#out + 1] = name end
+    -- DIRECTORIES ARE NOT DOCUMENTS. Returning them let a directory whose name
+    -- matched the record grammar be counted as a record: a directory called
+    -- `sub.r9.reserve` made `revisions.max_recorded` report r9 and burn nine
+    -- revision numbers. Reproduced before this was written.
+    if typ ~= "directory" and (not pattern or name:match(pattern)) then
+      out[#out + 1] = name
+    end
   end
   table.sort(out)
   return out
 end
 
----LOCK_WAIT_MS is how long `with_lock` waits for a contested lock.
+---The lock lives in `docstore.lock`, and `with_lock` is re-exported here so a
+---caller has one entry point for the whole store. It is the lock from
+---worktree.store, MOVED rather than reimplemented: an owner record, an enum-
+---driven liveness decision, pid-reuse detection, a 10-second contention window
+---that drives its own retry loop, and an inode-guarded release. See that
+---module's header for why each exists.
 ---
----A CONTENTION WINDOW and nothing more. Age never establishes that a holder is
----dead, so no path here breaks a lock; the constant DRIVES the retry loop so the
----documented figure and the real one cannot drift apart.
-M.LOCK_WAIT_MS = 500
+---This file first shipped a 500ms pathname-unlinking lock with no owner record,
+---which would have deleted six rounds of hardening the moment worktree
+---delegated to it. `LOCK_WAIT_MS` is re-exported too so the constant has one
+---value in the family, not two that drift.
+local lock = require("auto-core.docstore.lock")
+
+M.LOCK_WAIT_MS = lock.LOCK_WAIT_MS
+M.LOCK_POLL_MS = lock.LOCK_POLL_MS
 
 ---with_lock runs `fn` while holding an exclusive lock beside `path`.
 ---
----The lock is a document like any other, claimed with `create_exclusive`, so the
----mutual exclusion is the filesystem's. It is released on every exit path,
----including an error inside `fn` — a lock leaked by a raising callback would
----wedge the store for the rest of the session.
+---Returns `(value, err)` — the convention worktree.store's callers already
+---use, so delegation is a pass-through and not a translation layer that could
+---invert a failure into a success.
 ---@param path string
----@param fn fun(): any
----@return boolean ok, any result_or_err
+---@param fn fun():any,any?
+---@return any? value, string? err
 function M.with_lock(path, fn)
-  if type(path) ~= "string" or path == "" then return false, "no path" end
-  if type(fn) ~= "function" then return false, "with_lock: fn required" end
-  local lock = path .. ".lock"
-  local waited, step = 0, 10
-  while true do
-    local claimed, err = M.create_exclusive(lock, tostring(vim.fn.getpid()))
-    if claimed then break end
-    if err then return false, "lock error: " .. tostring(err) end
-    if waited >= M.LOCK_WAIT_MS then
-      return false, "lock contended for " .. M.LOCK_WAIT_MS .. "ms: " .. lock
-    end
-    vim.wait(step)
-    waited = waited + step
-  end
-  local ok, result = pcall(fn)
-  pcall(function() uv.fs_unlink(lock) end)
-  if not ok then return false, result end
-  return true, result
+  return lock.with_lock(path, fn)
 end
+
+M.lock = lock
 
 M.revisions = require("auto-core.docstore.revisions")
 

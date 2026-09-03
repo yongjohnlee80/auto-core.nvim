@@ -27,6 +27,12 @@
 ---    resolved identity — never a window id, never an abbreviation. A caller
 ---    keying on something that changes under it will silently split or merge
 ---    drafts.
+---  * **Content and context are separate, and only content is work.** `items`
+---    and an explicit `touched` bit mean unsaved work; `meta` never does. This
+---    predicate first treated any non-empty value in `meta` as content, so a
+---    draft holding only the reviewer snapshot §2.5 REQUIRES — zero items —
+---    reported dirty, and the close guard would have offered to keep an empty
+---    draft the moment it stored the identity it was told to store (lector MF4).
 ---@module 'auto-core.drafts'
 
 local M = {}
@@ -38,7 +44,7 @@ M._store = {}
 ---table the caller owns — the place a reviewer snapshot belongs, so a draft kept
 ---across an identity change cannot silently acquire a different author (§2.5).
 local function new_draft()
-  return { items = {}, meta = {} }
+  return { items = {}, meta = {}, touched = false }
 end
 
 ---_ok validates a scope. A scope must be a non-empty string: a table would be
@@ -85,13 +91,12 @@ function M.dirty(scope_or_draft)
   if type(d) == "string" then d = M._store[d] end
   if type(d) ~= "table" then return false end
   if #(d.items or {}) > 0 then return true end
-  -- A caller may carry standalone content in `meta` — a summary with no items is
-  -- still work. Any non-empty string field counts.
-  for _, v in pairs(d.meta or {}) do
-    if type(v) == "string" and vim.trim(v) ~= "" then return true end
-    if type(v) == "table" and next(v) ~= nil then return true end
-  end
-  return false
+  -- `meta` is CONTEXT and never makes a draft dirty. Inferring content from
+  -- arbitrary metadata values cannot work: this store is domain-agnostic, so it
+  -- has no way to tell a reviewer snapshot (identity the caller was told to
+  -- record) from a typed summary (work the reader would lose). A caller with
+  -- content outside `items` says so explicitly, via `touch`.
+  return d.touched == true
 end
 
 ---discard drops a draft outright. One of the two events that may clear one.
@@ -131,6 +136,21 @@ function M.scopes(opts)
   end
   table.sort(out)
   return out
+end
+
+---touch marks (or unmarks) a draft as holding content that is not an item.
+---
+---The explicit bit that replaces guessing from `meta`. A composer with a
+---summary and no comments calls `touch(scope)`; clearing it back to false is
+---allowed so a caller that empties its own field can stop claiming work.
+---@param scope string
+---@param value boolean?   defaults to true
+---@return boolean touched
+function M.touch(scope, value)
+  local d = M.get(scope)
+  if not d then return false end
+  d.touched = (value ~= false)
+  return d.touched
 end
 
 ---count returns how many items a draft holds, 0 for an absent one.
