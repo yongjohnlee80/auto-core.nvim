@@ -712,15 +712,16 @@ do
         if path == lockpath then return nil, "forced unlink failure" end
         return real_unlink(path, ...)
       end
-      local value, err = ds.with_lock(guarded, function() return 7 end)
+      local value, err, completed = ds.with_lock(guarded, function() return 7 end)
       uv.fs_unlink = real_unlink
       local wedged = ds.exists(lockpath)
       ds.delete(lockpath)
-      -- The reported failure returned (7, nil) while the lock stayed on disk,
-      -- so the next writer could never acquire it and nothing said why.
-      return value == 7 and err ~= nil
+      -- The r0 defect returned (7, nil) with the lock still on disk. The r1 fix
+      -- returned (7, err), which the INHERITED consumer contract still reads as
+      -- success. Both are wrong: nil first, error second, completed value third.
+      return value == nil and err ~= nil
         and tostring(err):find("COULD NOT be released", 1, true) ~= nil
-        and wedged == true
+        and completed == 7 and wedged == true
     end)())
 
   -- SF1 -- the encoder must not silently change a value.
@@ -800,6 +801,228 @@ do
       return tombstoned == false and err ~= nil and fenced == false
         and not ds.exists(rh:reserve_path(r))
     end)())
+end
+
+io.stdout:write("\n[5] CONTROLS for r1 (lector PR #16 r1)\n")
+do
+  local uv = vim.uv or vim.loop
+  local dir = sb .. "/r2"
+  ds.ensure_dir(dir)
+
+  -- MF1 -- the grammar must be INJECTIVE, and the handle must be fixed.
+  ok("[5] *** MF1: two handles can no longer name the SAME file ***", (function()
+    -- The reported collision: {alpha, ".beta.r2.json"} at r1 and
+    -- {alpha.r1.beta, ".json"} at r2 both compose alpha.r1.beta.r2.json.
+    local a, aerr = rv.open({ dir = dir, key = "alpha", suffix = ".beta.r2.json" })
+    local b, berr = rv.open({ dir = dir, key = "alpha.r1.beta", suffix = ".json" })
+    return a == nil and b == nil
+      and tostring(aerr):find("revision marker", 1, true)
+      and tostring(berr):find("revision marker", 1, true)
+  end)())
+  ok("[5] *** MF1: a longer key can no longer poison a shorter key's maximum ***",
+    (function()
+      -- After a record for `tenant.r9000.payload`, max_recorded() for `tenant`
+      -- returned 9000 -- the longer key's embedded marker read as the shorter
+      -- key's revision, burning nine thousand numbers.
+      local refused = select(1, rv.open({ dir = dir, key = "tenant.r9000.payload",
+                                          suffix = ".json" }))
+      -- And even if such a file already exists on disk, it is not ours.
+      local pdir = dir .. "/poison"
+      ds.ensure_dir(pdir)
+      ds.write(pdir .. "/tenant.r9000.payload.r1.json", "{}")
+      local h = rv.open({ dir = pdir, key = "tenant", suffix = ".json" })
+      return refused == nil and h ~= nil and h:max_recorded() == 0
+        and select(1, h:claim_next()) == 1
+    end)())
+  ok("[5] *** MF1: a handle cannot be rewritten after construction ***",
+    (function()
+      local h = rv.open({ dir = dir, key = "fixed", suffix = ".json" })
+      -- `h.key = "../escaped"` bypassed every check and reached a thrown mkdir.
+      local wrote = pcall(function() h.key = "../escaped" end)
+      local dir_wrote = pcall(function() h.dir = "/etc" end)
+      return wrote == false and dir_wrote == false
+        and h.key == "fixed" and h:record_path(1) == dir .. "/fixed.r1.json"
+    end)())
+  ok("[5] MF1: its validated values stay readable", (function()
+    local h = rv.open({ dir = dir, key = "readable", suffix = ".json" })
+    return h.key == "readable" and h.suffix == ".json" and h.dir == dir
+  end)())
+  ok("[5] MF1: a legacy key and suffix are still accepted", (function()
+    local h = rv.open({ dir = dir, key = "owner__repo@abc1234",
+                        suffix = ".review.json" })
+    return h ~= nil
+      and h:record_path(2) == dir .. "/owner__repo@abc1234.r2.review.json"
+  end)())
+
+  -- MF2 -- cleanup must not tombstone a revision committed under another suffix.
+  ok("[5] *** MF2: a revision committed as .yaml is not reaped by a .json handle ***",
+    (function()
+      local cdir = dir .. "/cross"
+      ds.ensure_dir(cdir)
+      local yaml = rv.open({ dir = cdir, key = "same", suffix = ".yaml" })
+      local json = rv.open({ dir = cdir, key = "same", suffix = ".json" })
+      -- r1 is COMMITTED as yaml, with an expired reservation left beside it.
+      ds.write(yaml:record_path(1), "committed: yes\n")
+      ds.write_json(yaml:reserve_path(1),
+        { owner = "old", created_at = os.time() - 999, lease_until = os.time() - 1 })
+      local n, report = json:cleanup()
+      -- The reported failure returned retired=1 and wrote same.r1.tombstone
+      -- over a committed record, because `committed` was decided with the
+      -- CALLING handle's suffix.
+      return n == 0 and not ds.exists(json:tombstone_path(1))
+        and ds.exists(yaml:record_path(1)) and #report.errors == 0
+    end)())
+  ok("[5] *** MF2: committedness is suffix-independent, like spentness ***",
+    (function()
+      local cdir = dir .. "/cross2"
+      ds.ensure_dir(cdir)
+      local yaml = rv.open({ dir = cdir, key = "same", suffix = ".yaml" })
+      local json = rv.open({ dir = cdir, key = "same", suffix = ".json" })
+      ds.write(yaml:record_path(3), "committed: yes\n")
+      return json:committed(3) == true and yaml:committed(3) == true
+        and json:committed(2) == false and json:max_recorded() == 3
+    end)())
+  ok("[5] MF2: one classifier names every record kind", (function()
+      local h = rv.open({ dir = dir, key = "kinds", suffix = ".review.json" })
+      local function kind(n) return select(2, h:classify(n)) end
+      return kind("kinds.r1.review.json") == "committed"
+        and kind("kinds.r1.reserve") == "reserve"
+        and kind("kinds.r1.tombstone") == "tombstone"
+        and kind("kinds.r1.review.json.claim.4242") == "transient"
+        and kind("kinds.r1.review.json.lock") == "lock"
+        and kind("kinds.r1x.review.json") == nil
+        and kind("other.r1.review.json") == nil
+    end)())
+
+  -- MF3 -- a release anomaly must be FALSY to the callers that will inherit it.
+  ok("[5] *** MF3: a CONSUMER branching on the first slot sees FAILURE ***",
+    (function()
+      -- Shaped exactly like worktree.watch.set: bind (ok, err), branch on
+      -- `if not ok`, publish otherwise. Under the r1 contract this published
+      -- the change and dropped the error.
+      local guarded = dir .. "/mf3.txt"
+      local lockpath = guarded .. ".lock"
+      local published = false
+      local real_unlink = uv.fs_unlink
+      uv.fs_unlink = function(path, ...)
+        if path == lockpath then return nil, "forced unlink failure" end
+        return real_unlink(path, ...)
+      end
+      local okc, errc = ds.with_lock(guarded, function() return true end)
+      if okc then published = true end
+      uv.fs_unlink = real_unlink
+      ds.delete(lockpath)
+      return published == false and errc ~= nil
+    end)())
+  ok("[5] *** MF3: a REPLACED lock is an anomaly, and the successor survives ***",
+    (function()
+      local guarded = dir .. "/mf3-replaced.txt"
+      local lockpath = guarded .. ".lock"
+      local v, err, completed = ds.with_lock(guarded, function()
+        -- The pathname comes to name a different file mid-section.
+        uv.fs_unlink(lockpath)
+        ds.write(lockpath, '{"pid":424242,"host":"successor"}')
+        return 7
+      end)
+      local successor = select(1, ds.read_json(lockpath))
+      ds.delete(lockpath)
+      -- r1 returned (7, nil) here: it preserved the successor correctly but
+      -- claimed success, though it can no longer prove exclusion held.
+      return v == nil and err ~= nil and completed == 7
+        and tostring(err):find("REPLACED", 1, true)
+        and type(successor) == "table" and successor.pid == 424242
+    end)())
+  ok("[5] *** MF3: a VANISHED lock is an anomaly too ***", (function()
+    local guarded = dir .. "/mf3-vanished.txt"
+    local v, err, completed = ds.with_lock(guarded, function()
+      uv.fs_unlink(guarded .. ".lock")
+      return 9
+    end)
+    return v == nil and err ~= nil and completed == 9
+      and tostring(err):find("VANISHED", 1, true)
+  end)())
+  ok("[5] MF3: an ordinary run is untouched by all of that", (function()
+    local v, err, completed = ds.with_lock(dir .. "/mf3-clean.txt",
+      function() return "fine" end)
+    return v == "fine" and err == nil and completed == nil
+  end)())
+
+  -- MF4 -- rendered-key collisions must be refused, not silently resolved.
+  ok("[5] *** MF4: two keys rendering to ONE name is an ERROR, not a lost value ***",
+    (function()
+      -- r1 emitted two members called "2" and decoding kept one.
+      local okc, err = pcall(ds.encode_pretty, { [2] = "numeric", ["2"] = "string" })
+      return okc == false and tostring(err):find("both render as", 1, true)
+    end)())
+  ok("[5] MF4: write_json reports it instead of persisting a lossy document",
+    (function()
+      local okw, err = ds.write_json(dir .. "/mf4.json",
+        { [2] = "numeric", ["2"] = "string" })
+      return okw == false and tostring(err):find("encode failed", 1, true)
+        and not ds.exists(dir .. "/mf4.json")
+    end)())
+  ok("[5] MF4: an unrenderable key type is refused", (function()
+    local okb = pcall(ds.encode_pretty, { [true] = "x" })
+    local okt = pcall(ds.encode_pretty, { [{}] = "x" })
+    return okb == false and okt == false
+  end)())
+  ok("[5] MF4: distinct numeric and string keys still round-trip", (function()
+    local enc = ds.encode_pretty({ [2] = "numeric", three = "string" })
+    local back = vim.json.decode(enc)
+    return back["2"] == "numeric" and back.three == "string"
+  end)())
+
+  -- MF5 -- delete's absent/error distinction.
+  ok("[5] *** MF5: a stat failure is NOT successful absence ***", (function()
+    local target = dir .. "/mf5.json"
+    ds.write(target, "{}")
+    local real_stat = uv.fs_stat
+    uv.fs_stat = function(path, ...)
+      if path == target then return nil, "forced permission failure", "EACCES" end
+      return real_stat(path, ...)
+    end
+    local okd, err = ds.delete(target)
+    uv.fs_stat = real_stat
+    local still_there = ds.exists(target)
+    -- The reported failure returned ok=true, err=nil with the file still there,
+    -- which in P4c would mean reporting a pair deleted that is not.
+    return okd == false and err ~= nil and still_there == true
+  end)())
+  ok("[5] MF5: a genuinely absent document is still deleted successfully",
+    (function()
+      local okd, err = ds.delete(dir .. "/never-existed.json")
+      return okd == true and err == nil
+    end)())
+  ok("[5] *** MF5: losing the race to another deleter is still success ***",
+    (function()
+      -- Stat says present, unlink says ENOENT: someone else removed it in
+      -- between. The caller asked for it to be gone, and it is gone.
+      local target = dir .. "/mf5-race.json"
+      ds.write(target, "{}")
+      local real_unlink = uv.fs_unlink
+      uv.fs_unlink = function(path, ...)
+        if path == target then
+          real_unlink(path)
+          return nil, "ENOENT: no such file or directory", "ENOENT"
+        end
+        return real_unlink(path, ...)
+      end
+      local okd, err = ds.delete(target)
+      uv.fs_unlink = real_unlink
+      return okd == true and err == nil and not ds.exists(target)
+    end)())
+  ok("[5] MF5: and a real unlink failure is still a failure", (function()
+    local target = dir .. "/mf5-hard.json"
+    ds.write(target, "{}")
+    local real_unlink = uv.fs_unlink
+    uv.fs_unlink = function(path, ...)
+      if path == target then return nil, "forced io failure", "EIO" end
+      return real_unlink(path, ...)
+    end
+    local okd, err = ds.delete(target)
+    uv.fs_unlink = real_unlink
+    return okd == false and err ~= nil
+  end)())
 end
 
 vim.fn.delete(sb, "rf")

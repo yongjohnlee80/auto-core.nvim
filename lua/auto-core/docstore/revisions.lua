@@ -88,6 +88,27 @@ M.KEY_PATTERN = "^[%w][%w%-_@.]*$"
 ---alphanumerics and `- _ .`.
 M.SUFFIX_PATTERN = "^%.[%w][%w%-_.]*$"
 
+---REVISION_MARKER is the shape `<key>.r<N>` uses to separate the two.
+---
+---**It may appear nowhere else in a record's name**, which is what makes the
+---mapping from (key, revision, suffix) to a filename INJECTIVE. Without that
+---rule the grammar was ambiguous in two ways, both reachable with values it
+---accepted (lector r1 MF1):
+---
+---  * `{key="alpha", suffix=".beta.r2.json"}` at r1 and
+---    `{key="alpha.r1.beta", suffix=".json"}` at r2 compose the **same file**;
+---  * a record for the valid key `tenant.r9000.payload` made `max_recorded()`
+---    for the valid key `tenant` return **9000** — the longer key's embedded
+---    marker parsed as the shorter key's revision, burning nine thousand
+---    numbers.
+---
+---A length-delimited or escaped component encoding would be more general, but it
+---would rename every existing record. Forbidding the marker shape inside keys
+---and suffixes is the minimal rule that makes the composition injective while
+---leaving the legacy grammar (`owner__repo@sha.r1.review.json`) untouched — no
+---legacy key or suffix contains `.r<digits>`.
+M.REVISION_MARKER = "%.r%d"
+
 local function _now() return os.time() end
 
 local function _store()
@@ -145,6 +166,10 @@ function M.validate(opts)
       why = "must match " .. M.KEY_PATTERN .. " (alphanumerics and - _ @ .)"
     end
     problems[#problems + 1] = "key " .. why .. ": " .. key
+  elseif key:find(M.REVISION_MARKER) then
+    -- The marker shape belongs to the composition, not to a component.
+    problems[#problems + 1] =
+      "key must not contain a `.r<digits>` revision marker: " .. key
   end
 
   if type(suffix) ~= "string" or suffix == "" then
@@ -153,6 +178,9 @@ function M.validate(opts)
     problems[#problems + 1] =
       "suffix must match " .. M.SUFFIX_PATTERN .. " (a dot, then alphanumerics and - _ .): "
       .. suffix
+  elseif suffix:find(M.REVISION_MARKER) then
+    problems[#problems + 1] =
+      "suffix must not contain a `.r<digits>` revision marker: " .. suffix
   else
     for _, reserved in ipairs(M.RESERVED_SUFFIXES) do
       if suffix == reserved then
@@ -169,12 +197,50 @@ function M.validate(opts)
 end
 
 ---Handle is a validated (dir, key, suffix) triple. Constructed only by `open`.
+---
+---**Read-only.** Construction-time validation is not a boundary if a caller can
+---rewrite its inputs afterwards: `h.key = "../escaped"` bypassed every check and
+---reached a thrown `mkdir` (lector r1 MF1). The validated values live in a
+---private table and the fields are readable but not assignable.
 ---@class AutoCoreRevisionHandle
 ---@field dir string
 ---@field key string
 ---@field suffix string
 local Handle = {}
-Handle.__index = Handle
+
+---_state holds each handle's validated values, keyed by the handle itself.
+---Weak-keyed so a discarded handle does not pin its state.
+local _state = setmetatable({}, { __mode = "k" })
+
+---_own returns a handle's private state, or raises if it is not a handle.
+local function _own(h)
+  local p = _state[h]
+  if not p then
+    error("revisions: not a handle (construct one with revisions.open)", 3)
+  end
+  return p
+end
+
+Handle.__index = function(h, k)
+  local method = Handle[k]
+  if method ~= nil then return method end
+  local p = _state[h]
+  -- The three validated values stay READABLE: a caller composing a message or
+  -- a test asserting a path needs them, and reading cannot invalidate anything.
+  if p and (k == "dir" or k == "key" or k == "suffix") then return p[k] end
+  return nil
+end
+
+Handle.__newindex = function(_, k)
+  error(("revisions: a handle is read-only (attempted to set %q); open a new "
+    .. "handle instead"):format(tostring(k)), 2)
+end
+
+Handle.__tostring = function(h)
+  local p = _state[h]
+  if not p then return "<revisions handle>" end
+  return ("<revisions %s/%s*%s>"):format(p.dir, p.key, p.suffix)
+end
 
 ---open validates and returns a handle over `dir` for `key`.
 ---@param opts { dir: string, key: string, suffix: string }
@@ -184,11 +250,12 @@ function M.open(opts)
   if not ok then
     return nil, "revisions.open: " .. table.concat(problems, "; ")
   end
-  local h = setmetatable({
+  local h = setmetatable({}, Handle)
+  _state[h] = {
     dir = _normalize_dir(opts.dir),
     key = opts.key,
     suffix = opts.suffix,
-  }, Handle)
+  }
 
   -- CONTAINMENT, checked on a real path rather than trusted to the grammar.
   -- Defence in depth: if the key pattern is ever widened, this still refuses a
@@ -205,27 +272,28 @@ end
 ---@param revision integer
 ---@return string
 function Handle:_base(revision)
-  return string.format("%s.r%d", self.key, tonumber(revision) or 1)
+  return string.format("%s.r%d", _own(self).key, tonumber(revision) or 1)
 end
 
 ---record_path names a COMMITTED record, using the handle's suffix.
 ---@param revision integer
 ---@return string
 function Handle:record_path(revision)
-  return self.dir .. "/" .. self:_base(revision) .. self.suffix
+  local p = _own(self)
+  return p.dir .. "/" .. self:_base(revision) .. p.suffix
 end
 
 ---reserve_path / tombstone_path name the two control records.
 ---@param revision integer
 ---@return string
 function Handle:reserve_path(revision)
-  return self.dir .. "/" .. self:_base(revision) .. M.RESERVE_SUFFIX
+  return _own(self).dir .. "/" .. self:_base(revision) .. M.RESERVE_SUFFIX
 end
 
 ---@param revision integer
 ---@return string
 function Handle:tombstone_path(revision)
-  return self.dir .. "/" .. self:_base(revision) .. M.TOMBSTONE_SUFFIX
+  return _own(self).dir .. "/" .. self:_base(revision) .. M.TOMBSTONE_SUFFIX
 end
 
 ---token mints an opaque claim token.
@@ -247,26 +315,77 @@ function M.token()
   return table.concat(t, "-")
 end
 
+---classify decides what one filename IS within this key's namespace.
+---
+---THE SINGLE CLASSIFIER, and the reason it exists: r1 made allocation
+---suffix-independent (all tails for one key share one revision sequence) but
+---left `cleanup` deciding "is this committed?" with `record_path`, which checks
+---only the calling handle's suffix. So committing `same.r1.yaml` and then
+---running cleanup through the same key's `.json` handle **tombstoned a
+---committed revision** (lector r1 MF2). Cross-suffix spentness without
+---cross-suffix committedness is not a coherent namespace; both now read the
+---same answer from here.
+---@param name string  a bare entry name, never a path
+---@return integer? revision, string? kind  "committed"|"reserve"|"tombstone"|"lock"|"transient"
+function Handle:classify(name)
+  local p = _own(self)
+  local rev, tail = tostring(name):match("^" .. vim.pesc(p.key) .. "%.r(%d+)(.*)$")
+  rev = tonumber(rev)
+  if not rev then return nil, nil end
+  if tail == M.RESERVE_SUFFIX then return rev, "reserve" end
+  if tail == M.TOMBSTONE_SUFFIX then return rev, "tombstone" end
+  -- `create_exclusive` writes `<target>.claim.<pid>` beside its target and
+  -- unlinks it; an in-flight temp is nobody's record.
+  if tail:match("%.claim%.%d+$") then return rev, "transient" end
+  if tail:match("%.lock$") then return rev, "lock" end
+  -- A committed tail must be a suffix this module would ACCEPT: it starts at a
+  -- dot and contains no further revision marker. That second half is what stops
+  -- a longer key's record (`tenant.r9000.payload.r1.json`, seen from key
+  -- `tenant`) from being read as this key's revision 9000.
+  if tail:sub(1, 1) == "." and not tail:find(M.REVISION_MARKER) then
+    return rev, "committed"
+  end
+  return nil, nil
+end
+
+---_scan walks the directory once and returns every record for this key.
+---@return { [integer]: table<string, boolean> } kinds_by_revision, integer highest
+function Handle:_scan()
+  local store = _store()
+  local p = _own(self)
+  local kinds, highest = {}, 0
+  for _, name in ipairs(store.list(p.dir)) do
+    local rev, kind = self:classify(name)
+    if rev and kind ~= "transient" and kind ~= "lock" then
+      kinds[rev] = kinds[rev] or {}
+      kinds[rev][kind] = true
+      if rev > highest then highest = rev end
+    end
+  end
+  return kinds, highest
+end
+
 ---max_recorded is the allocation maximum over EVERY record for this key.
 ---
----Any tail, not just this handle's suffix: committed, reserved, tombstoned, and
----any other format sharing the directory. Scanning only the calling suffix
----re-issued a number as soon as a second format appeared (lector MF3 case 2),
----and scanning only committed records would hand a crashed writer's revision to
----the next writer.
+---Any accepted tail, not just this handle's suffix: committed, reserved,
+---tombstoned, and any other format sharing the directory. Scanning only the
+---calling suffix re-issued a number as soon as a second format appeared, and
+---scanning only committed records would hand a crashed writer's revision to the
+---next writer.
 ---@return integer  0 when nothing is recorded
 function Handle:max_recorded()
-  local store = _store()
-  local k = vim.pesc(self.key)
-  local highest = 0
-  for _, name in ipairs(store.list(self.dir)) do
-    -- `.r<N>` must be followed by a suffix that starts at a DOT, so a key's
-    -- record cannot be confused with a longer key's (`k.r1x...` is not ours).
-    local rev = tonumber(name:match("^" .. k .. "%.r(%d+)%.[^/]*$"))
-      or tonumber(name:match("^" .. k .. "%.r(%d+)$"))
-    if rev and rev > highest then highest = rev end
-  end
-  return highest
+  return select(2, self:_scan())
+end
+
+---committed reports whether ANY format has committed this revision.
+---
+---Suffix-independent, for the same reason allocation is: within one key, r1 is
+---one revision whoever wrote it.
+---@param revision integer
+---@return boolean
+function Handle:committed(revision)
+  local kinds = self:_scan()
+  return (kinds[tonumber(revision) or -1] or {}).committed == true
 end
 
 ---_reservation reads the reservation at `revision` and CLASSIFIES it.
@@ -399,21 +518,27 @@ end
 ---skipping it made corruption indistinguishable from a quiet no-op pass.
 ---@return integer retired, { indeterminate: integer[], errors: string[], fenced: integer[] } report
 function Handle:cleanup()
-  local store = _store()
-  local k = vim.pesc(self.key)
   local n = 0
   local report = { indeterminate = {}, errors = {}, fenced = {} }
-  for _, name in ipairs(store.list(self.dir)) do
-    local rev = tonumber(name:match("^" .. k .. "%.r(%d+)%" .. M.RESERVE_SUFFIX .. "$"))
-    if rev then
-      -- Never tombstone a revision that already committed: the record is
-      -- complete and the tombstone would be pure noise.
-      local committed = store.exists(self:record_path(rev))
+  -- ONE scan, ONE classification, shared with `max_recorded`.
+  local kinds = self:_scan()
+  local revisions = {}
+  for rev, k in pairs(kinds) do
+    if k.reserve then revisions[#revisions + 1] = rev end
+  end
+  table.sort(revisions)
+  for _, rev in ipairs(revisions) do
+    do
+      -- Never tombstone a revision that already committed -- UNDER ANY SUFFIX.
+      -- The record is complete and the tombstone would be pure noise, or worse:
+      -- deciding this with the calling handle's suffix alone tombstoned a
+      -- revision another format had committed.
+      local committed = kinds[rev].committed == true
       -- ALREADY FENCED is nothing to do. `retire` with no token deliberately
       -- leaves the reservation in place (it is the fallback fence), so without
       -- this check a reaped-but-still-reserved revision is re-counted on every
       -- pass and the return value stops meaning "how many I newly fenced".
-      local fenced = store.exists(self:tombstone_path(rev))
+      local fenced = kinds[rev].tombstone == true
       local r, rerr, state = self:_reservation(rev)
       if state == "indeterminate" then
         -- THE FOURTH STATE: present, but its lease cannot be established. Never
@@ -439,5 +564,8 @@ function Handle:cleanup()
   end
   return n, report
 end
+
+---_reset_for_tests is not needed: a handle holds no cache. Declared absent
+---deliberately, so nobody adds one and then has to invalidate it.
 
 return M

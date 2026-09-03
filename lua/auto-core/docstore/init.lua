@@ -64,8 +64,30 @@ function M.encode_pretty(value, indent)
   -- `{ [2] = "x" }` looked up value["2"], found nil, and encoded {"2": null} --
   -- a persistence encoder silently changing the value it was handed (lector
   -- SF1). Sparse and mixed-key tables failed the same way.
-  local keys = {}
-  for k in pairs(value) do keys[#keys + 1] = { name = tostring(k), key = k } end
+  local keys, seen = {}, {}
+  for k in pairs(value) do
+    -- A JSON object key can only be a string. Numbers render unambiguously and
+    -- the review store's own documents rely on it; anything else (a boolean, a
+    -- table, a function) has no defensible rendering, and inventing one is the
+    -- silent value change this encoder exists to refuse.
+    local tk = type(k)
+    if tk ~= "string" and tk ~= "number" then
+      error(("encode_pretty: cannot render a %s as an object key"):format(tk), 0)
+    end
+    local name = tostring(k)
+    if seen[name] ~= nil then
+      -- TWO KEYS, ONE RENDERED NAME: `{ [2] = 1, ["2"] = "x" }` emitted two
+      -- members called "2", and decoding kept one of them. Carrying the
+      -- original key fixed the lookup but not this: the document was still
+      -- losing a value, silently, which is exactly what SF1 asked for
+      -- (lector r1 MF4).
+      error(("encode_pretty: keys %s and %s both render as %q; the document"
+        .. " would lose one of them"):format(
+        vim.inspect(seen[name]), vim.inspect(k), name), 0)
+    end
+    seen[name] = k
+    keys[#keys + 1] = { name = name, key = k }
+  end
   if #keys == 0 then return "{}" end
   table.sort(keys, function(a, b) return a.name < b.name end)
   local parts = {}
@@ -249,9 +271,24 @@ end
 ---@return boolean ok, string? err
 function M.delete(path)
   if type(path) ~= "string" or path == "" then return false, "no path" end
-  if not uv.fs_stat(path) then return true, nil end
-  local ok, err = uv.fs_unlink(path)
-  if not ok then return false, tostring(err or "unlink failed") end
+  -- ONLY ENOENT IS ALREADY-DELETED, the same distinction `read` makes. Mapping
+  -- every stat failure to "gone" reported ok=true for a file that was still
+  -- there and merely unreadable (lector r1 MF5) -- which becomes
+  -- safety-critical in P4c, where this primitive decides whether the artifacts
+  -- a delete PROMISED to remove are actually gone.
+  local st, serr, scode = uv.fs_stat(path)
+  if not st then
+    if scode == "ENOENT" then return true, nil end
+    return false, ("cannot delete %s (%s: %s)")
+      :format(path, tostring(scode or "?"), tostring(serr or "stat failed"))
+  end
+  local ok, err, code = uv.fs_unlink(path)
+  if not ok then
+    -- Someone else removed it between the stat and the unlink: the caller asked
+    -- for it to be gone, and it is gone.
+    if code == "ENOENT" then return true, nil end
+    return false, tostring(err or "unlink failed")
+  end
   return true, nil
 end
 

@@ -160,9 +160,22 @@ M._owner_dead_for_tests = _owner_dead
 ---needs. Deliberately narrow: threading true varargs out would need
 ---`table.maxn`/`unpack`, whose availability differs across the Lua versions
 ---Neovim has shipped, for no benefit at these call sites.
+---
+---**On a release anomaly the first result is nil**, and the completed body value
+---moves to a third result. The inherited consumer contract is `local ok, err =
+---with_lock(...)` branching on `if not ok` — `worktree.watch.set` and
+---`worktree.watch.prune` are written exactly that way — so returning
+---`(true, "could not release")` would be read as operational success: the change
+---published, the error dropped, the store wedged (lector r1 MF3). A release
+---anomaly is a failure of the operation even though the body succeeded, because
+---mutual exclusion can no longer be proven to have held through completion.
+---
+---Anomalies, all reported the same way: the lock could not be unlinked; the lock
+---pathname was REPLACED during the critical section (a successor exists and is
+---deliberately preserved); or it vanished.
 ---@param path string          the file being guarded (NOT the lock path)
 ---@param fn fun():any,any?    critical section; runs at most once
----@return any? value, string? err
+---@return any? value, string? err, any? completed_value
 function M.with_lock(path, fn)
   local store = require("auto-core.docstore")
   if type(path) ~= "string" or path == "" then return nil, "with_lock: no path" end
@@ -288,7 +301,25 @@ function M.with_lock(path, fn)
   -- this stat-then-unlink becomes a race again.
   local release_err
   local now = uv.fs_stat(lock)
-  if now and mine and now.ino == mine.ino then
+  if not now then
+    -- The lock is GONE before we released it. Something removed it while we
+    -- held it, so exclusivity cannot be claimed for the whole critical section.
+    release_err = ("with_lock: %s VANISHED during the critical section, so"
+      .. " mutual exclusion cannot be proven for its whole duration")
+      :format(lock)
+  elseif mine and now.ino ~= mine.ino then
+    -- REPLACED: a successor lock is installed. Preserve it -- deleting it is
+    -- how an already-stale decision removes a live holder's lock -- and report
+    -- the anomaly rather than returning a bare success.
+    release_err = ("with_lock: %s was REPLACED during the critical section"
+      .. " (a successor lock is present and has been left alone), so mutual"
+      .. " exclusion cannot be proven for its whole duration"):format(lock)
+  else
+    -- Still OUR lock: the two branches above have already taken "gone" and
+    -- "replaced", so the inode is known to match here. Re-testing it was dead
+    -- weight -- the mutation matrix showed the condition could not fail, which
+    -- is the same lesson the key validation taught: a guard that cannot fail is
+    -- not defence in depth, it just obscures which check holds the line.
     local removed, unlink_err = uv.fs_unlink(lock)
     if not removed then
       -- A FAILED RELEASE IS NOT SUCCESS (lector MF5). This was a warning in the
@@ -307,14 +338,15 @@ function M.with_lock(path, fn)
   end
 
   if not ok then return nil, "with_lock: " .. tostring(value) end
-  -- The callback's result is PRESERVED alongside a release failure: the work
-  -- itself succeeded, and a caller that discards the value on this path would
-  -- lose a completed write as well as the lock. The body's own error wins when
-  -- it set one -- it is the more specific fact -- but the release failure is
-  -- appended so it can never vanish.
+  -- A release anomaly is a FAILED operation: nil first, error second, and the
+  -- body's completed value carried in a third slot so a diagnostic can still
+  -- report what got done. Returning the value in the success slot let a caller
+  -- that branches on `if not ok` publish the change and drop the error.
   if release_err then
-    if err then return value, tostring(err) .. " | " .. release_err end
-    return value, release_err
+    if err then
+      return nil, tostring(err) .. " | " .. release_err, value
+    end
+    return nil, release_err, value
   end
   return value, err
 end
