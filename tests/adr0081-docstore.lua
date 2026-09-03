@@ -142,6 +142,52 @@ do
       return #hits == 0 and err ~= nil
         and tostring(err):find("could not be traversed", 1, true) ~= nil
     end)())
+  ok("[1] *** glob: a NESTED unreadable dir under a wildcard is an ERROR ***",
+    (function()
+      -- lector r5: the fixed-prefix check proved only that the FIRST directory
+      -- was readable. With `agents` readable and `agents/lector` NOT, the
+      -- wildcard selected `lector` and then the literal `reviews` beneath it
+      -- could not be reached -- and the search came back empty and silent.
+      local n = sb .. "/g/nested"
+      ds.write(n .. "/agents/lector/reviews/x-r1-review.md", "prose")
+      ds.write(n .. "/agents/juliet/reviews/y-r1-review.md", "prose")
+      vim.fn.system({ "chmod", "000", n .. "/agents/lector" })
+      local hits, err = ds.glob(n .. "/agents/*/reviews/*-r1-review.md")
+      vim.fn.system({ "chmod", "755", n .. "/agents/lector" })
+      return #hits == 0 and err ~= nil
+        and tostring(err):find("lector", 1, true) ~= nil
+    end)())
+  ok("[1] *** CONTROL: restored readable, BOTH documents are found ***",
+    (function()
+      local n = sb .. "/g/nested"
+      local hits, err = ds.glob(n .. "/agents/*/reviews/*-r1-review.md")
+      return #hits == 2 and err == nil
+        and hits[1]:find("/juliet/", 1, true) and hits[2]:find("/lector/", 1, true)
+    end)())
+  ok("[1] glob: an unreadable dir under a wildcard's LAST segment is an error too",
+    (function()
+      -- The other nesting: the wildcard-selected directory itself cannot be
+      -- scanned when the final segment expands.
+      local n = sb .. "/g/nested2"
+      ds.write(n .. "/agents/lector/reviews/z-r1-review.md", "prose")
+      vim.fn.system({ "chmod", "000", n .. "/agents/lector/reviews" })
+      local hits, err = ds.glob(n .. "/agents/*/reviews/*-r1-review.md")
+      vim.fn.system({ "chmod", "755", n .. "/agents/lector/reviews" })
+      return #hits == 0 and err ~= nil
+        and tostring(err):find("could not be traversed", 1, true) ~= nil
+    end)())
+  ok("[1] glob: a wildcard never crosses a separator", (function()
+    -- `*` is applied per SEGMENT, so it cannot swallow a directory boundary --
+    -- a whole-path pattern would have matched `a/b.md` for `*.md`.
+    local n = sb .. "/g/depth"
+    ds.write(n .. "/a/b.md", "x")
+    ds.write(n .. "/top.md", "y")
+    local hits = ds.glob(n .. "/*.md")
+    return #hits == 1 and hits[1]:find("top%.md$") ~= nil
+  end)())
+  ok("[1] glob: a relative pattern and a character class are refused",
+    select(2, ds.glob("relative/*.md")) ~= nil
+    and select(2, ds.glob("/tmp/[ab].md")) ~= nil)
   ok("[1] CONTROL: with the same root READABLE, the document is found",
     (function()
       local locked = sb .. "/g/locked"

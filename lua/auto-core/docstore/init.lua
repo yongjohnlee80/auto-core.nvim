@@ -311,6 +311,22 @@ function M.delete(path)
   return true, nil
 end
 
+---_seg_pattern turns ONE shell-style path segment into an anchored Lua pattern.
+---
+---`*` and `?` only.
+---
+---They cannot cross a separator, and it is the WALKER that guarantees that, not
+---the `[^/]` classes below: the pattern is matched against single `fs_scandir`
+---entry NAMES, which contain no separator, so `[^/]*` and `.*` behave
+---identically here. The classes are precision, not a guard — stated because the
+---mutation matrix showed that widening them changes no outcome, and a reader
+---who mistook them for the guard would be relying on something inert.
+local function _seg_pattern(seg)
+  local out = seg:gsub("[%^%$%(%)%%%.%+%-]", "%%%0")
+  out = out:gsub("%*", "[^/]*"):gsub("%?", "[^/]")
+  return "^" .. out .. "$"
+end
+
 ---glob returns the paths matching a shell-style pattern, sorted, plus an error.
 ---
 ---auto-core owns filesystem reads, so a caller that must SEARCH for documents
@@ -318,26 +334,91 @@ end
 ---delegate module quietly grows its own I/O back (AC1). Files only: a directory
 ---matching the pattern is not a document, the same rule `list` follows.
 ---
----**AN EMPTY RESULT IS NOT ABSENCE UNLESS THE TRAVERSAL SUCCEEDED.** This is the
----same conflation that was fixed one layer up in worktree's orphan search and
----survived down here (lector r4): `vim.fn.glob` reports no error, so an
----unreadable directory returns exactly what "nothing matched" returns, and
----`M.kind`'s errors were being discarded on top of that. A caller deciding
----whether a paired document still exists then reads "could not look" as
----"nothing there" — and reports a review deleted while its Markdown remains.
+---**AN EMPTY RESULT IS NOT ABSENCE UNLESS EVERY DIRECTORY THE SEARCH NEEDED WAS
+---ACTUALLY TRAVERSED.** This has now been the same defect three times, each one
+---layer deeper, so it is worth stating precisely:
 ---
----So two things are checked. Any candidate whose kind cannot be established is
----an error, not a skip. And an EMPTY result is confirmed against the pattern's
----traversal root — the directory part of its fixed prefix, before the first
----wildcard: if that root cannot be scanned for any reason other than
----**not existing**, the emptiness is unexplained and the caller is told.
----A root that does not exist genuinely has no documents in it.
----@param pattern string
+---  1. `vim.fn.glob` reports no error at all, so an unreadable directory returns
+---     exactly what "nothing matched" returns;
+---  2. checking only the pattern's FIXED PREFIX proves the first directory was
+---     readable and nothing about the wildcard-selected subtrees beneath it —
+---     with `$KB/agents` readable and `$KB/agents/lector` not, the search still
+---     came back empty and silent (lector r5);
+---  3. so the traversal is performed HERE, segment by segment, with every
+---     `fs_scandir` and `fs_stat` result BOUND. `ENOENT` is absence and is fine;
+---     any other failure means the emptiness is unexplained, and unexplained
+---     must never reach a caller as "absent".
+---
+---`vim.fn.glob` is deliberately not used: it cannot report what it could not
+---read, which is the entire question this function has to answer.
+---
+---Character classes (`[abc]`) are REFUSED rather than mishandled — no caller
+---needs them, and silently treating `[` as a literal would answer a different
+---question than the one asked.
+---@param pattern string  an ABSOLUTE path pattern using `*` and `?`
 ---@return string[] paths, string? err
 function M.glob(pattern)
   if type(pattern) ~= "string" or pattern == "" then return {}, "no pattern" end
+  if not pattern:match("^/") then
+    return {}, "glob: pattern must be absolute: " .. pattern
+  end
+  if pattern:find("[%[%]]") then
+    return {}, "glob: character classes are not supported: " .. pattern
+  end
+
+  local segs = vim.split(pattern, "/", { plain = true })
+  local cur = { "" }                      -- "" + "/seg" composes an absolute path
+  for i = 2, #segs do
+    local seg = segs[i]
+    if seg ~= "" then                     -- collapse `//`
+      local last = (i == #segs)
+      local nxt = {}
+      if seg:find("[%*%?]") then
+        local pat = _seg_pattern(seg)
+        for _, dir in ipairs(cur) do
+          local at = dir == "" and "/" or dir
+          local h, serr, scode = uv.fs_scandir(at)
+          if not h then
+            -- ENOENT is absence; anything else is a directory we NEEDED to
+            -- read and could not.
+            if scode ~= "ENOENT" then
+              return {}, ("glob: %s could not be traversed (%s: %s)")
+                :format(at, tostring(scode or "?"), tostring(serr or "scandir failed"))
+            end
+          else
+            while true do
+              local name = uv.fs_scandir_next(h)
+              if not name then break end
+              if name:match(pat) then nxt[#nxt + 1] = dir .. "/" .. name end
+            end
+          end
+        end
+      else
+        for _, dir in ipairs(cur) do
+          local path = dir .. "/" .. seg
+          if last then
+            nxt[#nxt + 1] = path          -- classified below
+          else
+            -- An INTERMEDIATE literal segment still has to be reachable. This
+            -- is the exact case the fixed-prefix check missed: `reviews` under
+            -- a wildcard-selected `agents/<reviewer>` whose parent denies
+            -- traversal fails here with EACCES instead of vanishing.
+            local st, serr, scode = uv.fs_stat(path)
+            if st then
+              nxt[#nxt + 1] = path
+            elseif scode ~= "ENOENT" then
+              return {}, ("glob: %s could not be read (%s: %s)")
+                :format(path, tostring(scode or "?"), tostring(serr or "stat failed"))
+            end
+          end
+        end
+      end
+      cur = nxt
+    end
+  end
+
   local out = {}
-  for _, path in ipairs(vim.fn.glob(pattern, false, true) or {}) do
+  for _, path in ipairs(cur) do
     local kind, kerr = M.kind(path)
     if kerr then
       -- A match we cannot classify makes the whole result untrustworthy: the
@@ -345,17 +426,6 @@ function M.glob(pattern)
       return {}, ("glob: %s matched but could not be read (%s)"):format(path, kerr)
     end
     if kind == "file" then out[#out + 1] = path end
-  end
-  if #out == 0 then
-    local fixed = pattern:match("^(.-)[%*%?%[]") or pattern
-    local root = vim.fn.fnamemodify(fixed, ":h")
-    if root ~= "" and root ~= "." then
-      local h, serr, scode = uv.fs_scandir(root)
-      if not h and scode ~= "ENOENT" then
-        return {}, ("glob: %s could not be traversed (%s: %s)"):format(
-          root, tostring(scode or "?"), tostring(serr or "scandir failed"))
-      end
-    end
   end
   table.sort(out)
   return out, nil
