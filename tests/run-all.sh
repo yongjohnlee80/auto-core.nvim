@@ -150,6 +150,7 @@ run_standalone "git write (ADR-0060)" tests/git_write.lua
 run_standalone "close-contract (ADR-0065 P0)" tests/adr0065-p0-close-contract.lua
 run_standalone "annotate surface (ADR-0065 P1)" tests/adr0065-p1-annotate.lua
 run_standalone "highlighting (ADR-0065 P2)" tests/adr0065-p2-highlight.lua
+run_standalone "docstore + drafts (ADR-0081 P1-P3)" tests/adr0081-docstore.lua
 run_pty
 run_bench
 
