@@ -118,6 +118,25 @@ function M.exists(path)
   return type(path) == "string" and path ~= "" and uv.fs_stat(path) ~= nil
 end
 
+---kind reports WHAT is at `path`: "file", "directory", "link", and so on.
+---
+---nil means absent. A caller that must reject a directory sitting where a
+---document belongs needs this, and the alternative — handing back a raw stat
+---table — would put filesystem details back in the caller that this module
+---exists to hold. Only ENOENT is absence, as everywhere else here.
+---@param path string
+---@return string? kind, string? err
+function M.kind(path)
+  if type(path) ~= "string" or path == "" then return nil, "no path" end
+  local st, serr, scode = uv.fs_stat(path)
+  if not st then
+    if scode == "ENOENT" then return nil, nil end
+    return nil, ("unreadable: %s (%s: %s)")
+      :format(path, tostring(scode or "?"), tostring(serr or "stat failed"))
+  end
+  return st.type, nil
+end
+
 ---mtime returns a comparable modification time in nanoseconds, or nil.
 ---@param path string
 ---@return integer?
@@ -340,9 +359,10 @@ M.LOCK_POLL_MS = lock.LOCK_POLL_MS
 ---invert a failure into a success.
 ---@param path string
 ---@param fn fun():any,any?
----@return any? value, string? err
-function M.with_lock(path, fn)
-  return lock.with_lock(path, fn)
+---@param opts { wait_ms: integer?, poll_ms: integer? }?
+---@return any? value, string? err, any? completed_value
+function M.with_lock(path, fn, opts)
+  return lock.with_lock(path, fn, opts)
 end
 
 M.lock = lock

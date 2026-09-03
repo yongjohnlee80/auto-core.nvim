@@ -104,6 +104,25 @@ do
   end)())
   ok("[1] list of a missing directory is empty, not an error",
     #ds.list(sb .. "/nope") == 0)
+  ok("[1] kind names what is at a path, and nil means ABSENT", (function()
+    ds.write(sb .. "/k/f.txt", "x")
+    ds.ensure_dir(sb .. "/k/d")
+    return ds.kind(sb .. "/k/f.txt") == "file"
+      and ds.kind(sb .. "/k/d") == "directory"
+      and select(1, ds.kind(sb .. "/k/nope")) == nil
+      and select(2, ds.kind(sb .. "/k/nope")) == nil
+  end)())
+  ok("[1] *** and a PRESENT but unreadable path is an error, not absence ***",
+    (function()
+      -- The same ENOENT discipline as read and delete: a caller asking "is a
+      -- directory in the way?" must not be told "nothing is there".
+      local hidden = sb .. "/k/hidden/f.txt"
+      ds.write(hidden, "x")
+      vim.fn.system({ "chmod", "000", sb .. "/k/hidden" })
+      local kind, err = ds.kind(hidden)
+      vim.fn.system({ "chmod", "755", sb .. "/k/hidden" })
+      return kind == nil and err ~= nil
+    end)())
   ok("[1] mtime is comparable, and nil for an absent path",
     type(ds.mtime(sb .. "/l/a.json")) == "number" and ds.mtime(sb .. "/nope") == nil)
 

@@ -514,6 +514,73 @@ end)()
     src:find('GIT_TERMINAL_PROMPT = "0"', 1, true) ~= nil)
 end)()
 
+-- ── [8] git.log.unpushed — which commits no remote has (batch item #7) ──
+-- Johno, 2026-09-03: "the commit tree should indicate if it's pushed to the
+-- origin or simply commited locally". The question is answered with a real
+-- remote, because the only interesting states are "on a remote" and "not", and
+-- a fixture without a remote can only ever produce one of them.
+;(function()
+  local L = require("auto-core.git.log")
+  local d = new_repo()
+  sync(function(cb) W.stage(d, "a.txt", cb) end)
+  sync(function(cb) W.commit(d, "pushed one", nil, cb) end)
+  local first = vim.trim(vim.system({ "git", "-C", d, "rev-parse", "HEAD" },
+    { text = true }):wait().stdout or "")
+
+  -- A repo with NO remotes: nothing is pushed, and that is the true answer.
+  local none = L.unpushed(d .. "/.git")
+  ok("[8] with no remotes at all, the commit reads as LOCAL",
+    none[first] == true, vim.inspect(none))
+
+  -- Now give it a remote and push only the FIRST commit.
+  local bare = vim.fn.tempname()
+  vim.fn.mkdir(bare, "p")
+  vim.system({ "git", "init", "-q", "--bare", bare }, { text = true }):wait()
+  vim.system({ "git", "-C", d, "remote", "add", "origin", bare }, { text = true }):wait()
+  vim.system({ "git", "-C", d, "push", "-q", "origin", "main" }, { text = true }):wait()
+
+  vim.fn.writefile({ "LOCAL ONLY" }, d .. "/a.txt")
+  sync(function(cb) W.stage(d, "a.txt", cb) end)
+  sync(function(cb) W.commit(d, "local one", nil, cb) end)
+  local second = vim.trim(vim.system({ "git", "-C", d, "rev-parse", "HEAD" },
+    { text = true }):wait().stdout or "")
+
+  local set, err = L.unpushed(d .. "/.git")
+  ok("[8] the read succeeds", err == nil, tostring(err))
+  ok("[8] *** the PUSHED commit is not in the unpushed set ***",
+    set[first] ~= true, vim.inspect(set))
+  ok("[8] *** the LOCAL-ONLY commit IS ***", set[second] == true, vim.inspect(set))
+  ok("[8] fixture: the two commits are different", first ~= second and #first == 40)
+
+  -- Pushing again empties the set: the answer tracks reality rather than being
+  -- computed once. A cached answer here is how a panel keeps showing orange
+  -- after a push.
+  vim.system({ "git", "-C", d, "push", "-q", "origin", "main" }, { text = true }):wait()
+  local after = L.unpushed(d .. "/.git")
+  ok("[8] *** after pushing, nothing is unpushed ***",
+    after[second] ~= true and next(after) == nil, vim.inspect(after))
+
+  -- A branch pushed to a DIFFERENT remote ref still counts as pushed, which is
+  -- why this uses `--not --remotes` and not `@{upstream}..HEAD`.
+  vim.fn.writefile({ "SIDE" }, d .. "/a.txt")
+  sync(function(cb) W.stage(d, "a.txt", cb) end)
+  sync(function(cb) W.commit(d, "side one", nil, cb) end)
+  local third = vim.trim(vim.system({ "git", "-C", d, "rev-parse", "HEAD" },
+    { text = true }):wait().stdout or "")
+  vim.system({ "git", "-C", d, "push", "-q", "origin", "HEAD:refs/heads/elsewhere" },
+    { text = true }):wait()
+  local side = L.unpushed(d .. "/.git")
+  ok("[8] *** pushed to ANOTHER remote branch still counts as pushed ***",
+    side[third] ~= true, vim.inspect(side))
+
+  ok("[8] an empty common_dir is refused, not guessed",
+    select(2, L.unpushed("")) ~= nil)
+  ok("[8] an unknown rev yields no answer rather than a crash", (function()
+    local u, e = L.unpushed(d .. "/.git", { rev = "no-such-ref" })
+    return type(u) == "table" and next(u) == nil and e ~= nil
+  end)())
+end)()
+
 io.stdout:write(string.format("\n%d passed, %d failed\n", pass, fail)); io.stdout:flush()
 if fail > 0 then os.exit(1) end
 os.exit(0)

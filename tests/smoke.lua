@@ -2119,6 +2119,26 @@ ok("[35] untracked shares added's green; renamed has a foreground of its own",
   and hl_of("AutoCoreGitRenamed").fg ~= nil and hl_of("AutoCoreGitRenamed").fg ~= added.fg,
   ("untracked=%s renamed=%s"):format(tostring(hl_of("AutoCoreGitUntracked").fg),
     tostring(hl_of("AutoCoreGitRenamed").fg)))
+-- PUSH STATE (batch item #7): the hash reads pushed-vs-local at a glance.
+local pushed, unpushed = hl_of("AutoCoreGitPushed"), hl_of("AutoCoreGitUnpushed")
+ok("[35] *** pushed and unpushed each have a foreground ***",
+  pushed.fg ~= nil and unpushed.fg ~= nil,
+  ("pushed=%s unpushed=%s"):format(tostring(pushed.fg), tostring(unpushed.fg)))
+ok("[35] *** and they are distinguishable from each other ***",
+  pushed.fg ~= unpushed.fg,
+  ("pushed=%s unpushed=%s"):format(tostring(pushed.fg), tostring(unpushed.fg)))
+ok("[35] neither paints a background — only the hash is coloured, not the row",
+  pushed.bg == nil and unpushed.bg == nil,
+  ("pushed.bg=%s unpushed.bg=%s"):format(tostring(pushed.bg), tostring(unpushed.bg)))
+ok("[35] unpushed is the SAME orange the modified rows already use",
+  unpushed.fg == modified.fg,
+  ("unpushed=%s modified=%s"):format(tostring(unpushed.fg), tostring(modified.fg)))
+ok("[35] *** pushed is NOT one of the status colours ***",
+  -- If it collided with added/modified/deleted, a purple hash would read as a
+  -- file status instead of a push state.
+  pushed.fg ~= added.fg and pushed.fg ~= modified.fg and pushed.fg ~= deleted.fg,
+  ("pushed=%s added=%s modified=%s deleted=%s"):format(tostring(pushed.fg),
+    tostring(added.fg), tostring(modified.fg), tostring(deleted.fg)))
 -- The v0.2.8 tint is gone: not registered, not derived, not listed.
 ok("[35] AutoCoreGitModifiedBg is no longer defined, derived or listed",
   vim.tbl_isempty(hl_of("AutoCoreGitModifiedBg"))

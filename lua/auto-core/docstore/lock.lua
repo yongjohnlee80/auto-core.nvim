@@ -173,11 +173,19 @@ M._owner_dead_for_tests = _owner_dead
 ---Anomalies, all reported the same way: the lock could not be unlinked; the lock
 ---pathname was REPLACED during the critical section (a successor exists and is
 ---deliberately preserved); or it vanished.
+---`opts.wait_ms` / `opts.poll_ms` let a CALLER own the window. A delegating
+---plugin keeps its own published constant (worktree.store.LOCK_WAIT_MS is
+---mutated by its suites and quoted in its refusal text), and a copied value
+---would silently stop driving the loop the moment either side changed.
 ---@param path string          the file being guarded (NOT the lock path)
 ---@param fn fun():any,any?    critical section; runs at most once
+---@param opts { wait_ms: integer?, poll_ms: integer? }?
 ---@return any? value, string? err, any? completed_value
-function M.with_lock(path, fn)
+function M.with_lock(path, fn, opts)
   local store = require("auto-core.docstore")
+  opts = opts or {}
+  local wait_ms = tonumber(opts.wait_ms) or M.LOCK_WAIT_MS
+  local poll_ms = tonumber(opts.poll_ms) or M.LOCK_POLL_MS
   if type(path) ~= "string" or path == "" then return nil, "with_lock: no path" end
   if type(fn) ~= "function" then return nil, "with_lock: fn required" end
   if not store.ensure_dir(vim.fn.fnamemodify(path, ":h")) then
@@ -190,7 +198,7 @@ function M.with_lock(path, fn)
   local held_by
 
   -- Deadline derived from the constant, not a hard-coded iteration count.
-  local attempts = math.max(1, math.floor(M.LOCK_WAIT_MS / M.LOCK_POLL_MS))
+  local attempts = math.max(1, math.floor(wait_ms / poll_ms))
   local open_err, open_code
   for _ = 1, attempts do
     -- Bind libuv's error. Treating any failure as contention reported an
@@ -204,7 +212,7 @@ function M.with_lock(path, fn)
     -- NO automatic takeover. A lock we do not own is never removed — it is
     -- REPORTED, with the identity needed to clear it deliberately and offline.
     held_by = select(1, store.read_json(lock))
-    vim.wait(M.LOCK_POLL_MS)
+    vim.wait(poll_ms)
   end
 
   if not fd then
@@ -254,7 +262,7 @@ function M.with_lock(path, fn)
         :format(vim.fn.fnamemodify(path, ":h"), lock)
     end
     return nil, ("with_lock: could not acquire %s after %dms (held by %s — %s).%s")
-      :format(lock, M.LOCK_WAIT_MS, who, status, repair)
+      :format(lock, wait_ms, who, status, repair)
   end
 
   ---_abandon closes and removes the lock we just created, and reports whether

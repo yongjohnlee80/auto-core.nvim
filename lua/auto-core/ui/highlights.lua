@@ -75,6 +75,20 @@ local DEFAULTS = {
   AutoCoreGitRenamed      = { link = "DiagnosticInfo",  default = true },
   AutoCoreGitUntracked    = { link = "DiagnosticOk",    default = true },
   AutoCoreGitConflicted   = { link = "ErrorMsg",        default = true },
+  -- PUSH STATE on a commit hash (Johno, 2026-09-03: "pushed commit hash be in
+  -- purple color, and none pushed on to be orange", with the title left plain).
+  -- Foreground-only for the same reason as the status colours above, and only
+  -- the HASH is painted: a whole row in purple would read as a category rather
+  -- than as a property of that one field.
+  --
+  -- `Statement` and `WarningMsg` rather than a literal `#8855ff`: a hard-coded
+  -- colour is the one thing no scheme can override, and it looks wrong in half
+  -- of them. `Statement` is purple/violet in Neovim's own default, gruvbox,
+  -- tokyonight and catppuccin; `WarningMsg` is the orange the modified-file
+  -- rows already use. Still `default = true`, so a scheme that names these
+  -- groups itself wins outright.
+  AutoCoreGitPushed       = { link = "Statement",       default = true },
+  AutoCoreGitUnpushed     = { link = "WarningMsg",      default = true },
   -- ADR-0060 §2.6: inline review annotations rendered as virt_lines.
   AutoCoreReviewFrame     = { link = "Comment",     default = true },
   AutoCoreReviewBody      = { link = "NormalFloat", default = true },
