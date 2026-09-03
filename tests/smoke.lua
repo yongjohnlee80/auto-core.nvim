@@ -95,11 +95,25 @@ end
 ok("M.version is a semver string",
   type(core.version) == "string" and core.version:match("^%d+%.%d+%.%d+$") ~= nil,
   tostring(core.version))
--- Regex-anchored to the v0.1.x line so additive patch bumps pass
--- without a manual edit; a minor/major bump trips it deliberately.
-ok("M.version matches the v0.1.x line",
-  type(core.version) == "string" and core.version:match("^0%.1%.%d+$") ~= nil,
-  "got " .. tostring(core.version))
+-- Anchored to the CHANGELOG's newest entry, not to a hard-coded minor line.
+-- It used to be pinned to `^0%.1%.%d+$`, which did not merely fail to catch a
+-- stale version — it ENFORCED one: `version.lua` sat at `0.1.62` across the
+-- whole v0.2.x line, ten releases behind, and this assertion was the reason it
+-- could not be corrected without "breaking a test". A version string exists to
+-- be believed, so the test now says it must MATCH THE RELEASE, and a bump that
+-- forgets the changelog (or a changelog that forgets the bump) fails here.
+ok("M.version is semver and MATCHES the CHANGELOG's newest entry", (function()
+  if type(core.version) ~= "string"
+    or core.version:match("^%d+%.%d+%.%d+$") == nil then return false end
+  local root = vim.fn.fnamemodify(
+    vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p"), ":h:h")
+  local lines = vim.fn.readfile(root .. "/CHANGELOG.md")
+  for _, line in ipairs(lines) do
+    local v = line:match("^## %[v(%d+%.%d+%.%d+)%]")
+    if v then return v == core.version, v end   -- the FIRST heading is newest
+  end
+  return false, "no version heading found in CHANGELOG.md"
+end)(), "module=" .. tostring(core.version))
 ok("M.api_version is 0.1 (auto-core.todo additive; all prior surfaces unchanged)",
   select(1, eq(core.api_version, "0.1")))
 ok("M.setup is a function", type(core.setup) == "function")
@@ -3980,9 +3994,9 @@ end)()
 print("\n[48] version + api_version sanity")
 ;(function()
 local v = require("auto-core.version")
-ok("version is on the v0.1.x line",
-  type(v.version) == "string" and v.version:match("^0%.1%.%d+$") ~= nil,
-  "got " .. tostring(v.version))
+-- Shape only here; the CHANGELOG agreement is asserted once, above.
+ok("version is semver", type(v.version) == "string"
+  and v.version:match("^%d+%.%d+%.%d+$") ~= nil, "got " .. tostring(v.version))
 ok("api_version is 0.1 (auto-core.todo additive surface)", v.api_version == "0.1")
 -- :h api_version semver gate consumers will use.
 local core = require("auto-core")

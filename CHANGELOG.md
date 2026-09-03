@@ -10,6 +10,67 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.2.12] — 2026-09-03 — ADR-0081: auto-core owns document persistence
+
+Strictly additive patch. Every surface below is new; nothing existing
+changed shape, and `api_version` stays as it was.
+
+**Housekeeping first, because it affected everything above it.** Three
+releases — `v0.2.9`, `v0.2.10`, `v0.2.11` — were tagged on a feature
+branch that did not contain `main`'s `fs.path` ancestry-boundary commit,
+so they shipped without it, and none of them has an entry here. `main`
+was merged into the release branch before this tag, so `v0.2.12`
+contains both lines. Separately, `version.lua` had reported `0.1.62`
+since long before the `v0.2.x` line: ten releases stale, and the reason
+`worktree.repos` probes for the functions it needs rather than trusting
+a version string. Corrected.
+
+### Added
+
+- **`auto-core.docstore`** — the family's document persistence layer, and
+  the only place in the family that touches the filesystem on another
+  plugin's behalf (ADR-0081 §2.1). Atomic write; a read that distinguishes
+  ABSENT from unreadable (only `ENOENT` means absent); `create_exclusive`
+  that writes a sibling temp in full and hard-links it into place, so a
+  claim's name never exists before its bytes; `delete` with the same
+  absent/error split; `kind`; `glob`; `list`; `mtime`; and ONE pretty JSON
+  encoder — two-space indent, sorted keys — for every persisted family
+  document. The encoder REFUSES a document it would have to change:
+  colliding rendered key names and unrenderable key types are errors, not
+  silently resolved.
+- **`auto-core.docstore.revisions`** — generic revisioned document
+  identity behind a validated handle. Exclusive claim, lease expiry,
+  retirement, and monotonic non-reuse: a number seen in ANY record kind is
+  spent, so a crashed writer's revision is never handed to the next writer
+  and a deleted record's number never returns as a second `r<N>`. The
+  handle is read-only and its grammar is injective — a key or suffix may
+  not carry a `.r<digits>` marker, and every verb refuses a revision that
+  is not an integer ≥ 1.
+- **`auto-core.docstore.lock`** — the store's mutual exclusion, MOVED from
+  `worktree.store` rather than reimplemented, with every property it had
+  earned there: a JSON owner record (pid, host, process start time), an
+  enum-driven liveness verdict, pid-reuse detection, the never-break rule,
+  a 10-second contention window that drives its own retry loop, and an
+  inode-guarded release. It also reports a release that FAILS instead of
+  returning success over a wedged store, and merges that with a raising
+  callback's own error rather than hiding one behind the other.
+- **`auto-core.drafts`** — pending, unsaved work, in the plugin every other
+  one may depend on. Process-memory lifetime; survives every view close;
+  clears on exactly two events. `items` plus an explicit `touched` bit are
+  content; `meta` is context and never makes a draft dirty.
+- **`auto-core.git.log.unpushed`** — the set of commits a named remote does
+  not contain (`origin` by default), for rendering push state per commit.
+
+### Fixed
+
+- `ui.diffview`'s file list paints its per-file status colours, using the
+  same foreground-only groups the repos tree uses, so one file reads the
+  same colour in both places.
+- `ui.diffview.close` honours a consumer's veto: a vetoed close keeps both
+  the internal state and the float registry entry.
+- New highlight groups `AutoCoreGitPushed` / `AutoCoreGitUnpushed`
+  (`Statement` / `WarningMsg`, foreground-only, `default = true`).
+
 ## [v0.2.8] — 2026-08-27 — ADR-0070: `fs.path.agent_workspace_root` ancestry boundary (`opts.stop`)
 
 Strictly additive patch; `api_version` stays `0.2`. One optional opts

@@ -904,6 +904,18 @@ return {
   -- past the 28-day auto-archive window on 2026-07-06; recent fixtures
   -- now compute relative to NOW. Suite 1382 passed / 0 failed. Patch
   -- within the v0.1.x line; `api_version` stays at `0.1`.
-  version     = "0.1.62",
+  -- 2026-09-03 (v0.2.12, ADR-0081): this string had sat at `0.1.62` since
+  -- long before the v0.2.x line -- ten releases stale, which is why
+  -- `worktree.repos` states that a version check "cannot substitute" for a
+  -- surface check and probes for the functions it needs instead. That surface
+  -- check stays, on its own merits; a self-reported version is a courtesy, and
+  -- a stale one is worse than none because it invites exactly the check it
+  -- cannot support. Corrected here to the version being tagged.
+  --
+  -- The v0.2.12 release carries ADR-0081: auto-core now owns document
+  -- persistence for the family (`docstore`, `docstore.revisions`,
+  -- `docstore.lock`, `drafts`), plus `git.log.unpushed`. `api_version` stays at
+  -- `0.1`: every surface added is additive, and nothing existing changed shape.
+  version     = "0.2.12",
   api_version = "0.1",
 }
