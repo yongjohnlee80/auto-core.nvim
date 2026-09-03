@@ -571,6 +571,35 @@ do
     attrs("AutoCoreGitAdded").fg ~= nil and attrs("AutoCoreGitAdded").bg == nil
     and attrs("AutoCoreGitDeleted").bg == nil and attrs("AutoCoreGitModified").bg == nil,
     vim.inspect({ added = attrs("AutoCoreGitAdded") }))
+
+  -- 2026-09-03: the `[added]`/`[deleted]`/… badge is GONE, replaced by a
+  -- one-glyph marker like the repos panel, and the counts are painted WHITE
+  -- (i.e. left unpainted — the status colour spans only `<mark> <path>`).
+  local function line_for(kind)
+    for i, f in ipairs(files) do if f.kind == kind then return lines[i] end end
+  end
+  ok("[10] *** NO [kind] badge on any row ***",
+    not line_for("added"):find("%[") and not line_for("deleted"):find("%[")
+    and not line_for("modified"):find("%[") and not line_for("modified"):find("%]"),
+    vim.inspect(lines))
+  ok("[10] *** each row leads with the repos-panel marker + path ***",
+    line_for("added"):match("^%+ added%.lua")
+    and line_for("deleted"):match("^D gone%.lua")
+    and line_for("modified"):match("^M edit%.lua"), vim.inspect(lines))
+  ok("[10] the +/- counts still follow the head", line_for("added"):find("%+1 %-0"))
+  ok("[10] *** the colour span covers the head only, not the counts ***",
+    (function()
+      -- `col`/`end_col` are present now, and end_col stops at the end of
+      -- `<mark> <path>` so the counts fall back to the default (white) fg.
+      for _, h in ipairs(hls) do
+        if not (h.col == 0 and type(h.end_col) == "number") then return false end
+        local text = lines[h.lnum + 1]
+        -- the painted slice is exactly the head; the char after it is a space,
+        -- and the counts (`+`) live beyond it.
+        if text:sub(h.end_col + 1):match("^  %+%d") == nil then return false end
+      end
+      return #hls == 3
+    end)(), vim.inspect(hls))
 end
 
 io.stdout:write(string.format("\n%d passed, %d failed\n", pass, fail))

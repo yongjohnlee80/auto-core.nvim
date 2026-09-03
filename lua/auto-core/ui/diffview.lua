@@ -230,20 +230,39 @@ local FILE_KIND_HL = {
   copied    = "AutoCoreGitRenamed",
 }
 
----_file_rows renders the left column: path plus its +/- counts, and the
----status highlight for each row (fg-only, so the selection's line highlight
----still shows through).
+---FILE_KIND_MARK is the one-glyph change marker, the SAME set the repos tree
+---uses (auto-finder `KIND_MARK`), so a file reads the same in the diff view's
+---file list as in the tree it was opened from.
+local FILE_KIND_MARK = {
+  added     = "+",
+  modified  = "M",
+  deleted   = "D",
+  renamed   = "R",
+  copied    = "R",
+}
+
+---_file_rows renders the left column: `<mark> <path>  +N -N`, matching the
+---repos panel's file rows (Johno, 2026-09-03).
+---
+---The `[added]` / `[deleted]` / … badge is GONE: the marker glyph already says
+---what the badge did, in one column instead of a trailing word. And the paint
+---is now a SPAN, not a whole line — the marker and the filename carry the
+---status colour, while the `+N -N` counts are left unpainted so they render in
+---the pane's default (white) foreground and read the same whatever the change
+---kind. So each hl entry carries `col`/`end_col` for the painter to honour.
 ---@param files table[]
----@return string[] lines, { lnum: integer, hl: string }[] hls
+---@return string[] lines, { lnum: integer, hl: string, col: integer, end_col: integer }[] hls
 local function _file_rows(files)
   local lines, hls = {}, {}
   for _, f in ipairs(files) do
     local st = gitdiff.stats(f)
-    local tag = f.kind == "modified" and "" or (" [" .. f.kind .. "]")
-    lines[#lines + 1] = string.format("%s  +%d -%d%s",
-      f.path, st.added, st.removed, tag)
+    -- The coloured head is `<mark> <path>`; the counts follow it, uncoloured.
+    local head = (FILE_KIND_MARK[f.kind] or "?") .. " " .. f.path
+    lines[#lines + 1] = string.format("%s  +%d -%d", head, st.added, st.removed)
     local hl = FILE_KIND_HL[f.kind]
-    if hl then hls[#hls + 1] = { lnum = #lines - 1, hl = hl } end
+    if hl then
+      hls[#hls + 1] = { lnum = #lines - 1, hl = hl, col = 0, end_col = #head }
+    end
   end
   if #lines == 0 then lines = { "(no files)" } end
   return lines, hls
@@ -663,7 +682,13 @@ function M.open(opts)
     local fns = marks.ns("diffview-files")
     marks.clear(left, fns)
     for _, h in ipairs(fhls) do
-      pcall(marks.line, left, fns, h.lnum, h.hl)
+      if h.col then
+        -- Only the `<mark> <path>` head is painted; the +/- counts after it are
+        -- left in the pane's default foreground.
+        pcall(marks.range, left, fns, h.lnum, h.col, h.lnum, h.end_col, h.hl)
+      else
+        pcall(marks.line, left, fns, h.lnum, h.hl)
+      end
     end
   end
 

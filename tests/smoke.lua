@@ -12445,7 +12445,13 @@ print("\n[diffview] auto-core.ui.diffview — three columns, git a/ b/ (ADR-0060
   ok("[diffview] the file list shows both files with +/- counts",
     left:find("keep.lua", 1, true) and left:find("gone.lua", 1, true)
     and left:find("+2", 1, true), left)
-  ok("[diffview] a deleted file is tagged", left:find("deleted", 1, true) ~= nil, left)
+  -- 2026-09-03: the `[deleted]` badge became a one-glyph `D ` marker (repos
+  -- panel parity), so the row now reads `D gone.lua …` rather than `[deleted]`.
+  ok("[diffview] a deleted file leads with the D marker",
+    left:find("\nD gone.lua", 1, true) ~= nil or left:find("^D gone.lua", 1, true) ~= nil,
+    left)
+  ok("[diffview] no [kind] badges remain on the file list",
+    left:find("[", 1, true) == nil, left)
 
   local a_side = table.concat(lines("middle"), "\n")
   local b_side = table.concat(lines("preview"), "\n")
