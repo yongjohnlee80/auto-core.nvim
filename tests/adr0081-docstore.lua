@@ -185,6 +185,73 @@ do
     local hits = ds.glob(n .. "/*.md")
     return #hits == 1 and hits[1]:find("top%.md$") ~= nil
   end)())
+  ok("[1] *** glob: a SIBLING FILE beside a wildcard match is not an error ***",
+    (function()
+      -- lector r6: an intermediate wildcard appended every matching name, so a
+      -- plain file (`agents/README` beside `agents/lector`) went into the next
+      -- segment, produced ENOTDIR, and -- because every non-ENOENT failure was
+      -- fatal -- killed the whole search, DISCARDING the valid match. A sibling
+      -- file is not an error; it is simply not a branch.
+      local n = sb .. "/g/sibling"
+      ds.write(n .. "/agents/lector/reviews/good.md", "prose")
+      ds.write(n .. "/agents/README", "a sibling FILE, not a reviewer")
+      local hits, err = ds.glob(n .. "/agents/*/reviews/*.md")
+      return err == nil and #hits == 1
+        and hits[1]:find("/lector/reviews/good%.md$") ~= nil
+    end)(), vim.inspect(ds.glob(sb .. "/g/sibling/agents/*/reviews/*.md")))
+  ok("[1] glob: an intermediate LITERAL that is a file is a non-match, not an error",
+    (function()
+      -- The same rule on the other branch: `reviews` where the reviewer entry
+      -- is itself a file.
+      local n = sb .. "/g/litfile"
+      ds.write(n .. "/agents/lector", "a FILE where a directory belongs")
+      local hits, err = ds.glob(n .. "/agents/lector/reviews/*.md")
+      return err == nil and #hits == 0
+    end)())
+  ok("[1] *** glob: but a DENIED directory beside a valid one is still FATAL ***",
+    (function()
+      -- The distinction that matters: not-a-directory is a non-branch, while
+      -- unreadable is fatal -- because the walk cannot account for what is
+      -- under it, which is the whole point of the last three rounds.
+      local n = sb .. "/g/mixed"
+      ds.write(n .. "/agents/lector/reviews/good.md", "prose")
+      ds.write(n .. "/agents/juliet/reviews/also.md", "prose")
+      vim.fn.system({ "chmod", "000", n .. "/agents/juliet" })
+      local hits, err = ds.glob(n .. "/agents/*/reviews/*.md")
+      vim.fn.system({ "chmod", "755", n .. "/agents/juliet" })
+      return #hits == 0 and err ~= nil and tostring(err):find("juliet", 1, true)
+    end)())
+  ok("[1] glob: a wildcard FOLLOWED BY a wildcard walks both levels",
+    (function()
+      local n = sb .. "/g/deep"
+      ds.write(n .. "/a/b/c.md", "x")
+      ds.write(n .. "/a/other/c.md", "y")
+      ds.write(n .. "/a/b/skip.txt", "z")
+      local hits, err = ds.glob(n .. "/*/*/c.md")
+      return err == nil and #hits == 2
+        and hits[1]:find("/a/b/c%.md$") and hits[2]:find("/a/other/c%.md$")
+    end)())
+  ok("[1] glob: a symlinked directory is traversable", (function()
+    local n = sb .. "/g/link"
+    ds.write(n .. "/real/reviews/x.md", "prose")
+    local okl = vim.fn.system({ "ln", "-s", n .. "/real", n .. "/alias" })
+    if vim.v.shell_error ~= 0 then return true end   -- no symlink support
+    local hits, err = ds.glob(n .. "/*/reviews/*.md")
+    -- Both the real directory and the alias resolve, so a symlinked reviews
+    -- directory is not silently skipped.
+    return err == nil and #hits == 2, okl
+  end)())
+  ok("[1] glob: a WILDCARD-FREE pattern under a file parent is absence, not an error",
+    (function()
+      -- The one path that reaches the classification-time tolerance: with no
+      -- wildcard there is no scandir to discover ENOTDIR, so the final `kind`
+      -- call is where a file-shaped parent surfaces. Absence, not an error --
+      -- the caller asked whether a document is there, and it is not.
+      local n = sb .. "/g/litparent"
+      ds.write(n .. "/file", "a FILE where a directory belongs")
+      local hits, err = ds.glob(n .. "/file/inner.md")
+      return #hits == 0 and err == nil
+    end)(), vim.inspect({ ds.glob(sb .. "/g/litparent/file/inner.md") }))
   ok("[1] glob: a relative pattern and a character class are refused",
     select(2, ds.glob("relative/*.md")) ~= nil
     and select(2, ds.glob("/tmp/[ab].md")) ~= nil)

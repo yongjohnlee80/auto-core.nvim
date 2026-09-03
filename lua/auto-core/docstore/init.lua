@@ -379,9 +379,19 @@ function M.glob(pattern)
           local at = dir == "" and "/" or dir
           local h, serr, scode = uv.fs_scandir(at)
           if not h then
-            -- ENOENT is absence; anything else is a directory we NEEDED to
-            -- read and could not.
-            if scode ~= "ENOENT" then
+            -- THE ONE RULE, applied where the fact is DISCOVERED: `ENOENT`
+            -- (nothing there) and `ENOTDIR` (a sibling FILE matched a wildcard,
+            -- or a literal names a file) are ordinary NON-BRANCHES; anything
+            -- else is a directory the search NEEDED to read and could not, and
+            -- must be fatal — that is r4/r5's finding.
+            --
+            -- r6 made every non-ENOENT failure fatal, so a plain
+            -- `agents/README` beside `agents/lector` aborted the whole search
+            -- and discarded the valid match. Then the first fix for THAT added
+            -- proactive directory filters, which the matrix showed could never
+            -- fail: this single tolerance already handles every case, and two
+            -- guards where one suffices only obscure which is holding the line.
+            if scode ~= "ENOENT" and scode ~= "ENOTDIR" then
               return {}, ("glob: %s could not be traversed (%s: %s)")
                 :format(at, tostring(scode or "?"), tostring(serr or "scandir failed"))
             end
@@ -396,21 +406,14 @@ function M.glob(pattern)
       else
         for _, dir in ipairs(cur) do
           local path = dir .. "/" .. seg
-          if last then
-            nxt[#nxt + 1] = path          -- classified below
-          else
-            -- An INTERMEDIATE literal segment still has to be reachable. This
-            -- is the exact case the fixed-prefix check missed: `reviews` under
-            -- a wildcard-selected `agents/<reviewer>` whose parent denies
-            -- traversal fails here with EACCES instead of vanishing.
-            local st, serr, scode = uv.fs_stat(path)
-            if st then
-              nxt[#nxt + 1] = path
-            elseif scode ~= "ENOENT" then
-              return {}, ("glob: %s could not be read (%s: %s)")
-                :format(path, tostring(scode or "?"), tostring(serr or "stat failed"))
-            end
-          end
+          -- Appended unconditionally: a segment that does not exist, or is
+          -- not a directory, is discovered by the next `fs_scandir` (or by the
+          -- final classification) and treated there. A proactive check here
+          -- was pure redundancy -- the mutation matrix showed it could not
+          -- fail, because `fs_stat` on a DENIED directory succeeds (only the
+          -- parent needs +x), so it could not detect the one case that
+          -- matters either.
+          nxt[#nxt + 1] = path
         end
       end
       cur = nxt
@@ -420,6 +423,11 @@ function M.glob(pattern)
   local out = {}
   for _, path in ipairs(cur) do
     local kind, kerr = M.kind(path)
+    if kerr and tostring(kerr):find("ENOTDIR", 1, true) then
+      -- A candidate under a path that turned out to be a file: the same
+      -- non-branch, discovered at classification time instead.
+      kind, kerr = nil, nil
+    end
     if kerr then
       -- A match we cannot classify makes the whole result untrustworthy: the
       -- one we could not read may be exactly the one the caller asked about.
