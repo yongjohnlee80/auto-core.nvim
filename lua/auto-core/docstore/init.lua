@@ -311,22 +311,54 @@ function M.delete(path)
   return true, nil
 end
 
----glob returns the paths matching a shell-style pattern, sorted.
+---glob returns the paths matching a shell-style pattern, sorted, plus an error.
 ---
 ---auto-core owns filesystem reads, so a caller that must SEARCH for documents
 ---asks here rather than reaching for `vim.fn.glob` itself — which is how a
 ---delegate module quietly grows its own I/O back (AC1). Files only: a directory
 ---matching the pattern is not a document, the same rule `list` follows.
+---
+---**AN EMPTY RESULT IS NOT ABSENCE UNLESS THE TRAVERSAL SUCCEEDED.** This is the
+---same conflation that was fixed one layer up in worktree's orphan search and
+---survived down here (lector r4): `vim.fn.glob` reports no error, so an
+---unreadable directory returns exactly what "nothing matched" returns, and
+---`M.kind`'s errors were being discarded on top of that. A caller deciding
+---whether a paired document still exists then reads "could not look" as
+---"nothing there" — and reports a review deleted while its Markdown remains.
+---
+---So two things are checked. Any candidate whose kind cannot be established is
+---an error, not a skip. And an EMPTY result is confirmed against the pattern's
+---traversal root — the directory part of its fixed prefix, before the first
+---wildcard: if that root cannot be scanned for any reason other than
+---**not existing**, the emptiness is unexplained and the caller is told.
+---A root that does not exist genuinely has no documents in it.
 ---@param pattern string
----@return string[]
+---@return string[] paths, string? err
 function M.glob(pattern)
-  if type(pattern) ~= "string" or pattern == "" then return {} end
+  if type(pattern) ~= "string" or pattern == "" then return {}, "no pattern" end
   local out = {}
   for _, path in ipairs(vim.fn.glob(pattern, false, true) or {}) do
-    if M.kind(path) == "file" then out[#out + 1] = path end
+    local kind, kerr = M.kind(path)
+    if kerr then
+      -- A match we cannot classify makes the whole result untrustworthy: the
+      -- one we could not read may be exactly the one the caller asked about.
+      return {}, ("glob: %s matched but could not be read (%s)"):format(path, kerr)
+    end
+    if kind == "file" then out[#out + 1] = path end
+  end
+  if #out == 0 then
+    local fixed = pattern:match("^(.-)[%*%?%[]") or pattern
+    local root = vim.fn.fnamemodify(fixed, ":h")
+    if root ~= "" and root ~= "." then
+      local h, serr, scode = uv.fs_scandir(root)
+      if not h and scode ~= "ENOENT" then
+        return {}, ("glob: %s could not be traversed (%s: %s)"):format(
+          root, tostring(scode or "?"), tostring(serr or "scandir failed"))
+      end
+    end
   end
   table.sort(out)
-  return out
+  return out, nil
 end
 
 ---list returns the entry names in `dir`, optionally filtered by a Lua pattern.

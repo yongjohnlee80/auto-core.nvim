@@ -111,8 +111,65 @@ do
     local hits = ds.glob(sb .. "/g/*/*.md")
     return #hits == 2 and hits[1]:find("one%.md$") and hits[2]:find("two%.md$")
   end)(), vim.inspect(ds.glob(sb .. "/g/*/*.md")))
-  ok("[1] glob guards an empty pattern and returns {} for no matches",
-    #ds.glob("") == 0 and #ds.glob(sb .. "/g/nope/*.md") == 0)
+  ok("[1] glob guards an empty pattern", (function()
+    local hits, err = ds.glob("")
+    return #hits == 0 and err ~= nil
+  end)())
+  ok("[1] *** glob: READABLE-EMPTY establishes absence (no error) ***",
+    (function()
+      -- The traversal root exists and can be scanned; nothing matches. That is
+      -- a real answer, and a caller may act on it.
+      ds.ensure_dir(sb .. "/g/empty")
+      local hits, err = ds.glob(sb .. "/g/empty/*.md")
+      return #hits == 0 and err == nil
+    end)())
+  ok("[1] glob: a root that does not EXIST is also absence, not an error",
+    (function()
+      local hits, err = ds.glob(sb .. "/g/never-created/*.md")
+      return #hits == 0 and err == nil
+    end)())
+  ok("[1] *** glob: RESOLVABLE-BUT-UNREADABLE is an ERROR, not absence ***",
+    (function()
+      -- lector's r4 probe, as a control: the root resolves and exists, but
+      -- cannot be traversed. `vim.fn.glob` reports no error, so this returned
+      -- exactly what "nothing matched" returns -- and a caller deciding whether
+      -- a paired document still exists read it as "nothing there".
+      local locked = sb .. "/g/locked"
+      ds.write(locked .. "/agents/a/reviews/x-r1-review.md", "prose")
+      vim.fn.system({ "chmod", "000", locked .. "/agents" })
+      local hits, err = ds.glob(locked .. "/agents/*/reviews/*-r1-review.md")
+      vim.fn.system({ "chmod", "755", locked .. "/agents" })
+      return #hits == 0 and err ~= nil
+        and tostring(err):find("could not be traversed", 1, true) ~= nil
+    end)())
+  ok("[1] CONTROL: with the same root READABLE, the document is found",
+    (function()
+      local locked = sb .. "/g/locked"
+      local hits, err = ds.glob(locked .. "/agents/*/reviews/*-r1-review.md")
+      return #hits == 1 and err == nil
+    end)())
+  ok("[1] *** glob: a match whose KIND cannot be read is an error, not a skip ***",
+    (function()
+      -- INJECTED, because the two guards cannot be separated by permissions
+      -- alone: any directory unreadable enough to break `stat` on a match also
+      -- stops `glob` from listing it, so the traversal check fires first and
+      -- this branch never runs. Injection isolates it -- the entry we cannot
+      -- classify may be exactly the one the caller asked about, so the whole
+      -- result is untrustworthy rather than one entry being skipped.
+      local uvx = vim.uv or vim.loop
+      local d = sb .. "/g/kindfail"
+      ds.write(d .. "/a.md", "x")
+      local target = d .. "/a.md"
+      local real_stat = uvx.fs_stat
+      uvx.fs_stat = function(path, ...)
+        if path == target then return nil, "forced permission failure", "EACCES" end
+        return real_stat(path, ...)
+      end
+      local hits, err = ds.glob(d .. "/*.md")
+      uvx.fs_stat = real_stat
+      return #hits == 0 and err ~= nil
+        and tostring(err):find("could not be read", 1, true) ~= nil
+    end)())
   ok("[1] kind names what is at a path, and nil means ABSENT", (function()
     ds.write(sb .. "/k/f.txt", "x")
     ds.ensure_dir(sb .. "/k/d")
