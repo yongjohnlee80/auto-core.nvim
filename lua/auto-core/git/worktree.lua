@@ -525,6 +525,101 @@ function M.create(repo, branch_name, target_path, base_ref, on_done)
   end))
 end
 
+-- ─── worktree identity (ADR-0081 §2.5) ───────────────────────────────────
+
+---WORKTREE_UUID_FILE is the per-worktree identity file, kept in the worktree's
+---git ADMIN directory — never in the tracked tree, so it is not committed and
+---never pushed.
+M.WORKTREE_UUID_FILE = "auto-core-worktree-uuid"
+
+---_registration_gitdir resolves a worktree's git ADMIN directory.
+---
+---For a linked worktree `<path>/.git` is a FILE reading
+---`gitdir: <common>/worktrees/<name>`; for the main worktree `<path>/.git` is
+---the git directory itself. Read through `docstore` (the file owner) — this is
+---the ONE place in the family that interprets the `.git` layout, so no consumer
+---has to (ADR-0081 §2.5, lector r2: git-layout knowledge stays in auto-core).
+---@param worktree_path string
+---@return string?  absolute registration gitdir
+local function _registration_gitdir(worktree_path)
+  if type(worktree_path) ~= "string" or worktree_path == "" then return nil end
+  local ok, ds = pcall(require, "auto-core.docstore")
+  if not ok or type(ds) ~= "table" then return nil end
+  local dotgit = worktree_path .. "/.git"
+  local kind = ds.kind and ds.kind(dotgit) or nil
+  if kind == "directory" then
+    return vim.fs and vim.fs.normalize(dotgit) or dotgit
+  elseif kind == "file" then
+    local content = ds.read and select(1, ds.read(dotgit)) or nil
+    local target = type(content) == "string"
+      and content:match("gitdir:%s*(.-)%s*$") or nil
+    if not target or target == "" then return nil end
+    if not target:match("^/") then target = worktree_path .. "/" .. target end
+    return vim.fs and vim.fs.normalize(target) or target
+  end
+  return nil
+end
+
+---_mint_uuid returns an unguessable id. Unique, not secret.
+local function _mint_uuid()
+  local uv = vim.uv or vim.loop
+  if uv and uv.random then
+    local ok, bytes = pcall(uv.random, 16)
+    if ok and type(bytes) == "string" then
+      return (bytes:gsub(".", function(c) return string.format("%02x", c:byte()) end))
+    end
+  end
+  math.randomseed((os.time() * 1000 + (vim.fn.getpid and vim.fn.getpid() or 0)) % 2147483647)
+  local t = {}
+  for _ = 1, 16 do t[#t + 1] = string.format("%02x", math.random(0, 255)) end
+  return table.concat(t, "")
+end
+
+---worktree_id returns a DURABLE, per-incarnation identity for a worktree — an
+---opaque UUID, not its path and not its git registration name.
+---
+---Neither a path nor a registration name is identity: a checkout can move, and
+---`git worktree remove` + `add` can reuse a registration name (ADR-0081 §2.5,
+---lector). So the id is a UUID persisted in the worktree's git ADMIN directory
+---(`<gitdir>/auto-core-worktree-uuid`):
+---
+---  * created LAZILY, only when `opts.create` is true (a bind);
+---  * an exclusive create reconciles racing binds onto one id (the loser reads
+---    the winner's value back rather than overwriting it);
+---  * retained across `git worktree move` — the admin dir survives, so the same
+---    worktree keeps the same id;
+---  * FRESH on remove-and-recreate — the admin dir is deleted on remove and
+---    recreated empty on add, so a new incarnation mints a new UUID whatever its
+---    path or registration name.
+---
+---`opts.create = false` (the default) READS an existing id and writes nothing,
+---so a peek never mutates admin metadata. The returned value is opaque: callers
+---key on it and MUST NOT parse it or the `.git` layout themselves.
+---@param worktree_path string
+---@param opts { create: boolean? }?
+---@return string? uuid
+function M.worktree_id(worktree_path, opts)
+  local reg = _registration_gitdir(worktree_path)
+  if not reg then return nil end
+  local ok, ds = pcall(require, "auto-core.docstore")
+  if not ok or type(ds) ~= "table" then return nil end
+  local uuid_path = reg .. "/" .. M.WORKTREE_UUID_FILE
+  local existing = ds.read and select(1, ds.read(uuid_path)) or nil
+  if type(existing) == "string" and vim.trim(existing) ~= "" then
+    return vim.trim(existing)
+  end
+  if not (opts and opts.create) then return nil end
+  local uuid = _mint_uuid()
+  local claimed = ds.create_exclusive and ds.create_exclusive(uuid_path, uuid .. "\n")
+  if not claimed then
+    local again = ds.read and select(1, ds.read(uuid_path)) or nil
+    if type(again) == "string" and vim.trim(again) ~= "" then
+      return vim.trim(again)
+    end
+  end
+  return uuid
+end
+
 ---Test-only — clears session-scoped storage so smoke tests start clean.
 function M._reset_for_tests()
   _workspace_root = nil
