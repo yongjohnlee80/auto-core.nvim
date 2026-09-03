@@ -10,6 +10,59 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.2.8] — 2026-08-27 — ADR-0070: `fs.path.agent_workspace_root` ancestry boundary (`opts.stop`)
+
+Strictly additive patch; `api_version` stays `0.2`. One optional opts
+field on ONE public resolver; default (`stop = nil`) behavior is
+byte-identical. Public `project_root` / `git_root` / `workspace_root`
+surfaces are unchanged.
+
+### Added
+
+- **`fs/path.lua` `agent_workspace_root({ start, stop })`.** Optional
+  inclusive ancestry boundary (ADR-0070, lector-approved at rev 3
+  after three review rounds). Ancestors from `start` up to and
+  including `stop` are consulted; anything strictly above `stop` is
+  invisible to ALL three resolution passes (`.auto-agents` walk,
+  `.bare` walk, and the internal valid-`.git` resolution, which now
+  runs through the shared `walk_up_for_markers` helper directly
+  rather than `M.git_root` — deliberately, so no other public
+  resolver grows the knob).
+
+  **Fail closed:** `nil` is the only unbounded form. A non-nil `stop`
+  that is not the normalized lexical ancestor-or-self of `start` —
+  including the filesystem root, which `normalize("/")` reduces to
+  `""` — raises an argument error naming the boundary contract. A
+  typo'd or stale boundary must never silently restore the unbounded
+  walk it exists to bound. Ancestry is lexical; symlinks are not
+  resolved.
+
+### Why
+
+Three smoke §[24] assertions failed at the 2026-08-23 release gate
+because `/tmp/.auto-agents/` (littered by an agent-spawned nvim
+provisioning its mailbox at cwd) legitimately collapsed every
+marker-less fixture via rule 1's full-ancestry precedence. The
+production code was correct; the test's environment assumption was
+the defect — and the recurrence is structural (agents run nvim from
+arbitrary cwds). Every §[24] call now passes `stop = td` (the suite's
+own fixture root), making the fixture's ancestry assumptions explicit
+and self-enforcing regardless of machine state.
+
+### Test surface
+
+Smoke §[24] grows a six-pin pass-discriminating matrix with hermetic
+bounded inclusion controls only (no unbounded control call anywhere):
+inclusive edge, `.auto-agents` / `.bare` / valid-`.git` exclusion
+above the boundary each with a widened-`stop` control, the fail-closed
+contract (off-ancestry + filesystem root), and a marker-less walk
+under a dirty sibling subtree. Root-stop rejection is also pinned
+when `start` itself is `/`, so the existing empty-normalized-start
+fallback cannot bypass fail-closed validation. Mutation-verified:
+removing the `.bare` bound fails exactly the `.bare` exclusion pin; replacing the
+fail-closed validation with a silent ignore fails exactly the two
+invalid-`stop` pins. Smoke **1768/0**; `tests/run-all.sh` fully green.
+
 ## [v0.1.65] — 2026-08-21 — ADR-0059: `fs.watch` ignores the agent mailbox transport
 
 Strictly additive patch; `api_version` stays `0.1`. One new

@@ -185,7 +185,7 @@ local function _is_valid_git_marker(marker_path)
   return false
 end
 
-local function walk_up_for_markers(start, markers)
+local function walk_up_for_markers(start, markers, stop)
   local cur = M.normalize(start or vim.fn.getcwd())
   if cur == "" then return nil end
   while cur ~= "" and cur ~= "/" do
@@ -201,6 +201,11 @@ local function walk_up_for_markers(start, markers)
         end
       end
     end
+    -- ADR-0070: inclusive ancestry boundary — `stop` (a normalized,
+    -- pre-validated ancestor of `start`) halts the walk AFTER its own
+    -- level is checked, so a marker AT `stop` is found and anything
+    -- strictly above is invisible.
+    if stop and cur == stop then break end
     local parent = M.parent(cur)
     if parent == cur then break end
     cur = parent
@@ -302,36 +307,69 @@ end
 ---     `~/` with no project above): the raw cwd, matching the legacy
 ---     capture so a non-project launch is keyed exactly as before.
 ---
+---Ancestry boundary (ADR-0070): `opts.stop` optionally bounds ALL
+---passes to the ancestry from `start` up to **and including** `stop`
+---— anything strictly above `stop` is invisible to the resolution.
+---`stop = nil` (or absent) is the ONLY unbounded form. A non-nil
+---`stop` must be a **lexical** ancestor-or-self of `start` —
+---normalization does not resolve symlinks — and must not be the
+---filesystem root (`normalize("/")` is `""`); anything else fails
+---closed with an argument error. Primarily a test-isolation knob
+---(smoke fixtures pass the fixture root so environmental ancestors
+---like a stray `/tmp/.auto-agents/` cannot leak into assertions).
+---
 ---Pure (filesystem walk only). Operator/explicit overrides
 ---(`WORKTREE_ROOT` env, `worktree.setup({ root })`) are applied by the
 ---caller (`worktree.nvim`'s capture point) ABOVE this resolver.
----@param opts { start: string? }?
+---@param opts { start: string?, stop: string? }?
 ---@return string
 function M.agent_workspace_root(opts)
   opts = opts or {}
   local start = M.normalize(opts.start or vim.fn.getcwd())
+
+  -- ADR-0070: validate the boundary BEFORE any pass runs. Fail
+  -- closed — a typo'd or stale `stop` must never silently restore
+  -- the unbounded walk it exists to bound.
+  local stop
+  if opts.stop ~= nil then
+    if type(opts.stop) ~= "string" then
+      error("agent_workspace_root: opts.stop must be a string (lexical ancestor of start) or nil")
+    end
+    stop = M.normalize(opts.stop)
+    if stop == "" or stop == "/"
+        or not M.is_under(start, stop) then
+      error("agent_workspace_root: opts.stop must be a lexical ancestor-or-self of start"
+        .. " (the filesystem root is not an admissible boundary; use nil for the natural"
+        .. " filesystem limit), got: " .. opts.stop)
+    end
+  end
   if start == "" then return start end
 
-  -- 1. `.auto-agents/` — highest precedence, full-ancestry walk.
+  -- 1. `.auto-agents/` — highest precedence, full-ancestry walk
+  --    (bounded by `stop` when given — ADR-0070).
   local cur = start
   while cur ~= "" and cur ~= "/" do
     if M.is_dir(M.join(cur, ".auto-agents")) then return cur end
+    if stop and cur == stop then break end
     local parent = M.parent(cur)
     if parent == cur then break end
     cur = parent
   end
 
-  -- 2. `.bare/` container.
+  -- 2. `.bare/` container (bounded likewise).
   cur = start
   while cur ~= "" and cur ~= "/" do
     if M.is_dir(M.join(cur, ".bare")) then return cur end
+    if stop and cur == stop then break end
     local parent = M.parent(cur)
     if parent == cur then break end
     cur = parent
   end
 
-  -- 3. Plain git repo root (the dir holding `.git`, not its parent).
-  local gr = M.git_root({ start = start })
+  -- 3. Plain git repo root (the dir holding `.git`, not its parent)
+  --    via the shared bounded helper — NOT M.git_root, whose public
+  --    opts must not grow `stop` (ADR-0070 rev 2).
+  local gr = walk_up_for_markers(start, { ".git" }, stop)
   if gr then return gr end
 
   -- 4. Marker-less: the start dir itself, unchanged.
