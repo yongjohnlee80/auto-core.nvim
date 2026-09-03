@@ -96,6 +96,13 @@ M.health = require("auto-core.health")
 M.lsp    = require("auto-core.lsp")
 M.files  = require("auto-core.files")
 M.debug  = require("auto-core.debug")
+-- ADR-0081: auto-core owns resource allocation, including reading and writing
+-- files. `docstore` is the family's document persistence layer (and
+-- `docstore.revisions` the generic revisioned-identity allocator); `drafts`
+-- holds pending, uncommitted work so every plugin — and an agent — can reach it.
+-- Neither knows what a review is.
+M.docstore = require("auto-core.docstore")
+M.drafts   = require("auto-core.drafts")
 M.mailbox = require("auto-core.mailbox")
 M.trust   = require("auto-core.trust")
 

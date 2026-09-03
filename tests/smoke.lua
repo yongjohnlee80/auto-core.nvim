@@ -95,11 +95,25 @@ end
 ok("M.version is a semver string",
   type(core.version) == "string" and core.version:match("^%d+%.%d+%.%d+$") ~= nil,
   tostring(core.version))
--- Regex-anchored to the v0.1.x line so additive patch bumps pass
--- without a manual edit; a minor/major bump trips it deliberately.
-ok("M.version matches the v0.1.x line",
-  type(core.version) == "string" and core.version:match("^0%.1%.%d+$") ~= nil,
-  "got " .. tostring(core.version))
+-- Anchored to the CHANGELOG's newest entry, not to a hard-coded minor line.
+-- It used to be pinned to `^0%.1%.%d+$`, which did not merely fail to catch a
+-- stale version — it ENFORCED one: `version.lua` sat at `0.1.62` across the
+-- whole v0.2.x line, ten releases behind, and this assertion was the reason it
+-- could not be corrected without "breaking a test". A version string exists to
+-- be believed, so the test now says it must MATCH THE RELEASE, and a bump that
+-- forgets the changelog (or a changelog that forgets the bump) fails here.
+ok("M.version is semver and MATCHES the CHANGELOG's newest entry", (function()
+  if type(core.version) ~= "string"
+    or core.version:match("^%d+%.%d+%.%d+$") == nil then return false end
+  local root = vim.fn.fnamemodify(
+    vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p"), ":h:h")
+  local lines = vim.fn.readfile(root .. "/CHANGELOG.md")
+  for _, line in ipairs(lines) do
+    local v = line:match("^## %[v(%d+%.%d+%.%d+)%]")
+    if v then return v == core.version, v end   -- the FIRST heading is newest
+  end
+  return false, "no version heading found in CHANGELOG.md"
+end)(), "module=" .. tostring(core.version))
 ok("M.api_version is 0.1 (auto-core.todo additive; all prior surfaces unchanged)",
   select(1, eq(core.api_version, "0.1")))
 ok("M.setup is a function", type(core.setup) == "function")
@@ -889,6 +903,13 @@ ok("workspace_root with .bare picks the container directly",
 -- per-project key — auto-finder panels, md-harpoon pins, todo dir).
 -- Precedence: `.auto-agents/` (full ancestry) → `.bare` container →
 -- plain repo root → cwd unchanged.
+-- ADR-0070: every call below passes the inclusive ancestry boundary
+-- `stop = td` (the fixture root this suite creates), so environmental
+-- ancestors (e.g. a stray /tmp/.auto-agents/ from an agent-spawned
+-- nvim) are invisible by construction. The trailing matrix pins the
+-- boundary semantics per pass with hermetic controls — NO unbounded
+-- control call anywhere (an unbounded walk consults /tmp and above,
+-- which is exactly the uncontrolled state ADR-0070 eliminates).
 -- NOTE: scoped in a `do … end` so its locals release their registers
 -- before the chunk's peak — this driver sits at Lua's 200-local cap.
 do
@@ -903,25 +924,99 @@ do
   vim.fn.writefile({ "gitdir: " .. aws .. "/repoX/.git/worktrees/wt" },
     aws .. "/repoX/wt/.git")
   ok("agent_workspace_root: .auto-agents wins at the marker dir",
-    p.agent_workspace_root({ start = aws }) == aws)
+    p.agent_workspace_root({ start = aws, stop = td }) == aws)
   ok("agent_workspace_root: .auto-agents collapses a nested repo",
-    p.agent_workspace_root({ start = aws .. "/repoX" }) == aws)
+    p.agent_workspace_root({ start = aws .. "/repoX", stop = td }) == aws)
   ok("agent_workspace_root: .auto-agents collapses a deep subdir",
-    p.agent_workspace_root({ start = aws .. "/repoX/deep/nested" }) == aws)
+    p.agent_workspace_root({ start = aws .. "/repoX/deep/nested", stop = td }) == aws)
   ok("agent_workspace_root: .auto-agents collapses a linked worktree",
-    p.agent_workspace_root({ start = aws .. "/repoX/wt" }) == aws)
+    p.agent_workspace_root({ start = aws .. "/repoX/wt", stop = td }) == aws)
   -- standalone `.bare` layout (no .auto-agents) → the bare container
   ok("agent_workspace_root: .bare layout collapses worktrees to container",
-    p.agent_workspace_root({ start = ws .. "/branch-a" }) == ws)
+    p.agent_workspace_root({ start = ws .. "/branch-a", stop = td }) == ws)
   -- standalone plain repo (no .auto-agents/.bare) → the repo ROOT
   -- itself, not its parent (the distinction from workspace_root)
   ok("agent_workspace_root: plain repo returns the repo root, not parent",
-    p.agent_workspace_root({ start = sub }) == repo)
+    p.agent_workspace_root({ start = sub, stop = td }) == repo)
   -- marker-less start → unchanged (parity with the legacy raw-cwd pin)
   local bare_dir = td .. "/no-markers/here"
   vim.fn.mkdir(bare_dir, "p")
   ok("agent_workspace_root: marker-less start returns the start dir",
-    p.agent_workspace_root({ start = bare_dir }) == bare_dir)
+    p.agent_workspace_root({ start = bare_dir, stop = td }) == bare_dir)
+
+  -- ── ADR-0070 boundary matrix (pass-discriminating, hermetic) ──
+  -- Each pin fails if only its corresponding pass loses the bound.
+  -- Controls are bounded inclusion controls (stop = marker_parent),
+  -- never unbounded calls — see the section comment above.
+  do
+    local inner
+    -- pin 1: inclusive edge — a marker exactly AT stop is FOUND
+    vim.fn.mkdir(td .. "/at-stop/.auto-agents", "p")
+    vim.fn.mkdir(td .. "/at-stop/inner", "p")
+    ok("agent_workspace_root: marker exactly AT stop is found (inclusive edge)",
+      p.agent_workspace_root(
+        { start = td .. "/at-stop/inner", stop = td .. "/at-stop" })
+        == td .. "/at-stop")
+
+    -- pin 2: rule 1 (.auto-agents) honors the bound
+    vim.fn.mkdir(td .. "/excl-aa/.auto-agents", "p")
+    vim.fn.mkdir(td .. "/excl-aa/inner", "p")
+    inner = td .. "/excl-aa/inner"
+    ok("agent_workspace_root: .auto-agents above stop is excluded",
+      p.agent_workspace_root({ start = inner, stop = inner }) == inner)
+    ok("agent_workspace_root: .auto-agents control — marker at widened stop is found",
+      p.agent_workspace_root({ start = inner, stop = td .. "/excl-aa" })
+        == td .. "/excl-aa")
+
+    -- pin 3: rule 2 (.bare) honors the bound — no .auto-agents on the
+    -- fixture chain, so nothing can mask the .bare result
+    vim.fn.mkdir(td .. "/excl-bare/.bare", "p")
+    vim.fn.mkdir(td .. "/excl-bare/inner", "p")
+    inner = td .. "/excl-bare/inner"
+    ok("agent_workspace_root: .bare above stop is excluded",
+      p.agent_workspace_root({ start = inner, stop = inner }) == inner)
+    ok("agent_workspace_root: .bare control — marker at widened stop is found",
+      p.agent_workspace_root({ start = inner, stop = td .. "/excl-bare" })
+        == td .. "/excl-bare")
+
+    -- pin 4: rule 3 (valid .git) honors the bound — neither
+    -- higher-precedence marker on the fixture chain
+    vim.fn.mkdir(td .. "/excl-git/.git", "p")
+    vim.fn.writefile({ "ref: refs/heads/main" }, td .. "/excl-git/.git/HEAD")
+    vim.fn.mkdir(td .. "/excl-git/inner", "p")
+    inner = td .. "/excl-git/inner"
+    ok("agent_workspace_root: valid .git above stop is excluded",
+      p.agent_workspace_root({ start = inner, stop = inner }) == inner)
+    ok("agent_workspace_root: .git control — marker at widened stop is found",
+      p.agent_workspace_root({ start = inner, stop = td .. "/excl-git" })
+        == td .. "/excl-git")
+
+    -- pin 5: fail-closed contract — invalid stop (sibling subtree) and
+    -- the filesystem root both error loudly. Assert semantics: the
+    -- message mentions `stop` and the ancestor/boundary contract.
+    local ok_call, err = pcall(p.agent_workspace_root,
+      { start = td .. "/at-stop/inner", stop = td .. "/excl-aa" })
+    ok("agent_workspace_root: invalid stop (off-ancestry) raises",
+      ok_call == false and err:match("stop") ~= nil
+        and err:match("ancestor") ~= nil)
+    ok_call, err = pcall(p.agent_workspace_root,
+      { start = td .. "/at-stop/inner", stop = "/" })
+    ok("agent_workspace_root: stop = filesystem root raises",
+      ok_call == false and err:match("stop") ~= nil
+        and err:match("ancestor") ~= nil)
+    ok_call, err = pcall(p.agent_workspace_root,
+      { start = "/", stop = "/" })
+    ok("agent_workspace_root: root start cannot bypass root-stop validation",
+      ok_call == false and err:match("stop") ~= nil
+        and err:match("ancestor") ~= nil)
+
+    -- pin 6: marker-less tier under a dirty SIBLING subtree — a
+    -- planted .auto-agents under td but OFF the walked chain of the
+    -- start path changes nothing (the original incident, restated)
+    vim.fn.mkdir(td .. "/planted-aa/.auto-agents", "p")
+    ok("agent_workspace_root: marker-less walk ignores dirty sibling subtree",
+      p.agent_workspace_root({ start = bare_dir, stop = td }) == bare_dir)
+  end
 end
 
 -- Cleanup
@@ -2038,6 +2133,26 @@ ok("[35] untracked shares added's green; renamed has a foreground of its own",
   and hl_of("AutoCoreGitRenamed").fg ~= nil and hl_of("AutoCoreGitRenamed").fg ~= added.fg,
   ("untracked=%s renamed=%s"):format(tostring(hl_of("AutoCoreGitUntracked").fg),
     tostring(hl_of("AutoCoreGitRenamed").fg)))
+-- PUSH STATE (batch item #7): the hash reads pushed-vs-local at a glance.
+local pushed, unpushed = hl_of("AutoCoreGitPushed"), hl_of("AutoCoreGitUnpushed")
+ok("[35] *** pushed and unpushed each have a foreground ***",
+  pushed.fg ~= nil and unpushed.fg ~= nil,
+  ("pushed=%s unpushed=%s"):format(tostring(pushed.fg), tostring(unpushed.fg)))
+ok("[35] *** and they are distinguishable from each other ***",
+  pushed.fg ~= unpushed.fg,
+  ("pushed=%s unpushed=%s"):format(tostring(pushed.fg), tostring(unpushed.fg)))
+ok("[35] neither paints a background — only the hash is coloured, not the row",
+  pushed.bg == nil and unpushed.bg == nil,
+  ("pushed.bg=%s unpushed.bg=%s"):format(tostring(pushed.bg), tostring(unpushed.bg)))
+ok("[35] unpushed is the SAME orange the modified rows already use",
+  unpushed.fg == modified.fg,
+  ("unpushed=%s modified=%s"):format(tostring(unpushed.fg), tostring(modified.fg)))
+ok("[35] *** pushed is NOT one of the status colours ***",
+  -- If it collided with added/modified/deleted, a purple hash would read as a
+  -- file status instead of a push state.
+  pushed.fg ~= added.fg and pushed.fg ~= modified.fg and pushed.fg ~= deleted.fg,
+  ("pushed=%s added=%s modified=%s deleted=%s"):format(tostring(pushed.fg),
+    tostring(added.fg), tostring(modified.fg), tostring(deleted.fg)))
 -- The v0.2.8 tint is gone: not registered, not derived, not listed.
 ok("[35] AutoCoreGitModifiedBg is no longer defined, derived or listed",
   vim.tbl_isempty(hl_of("AutoCoreGitModifiedBg"))
@@ -3879,9 +3994,9 @@ end)()
 print("\n[48] version + api_version sanity")
 ;(function()
 local v = require("auto-core.version")
-ok("version is on the v0.1.x line",
-  type(v.version) == "string" and v.version:match("^0%.1%.%d+$") ~= nil,
-  "got " .. tostring(v.version))
+-- Shape only here; the CHANGELOG agreement is asserted once, above.
+ok("version is semver", type(v.version) == "string"
+  and v.version:match("^%d+%.%d+%.%d+$") ~= nil, "got " .. tostring(v.version))
 ok("api_version is 0.1 (auto-core.todo additive surface)", v.api_version == "0.1")
 -- :h api_version semver gate consumers will use.
 local core = require("auto-core")

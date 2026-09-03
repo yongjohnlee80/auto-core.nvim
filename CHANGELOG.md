@@ -10,6 +10,120 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.2.12] — 2026-09-03 — ADR-0081: auto-core owns document persistence
+
+Strictly additive patch. Every surface below is new; nothing existing
+changed shape, and `api_version` stays as it was.
+
+**Housekeeping first, because it affected everything above it.** Three
+releases — `v0.2.9`, `v0.2.10`, `v0.2.11` — were tagged on a feature
+branch that did not contain `main`'s `fs.path` ancestry-boundary commit,
+so they shipped without it, and none of them has an entry here. `main`
+was merged into the release branch before this tag, so `v0.2.12`
+contains both lines. Separately, `version.lua` had reported `0.1.62`
+since long before the `v0.2.x` line: ten releases stale, and the reason
+`worktree.repos` probes for the functions it needs rather than trusting
+a version string. Corrected.
+
+### Added
+
+- **`auto-core.docstore`** — the family's document persistence layer, and
+  the only place in the family that touches the filesystem on another
+  plugin's behalf (ADR-0081 §2.1). Atomic write; a read that distinguishes
+  ABSENT from unreadable (only `ENOENT` means absent); `create_exclusive`
+  that writes a sibling temp in full and hard-links it into place, so a
+  claim's name never exists before its bytes; `delete` with the same
+  absent/error split; `kind`; `glob`; `list`; `mtime`; and ONE pretty JSON
+  encoder — two-space indent, sorted keys — for every persisted family
+  document. The encoder REFUSES a document it would have to change:
+  colliding rendered key names and unrenderable key types are errors, not
+  silently resolved.
+- **`auto-core.docstore.revisions`** — generic revisioned document
+  identity behind a validated handle. Exclusive claim, lease expiry,
+  retirement, and monotonic non-reuse: a number seen in ANY record kind is
+  spent, so a crashed writer's revision is never handed to the next writer
+  and a deleted record's number never returns as a second `r<N>`. The
+  handle is read-only and its grammar is injective — a key or suffix may
+  not carry a `.r<digits>` marker, and every verb refuses a revision that
+  is not an integer ≥ 1.
+- **`auto-core.docstore.lock`** — the store's mutual exclusion, MOVED from
+  `worktree.store` rather than reimplemented, with every property it had
+  earned there: a JSON owner record (pid, host, process start time), an
+  enum-driven liveness verdict, pid-reuse detection, the never-break rule,
+  a 10-second contention window that drives its own retry loop, and an
+  inode-guarded release. It also reports a release that FAILS instead of
+  returning success over a wedged store, and merges that with a raising
+  callback's own error rather than hiding one behind the other.
+- **`auto-core.drafts`** — pending, unsaved work, in the plugin every other
+  one may depend on. Process-memory lifetime; survives every view close;
+  clears on exactly two events. `items` plus an explicit `touched` bit are
+  content; `meta` is context and never makes a draft dirty.
+- **`auto-core.git.log.unpushed`** — the set of commits a named remote does
+  not contain (`origin` by default), for rendering push state per commit.
+
+### Fixed
+
+- `ui.diffview`'s file list paints its per-file status colours, using the
+  same foreground-only groups the repos tree uses, so one file reads the
+  same colour in both places.
+- `ui.diffview.close` honours a consumer's veto: a vetoed close keeps both
+  the internal state and the float registry entry.
+- New highlight groups `AutoCoreGitPushed` / `AutoCoreGitUnpushed`
+  (`Statement` / `WarningMsg`, foreground-only, `default = true`).
+
+## [v0.2.8] — 2026-08-27 — ADR-0070: `fs.path.agent_workspace_root` ancestry boundary (`opts.stop`)
+
+Strictly additive patch; `api_version` stays `0.2`. One optional opts
+field on ONE public resolver; default (`stop = nil`) behavior is
+byte-identical. Public `project_root` / `git_root` / `workspace_root`
+surfaces are unchanged.
+
+### Added
+
+- **`fs/path.lua` `agent_workspace_root({ start, stop })`.** Optional
+  inclusive ancestry boundary (ADR-0070, lector-approved at rev 3
+  after three review rounds). Ancestors from `start` up to and
+  including `stop` are consulted; anything strictly above `stop` is
+  invisible to ALL three resolution passes (`.auto-agents` walk,
+  `.bare` walk, and the internal valid-`.git` resolution, which now
+  runs through the shared `walk_up_for_markers` helper directly
+  rather than `M.git_root` — deliberately, so no other public
+  resolver grows the knob).
+
+  **Fail closed:** `nil` is the only unbounded form. A non-nil `stop`
+  that is not the normalized lexical ancestor-or-self of `start` —
+  including the filesystem root, which `normalize("/")` reduces to
+  `""` — raises an argument error naming the boundary contract. A
+  typo'd or stale boundary must never silently restore the unbounded
+  walk it exists to bound. Ancestry is lexical; symlinks are not
+  resolved.
+
+### Why
+
+Three smoke §[24] assertions failed at the 2026-08-23 release gate
+because `/tmp/.auto-agents/` (littered by an agent-spawned nvim
+provisioning its mailbox at cwd) legitimately collapsed every
+marker-less fixture via rule 1's full-ancestry precedence. The
+production code was correct; the test's environment assumption was
+the defect — and the recurrence is structural (agents run nvim from
+arbitrary cwds). Every §[24] call now passes `stop = td` (the suite's
+own fixture root), making the fixture's ancestry assumptions explicit
+and self-enforcing regardless of machine state.
+
+### Test surface
+
+Smoke §[24] grows a six-pin pass-discriminating matrix with hermetic
+bounded inclusion controls only (no unbounded control call anywhere):
+inclusive edge, `.auto-agents` / `.bare` / valid-`.git` exclusion
+above the boundary each with a widened-`stop` control, the fail-closed
+contract (off-ancestry + filesystem root), and a marker-less walk
+under a dirty sibling subtree. Root-stop rejection is also pinned
+when `start` itself is `/`, so the existing empty-normalized-start
+fallback cannot bypass fail-closed validation. Mutation-verified:
+removing the `.bare` bound fails exactly the `.bare` exclusion pin; replacing the
+fail-closed validation with a silent ignore fails exactly the two
+invalid-`stop` pins. Smoke **1768/0**; `tests/run-all.sh` fully green.
+
 ## [v0.1.65] — 2026-08-21 — ADR-0059: `fs.watch` ignores the agent mailbox transport
 
 Strictly additive patch; `api_version` stays `0.1`. One new

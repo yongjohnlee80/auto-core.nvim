@@ -185,6 +185,54 @@ function M.rev_exists(common_dir, rev)
   return code == 0
 end
 
+---unpushed returns the set of commit shas reachable from `rev` that the target
+---REMOTE does not contain.
+---
+---SCOPED TO ONE REMOTE, `origin` by default. `--not --remotes` subtracts EVERY
+---remote-tracking ref, so a commit pushed only to a personal fork counted as
+---pushed while no `origin/*` ref contained it — and the question the panel asks,
+---in Johno's words, is whether a commit is "pushed to the origin" (lector MF6).
+---Pass `opts.remote` for a repo whose canonical remote is named something else.
+---
+---Deliberately not `@{upstream}..HEAD`: a branch with no upstream configured
+---makes that form fail outright, and it answers a narrower question (this
+---branch's upstream) than "does the remote have this commit at all".
+---
+---A SET, not a list, because every caller asks "is this one pushed?" per row.
+---An empty set is also the answer when the remote has no refs — nothing is
+---pushed — and the caller renders every hash as local, which is true.
+---@param common_dir string
+---@param opts { rev: string?, limit: integer?, remote: string? }?
+---@return table<string, boolean> unpushed, string? err
+function M.unpushed(common_dir, opts)
+  opts = opts or {}
+  local rev = opts.rev
+  if not common_dir or common_dir == "" then
+    return {}, "unpushed: needs common_dir"
+  end
+  if not rev or rev == "" then rev = "HEAD" end
+  local remote = opts.remote
+  if type(remote) ~= "string" or remote == "" then remote = "origin" end
+  -- `--remotes=<pattern>` matches refs under refs/remotes/<pattern>; the
+  -- trailing `/*` keeps `origin` from also matching `origin-mirror`.
+  local args = { "rev-list", rev, "--not", "--remotes=" .. remote .. "/*" }
+  if opts.limit and opts.limit > 0 then
+    args[#args + 1] = "--max-count=" .. tostring(opts.limit)
+  end
+  local code, out, err = _run(_git(common_dir, args))
+  if code ~= 0 then
+    -- An unborn branch or an unknown rev is not a failure worth shouting
+    -- about; the caller simply learns nothing and paints no hash specially.
+    return {}, (err ~= "" and err or ("unpushed: git exited " .. tostring(code)))
+  end
+  local set = {}
+  for line in tostring(out):gmatch("[^\r\n]+") do
+    local sha = line:match("^(%x+)$")
+    if sha then set[sha] = true end
+  end
+  return set, nil
+end
+
 ---range applies ADR-0060 §2.4's commit-range policy.
 ---
 ---A branch that diverged from a base shows its OWN work — everything since the
