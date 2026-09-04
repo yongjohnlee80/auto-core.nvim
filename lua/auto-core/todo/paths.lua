@@ -272,4 +272,13 @@ function M.make_id(created_iso, title)
   return date_prefix .. "-" .. slug
 end
 
+---Normalize a path to its portable symbolic form ($KB_ROOT / $WORKSPACE / etc.).
+---Delegates to auto-core.todo.vars.symbolize_path (ADR-0031 / ADR-0083).
+---@param path string
+---@return string
+function M.to_portable(path)
+  return require("auto-core.todo.vars").symbolize_path(path)
+end
+
 return M
+

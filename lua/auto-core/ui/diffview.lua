@@ -254,18 +254,37 @@ local FILE_KIND_MARK = {
 ---@return string[] lines, { lnum: integer, hl: string, col: integer, end_col: integer }[] hls
 local function _file_rows(files)
   local lines, hls = {}, {}
-  for _, f in ipairs(files) do
+  local line_to_idx = {}
+  local idx_to_line = {}
+  local last_commit = nil
+
+  for idx, f in ipairs(files) do
+    if f.commit_short and f.commit_short ~= last_commit then
+      last_commit = f.commit_short
+      local hdr = string.format("▼ Commit %s %s", f.commit_short, f.commit_subject or "")
+      lines[#lines + 1] = hdr
+      local lnum = #lines - 1
+      hls[#hls + 1] = { lnum = lnum, hl = "AutoCoreSectionActive" }
+      line_to_idx[#lines] = idx
+    end
+
     local st = gitdiff.stats(f)
-    -- The coloured head is `<mark> <path>`; the counts follow it, uncoloured.
-    local head = (FILE_KIND_MARK[f.kind] or "?") .. " " .. f.path
+    local indent = f.commit_short and "    " or ""
+    local head = indent .. (FILE_KIND_MARK[f.kind] or "?") .. " " .. f.path
     lines[#lines + 1] = string.format("%s  +%d -%d", head, st.added, st.removed)
     local hl = FILE_KIND_HL[f.kind]
     if hl then
-      hls[#hls + 1] = { lnum = #lines - 1, hl = hl, col = 0, end_col = #head }
+      hls[#hls + 1] = { lnum = #lines - 1, hl = hl, col = #indent, end_col = #head }
     end
+    line_to_idx[#lines] = idx
+    idx_to_line[idx] = #lines
   end
-  if #lines == 0 then lines = { "(no files)" } end
-  return lines, hls
+  if #lines == 0 then
+    lines = { "(no files)" }
+    line_to_idx[1] = 1
+    idx_to_line[1] = 1
+  end
+  return lines, hls, line_to_idx, idx_to_line
 end
 
 ---_pane_title retitles a live pane. `float.multi` sets titles at creation, so
@@ -294,7 +313,14 @@ local function _show(idx)
 
   local before_buf = _state.float:bufnr("middle")   -- the a/ side
   local after_buf = _state.float:bufnr("preview")   -- the b/ side
-  local sides = gitdiff.sides(f)
+  local sides = gitdiff.sides(f, {
+    context = _state.context,
+    worktree = _state.worktree,
+    base = f.base or _state.base,
+    sha = f.commit_sha or _state.sha,
+    uncommitted = _state.uncommitted,
+    read_file = _state.read_file,
+  })
   local anns = (_state.annotations or {})[f.path]
     or (f.new_path and (_state.annotations or {})[f.new_path])
     or (f.old_path and (_state.annotations or {})[f.old_path])
@@ -351,7 +377,8 @@ local function _show(idx)
   if left and vim.api.nvim_buf_is_valid(left) then
     local ns = marks.ns("diffview-sel")
     marks.clear(left, ns)
-    marks.line(left, ns, idx - 1, "AutoCoreSectionActive")
+    local sel_line = (_state.idx_to_line and _state.idx_to_line[idx]) or idx
+    marks.line(left, ns, sel_line - 1, "AutoCoreSectionActive")
   end
 end
 
@@ -635,10 +662,21 @@ function M.open(opts)
       -- line is tracked as the cursor moves rather than read at close time.
       local f = _state.files[_state.idx]
       if f then
+        local p = _state.cursor and _state.cursor.pane
+        if not p and _state.float then
+          local cur_w = pcall(vim.api.nvim_get_current_win) and vim.api.nvim_get_current_win()
+          if cur_w == _state.float:winid("middle") then p = "middle"
+          elseif cur_w == _state.float:winid("preview") then p = "preview"
+          else p = "preview" end
+        end
         M._last_position = {
           path = f.new_path or f.path or f.old_path,
-          lnum = _state.cursor and _state.cursor.lnum or nil,
-          col = _state.cursor and _state.cursor.col or nil,
+          lnum = _state.cursor and _state.cursor.lnum or 1,
+          col = _state.cursor and _state.cursor.col or 0,
+          pane = p or "preview",
+          idx = _state.idx,
+          file_positions = _state.file_positions or {},
+          context = _state.context or "hunk",
         }
       end
       local pos = M._last_position
@@ -647,8 +685,24 @@ function M.open(opts)
     end,
   })
 
-  _state = { float = float, files = files, annotations = opts.annotations, idx = 1,
-             annotate = opts.annotate, keymaps = opts.keymaps }
+  local flines, fhls, line_to_idx, idx_to_line = _file_rows(files)
+  local initial_positions = (opts.initial and opts.initial.file_positions) or {}
+  local initial_pane = (opts.initial and (opts.initial.pane or opts.initial.focused_pane)) or "preview"
+  local initial_lnum = (opts.initial and (opts.initial.lnum or (opts.initial.file_positions and (opts.initial.active_file or opts.initial.path) and opts.initial.file_positions[opts.initial.active_file or opts.initial.path] and opts.initial.file_positions[opts.initial.active_file or opts.initial.path].lnum))) or 1
+  local initial_col = (opts.initial and (opts.initial.col or (opts.initial.file_positions and (opts.initial.active_file or opts.initial.path) and opts.initial.file_positions[opts.initial.active_file or opts.initial.path] and opts.initial.file_positions[opts.initial.active_file or opts.initial.path].col))) or 0
+  _state = {
+    float = float, files = files, annotations = opts.annotations, idx = 1,
+    line_to_idx = line_to_idx, idx_to_line = idx_to_line,
+    annotate = opts.annotate, keymaps = opts.keymaps,
+    context = opts.context or (opts.initial and opts.initial.context) or "hunk",
+    worktree = opts.worktree,
+    base = opts.base,
+    sha = opts.sha,
+    uncommitted = opts.uncommitted,
+    read_file = opts.read_file,
+    file_positions = vim.deepcopy(initial_positions),
+    cursor = { pane = initial_pane, lnum = initial_lnum, col = initial_col },
+  }
   float:open()
 
   for _, pane in ipairs({ "middle", "preview" }) do
@@ -671,7 +725,6 @@ function M.open(opts)
 
   local left = float:bufnr("left")
   if left and vim.api.nvim_buf_is_valid(left) then
-    local flines, fhls = _file_rows(files)
     vim.bo[left].modifiable = true
     vim.api.nvim_buf_set_lines(left, 0, -1, false, flines)
     vim.bo[left].modifiable = false
@@ -704,7 +757,8 @@ function M.open(opts)
         local win = _state.float:winid("left")
         if not (win and vim.api.nvim_win_is_valid(win)) then return end
         local row = vim.api.nvim_win_get_cursor(win)[1]
-        if row ~= _state.idx then _show(row) end
+        local target_idx = (_state.line_to_idx and _state.line_to_idx[row]) or row
+        if target_idx and target_idx ~= _state.idx then _show(target_idx) end
       end,
     })
   end
@@ -724,6 +778,13 @@ function M.open(opts)
           if not (w and vim.api.nvim_win_is_valid(w)) then return end
           local c = vim.api.nvim_win_get_cursor(w)
           _state.cursor = { pane = pane, lnum = c[1], col = c[2] }
+          local cur_f = _state.files and _state.files[_state.idx]
+          if cur_f then
+            local cp = cur_f.new_path or cur_f.path or cur_f.old_path
+            if cp then
+              _state.file_positions[cp] = { pane = pane, lnum = c[1], col = c[2] }
+            end
+          end
         end,
       })
     end
@@ -740,17 +801,110 @@ function M.open(opts)
       pcall(vim.keymap.set, "n", "<S-Tab>", function()
         if _state then _state.float:cycle("backward") end
       end, { buffer = b, silent = true, nowait = true, desc = "auto-core.diffview: prev pane" })
-      -- C-l / C-h alias Tab / S-Tab, the family convention for a multi-pane
-      -- float (`worktree.graph`, `log.viewer`): a reader who reaches for h/l to
-      -- move between windows gets the same motion here. Forward and backward,
-      -- not left/right-absolute, so the three keys stay interchangeable and the
-      -- wrap at the ends matches what Tab already does.
       pcall(vim.keymap.set, "n", "<C-l>", function()
         if _state then _state.float:cycle("forward") end
       end, { buffer = b, silent = true, nowait = true, desc = "auto-core.diffview: next pane" })
       pcall(vim.keymap.set, "n", "<C-h>", function()
         if _state then _state.float:cycle("backward") end
       end, { buffer = b, silent = true, nowait = true, desc = "auto-core.diffview: prev pane" })
+    end
+  end
+
+  -- Cross-pane file navigation (`]f` and `[f`) and context toggle (`X`) on content panes (ADR-0083 §2.3/§2.4)
+  for _, pane in ipairs({ "middle", "preview" }) do
+    local b = float:bufnr(pane)
+    if b and vim.api.nvim_buf_is_valid(b) then
+      pcall(vim.keymap.set, "n", "]f", function()
+        if not _state then return end
+        if _state.idx < #_state.files then
+          local cur_w = vim.api.nvim_get_current_win()
+          local cur_pane = (cur_w == _state.float:winid("middle")) and "middle" or "preview"
+          local c = vim.api.nvim_win_get_cursor(cur_w)
+          local cur_f = _state.files[_state.idx]
+          if cur_f then
+            local cp = cur_f.new_path or cur_f.path or cur_f.old_path
+            if cp then
+              _state.file_positions[cp] = { pane = cur_pane, lnum = c[1], col = c[2] }
+            end
+          end
+
+          local next_idx = _state.idx + 1
+          _show(next_idx)
+
+          local lw = _state.float:winid("left")
+          if lw and vim.api.nvim_win_is_valid(lw) then
+            local target_line = (_state.idx_to_line and _state.idx_to_line[next_idx]) or next_idx
+            pcall(vim.api.nvim_win_set_cursor, lw, { target_line, 0 })
+          end
+
+          local next_f = _state.files[next_idx]
+          local next_p = next_f and (next_f.new_path or next_f.path or next_f.old_path)
+          local saved = next_p and _state.file_positions[next_p]
+          local target_pane = (saved and saved.pane) or cur_pane
+          local tw = _state.float:winid(target_pane)
+          local tb = _state.float:bufnr(target_pane)
+          if tw and vim.api.nvim_win_is_valid(tw) then
+            vim.api.nvim_set_current_win(tw)
+            local last = (tb and vim.api.nvim_buf_is_valid(tb)) and vim.api.nvim_buf_line_count(tb) or 1
+            local target_line = (saved and saved.lnum) or 1
+            pcall(vim.api.nvim_win_set_cursor, tw, { math.min(math.max(1, target_line), last), 0 })
+          end
+          M._render_footer()
+        end
+      end, { buffer = b, silent = true, nowait = true, desc = "auto-core.diffview: next file" })
+
+      pcall(vim.keymap.set, "n", "[f", function()
+        if not _state then return end
+        if _state.idx > 1 then
+          local cur_w = vim.api.nvim_get_current_win()
+          local cur_pane = (cur_w == _state.float:winid("middle")) and "middle" or "preview"
+          local c = vim.api.nvim_win_get_cursor(cur_w)
+          local cur_f = _state.files[_state.idx]
+          if cur_f then
+            local cp = cur_f.new_path or cur_f.path or cur_f.old_path
+            if cp then
+              _state.file_positions[cp] = { pane = cur_pane, lnum = c[1], col = c[2] }
+            end
+          end
+
+          local prev_idx = _state.idx - 1
+          _show(prev_idx)
+
+          local lw = _state.float:winid("left")
+          if lw and vim.api.nvim_win_is_valid(lw) then
+            local target_line = (_state.idx_to_line and _state.idx_to_line[prev_idx]) or prev_idx
+            pcall(vim.api.nvim_win_set_cursor, lw, { target_line, 0 })
+          end
+
+          local prev_f = _state.files[prev_idx]
+          local prev_p = prev_f and (prev_f.new_path or prev_f.path or prev_f.old_path)
+          local saved = prev_p and _state.file_positions[prev_p]
+          local target_pane = (saved and saved.pane) or cur_pane
+          local tw = _state.float:winid(target_pane)
+          local tb = _state.float:bufnr(target_pane)
+          if tw and vim.api.nvim_win_is_valid(tw) then
+            vim.api.nvim_set_current_win(tw)
+            local last = (tb and vim.api.nvim_buf_is_valid(tb)) and vim.api.nvim_buf_line_count(tb) or 1
+            local target_line = (saved and saved.lnum) or 1
+            pcall(vim.api.nvim_win_set_cursor, tw, { math.min(math.max(1, target_line), last), 0 })
+          end
+          M._render_footer()
+        end
+      end, { buffer = b, silent = true, nowait = true, desc = "auto-core.diffview: prev file" })
+
+      pcall(vim.keymap.set, "n", "X", function()
+        if not _state then return end
+        _state.context = (_state.context == "full") and "hunk" or "full"
+        local cur_w = vim.api.nvim_get_current_win()
+        local cur_c = (cur_w and vim.api.nvim_win_is_valid(cur_w)) and vim.api.nvim_win_get_cursor(cur_w) or { 1, 0 }
+        _show(_state.idx)
+        M._render_footer()
+        if cur_w and vim.api.nvim_win_is_valid(cur_w) then
+          local b_cur = vim.api.nvim_win_get_buf(cur_w)
+          local last = vim.api.nvim_buf_line_count(b_cur)
+          pcall(vim.api.nvim_win_set_cursor, cur_w, { math.min(cur_c[1], last), cur_c[2] })
+        end
+      end, { buffer = b, silent = true, nowait = true, desc = "auto-core.diffview: toggle context" })
     end
   end
 
@@ -838,11 +992,15 @@ function M.open(opts)
   -- opts.initial reopens the view where a prior session left it (requirement 6).
   -- A path that no longer exists in this diff is a SOFT miss -- open at the
   -- first file, never refuse -- because a stale resume must still show a diff.
+  local target_path = opts.initial and (opts.initial.path or opts.initial.active_file)
+  local target_idx = opts.initial and (opts.initial.idx or opts.initial.active_idx)
   local start_idx = 1
-  if opts.initial and opts.initial.path then
+  if target_path then
     for i, f in ipairs(files) do
-      if (f.new_path or f.path or f.old_path) == opts.initial.path then start_idx = i; break end
+      if (f.new_path or f.path or f.old_path) == target_path then start_idx = i; break end
     end
+  elseif target_idx and target_idx >= 1 and target_idx <= #files then
+    start_idx = target_idx
   end
   _show(start_idx)
   -- Move the file-list cursor to the shown file so the two agree.
@@ -851,13 +1009,21 @@ function M.open(opts)
     pcall(vim.api.nvim_win_set_cursor, lw, { start_idx, 0 })
   end
   -- Restore the content-pane line, clamped to what the pane actually holds.
-  if opts.initial and opts.initial.lnum then
+  local target_lnum = opts.initial and (opts.initial.lnum or (opts.initial.file_positions and target_path and opts.initial.file_positions[target_path] and opts.initial.file_positions[target_path].lnum))
+  if target_lnum then
     for _, pane in ipairs({ "middle", "preview" }) do
       local w, b = float:winid(pane), float:bufnr(pane)
       if w and b and vim.api.nvim_win_is_valid(w) and vim.api.nvim_buf_is_valid(b) then
         local last = vim.api.nvim_buf_line_count(b)
-        pcall(vim.api.nvim_win_set_cursor, w, { math.min(opts.initial.lnum, last), 0 })
+        pcall(vim.api.nvim_win_set_cursor, w, { math.min(target_lnum, last), 0 })
       end
+    end
+  end
+  local target_pane = opts.initial and (opts.initial.pane or opts.initial.focused_pane)
+  if target_pane then
+    local target_win = float:winid(target_pane)
+    if target_win and vim.api.nvim_win_is_valid(target_win) then
+      vim.api.nvim_set_current_win(target_win)
     end
   end
   return float, nil
@@ -877,8 +1043,9 @@ function M._render_footer()
   -- the other. The footer is a ONE-LINE pane: anything past its width is simply
   -- not drawn, and the tail is where the pending count lives — so an untrimmed
   -- line loses exactly the signal that must never go missing.
-  local prose = { "j/k file", "<Tab> pane", "a/ = old, b/ = new" }
-  local keys = {}
+  local ctx_label = (_state.context == "full") and "[context: full]" or "[context: 3L]"
+  local prose = { "j/k file", "[f/]f file", ctx_label, "<Tab> pane", "a/ = old, b/ = new" }
+  local keys = { "X context" }
   local ann = _state.annotate
   if ann then
     keys[#keys + 1] = ann.disabled_reason and "c unavailable" or "c annotate"
