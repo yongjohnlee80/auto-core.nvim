@@ -20,6 +20,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history: the suite inspects THIS repository through
+          # auto-core.git.*, so a shallow clone hides refs it reads.
+          fetch-depth: 0
+
+      # actions/checkout leaves a DETACHED HEAD with no local branches. That
+      # is not a repo shape any real clone has, and two smoke assertions
+      # inspect this very repository through git.worktree.list_branches(),
+      # which reads refs/heads — so it correctly returns {} and they fail.
+      #
+      # Restore the shape a normal clone has rather than weakening the
+      # assertions: the tests are right, the CI checkout was unrealistic.
+      # Printed either way, so the next failure here is diagnosable from the
+      # log instead of needing a re-run to investigate.
+      - name: restore a realistic repo shape (local default branch)
+        run: |
+          git branch --force main origin/main \
+            || git fetch --no-tags origin +refs/heads/main:refs/heads/main
+          echo "local branches after fixup:"
+          git branch --list
 
       - name: install neovim
         env:
