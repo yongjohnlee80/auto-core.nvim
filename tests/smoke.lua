@@ -12760,6 +12760,27 @@ print("\n[87] ui.panel — an external close clears both sides exactly once")
     valid_at_close == false, "window still valid inside on_close: "
       .. tostring(valid_at_close))
 
+  -- IDEMPOTENCE ACROSS SEPARATE CALLS, which is a different property from
+  -- everything above and the one finish_close's `p.winid == nil` guard
+  -- actually carries. The sequence is ordinary: a user :q's the panel and
+  -- then hits the toggle, or a plugin shuts down and calls close() on a
+  -- panel that is already gone. Without the guard the second call runs a
+  -- SECOND teardown — two on_close for one panel, and consumers release
+  -- real resources in there.
+  --
+  -- This cell exists because its absence made a mutation look survivable:
+  -- removing that guard changed nothing in the suite, and I read that as
+  -- "the guard is redundant". It was not evidence about the guard, it was
+  -- evidence about which inputs the suite drives. (gold-man, #30 r0.)
+  local w5 = p:open(true)
+  closes = 0
+  vim.api.nvim_win_close(w5, true)
+  vim.wait(200, function() return closes > 0 end, 5)
+  p:close()
+  ok("p87: an external close then a later close() fires on_close once, not twice",
+    closes == 1 and p.winid == nil and mirror == nil,
+    ("closes=%d panel=%s mirror=%s"):format(closes, tostring(p.winid), tostring(mirror)))
+
   -- After an external close the panel must be reopenable, with both sides
   -- agreeing again — a transition that cleared state but left the panel
   -- unusable would pass every assertion above.
