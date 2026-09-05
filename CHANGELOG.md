@@ -52,6 +52,20 @@ synchronously, so a handler that transitions unconditionally fires
 `on_close` twice and a cell checking only "the mirror is nil" passes on
 the bug. Every mutation in the matrix is caught by a named cell.
 
+**Also carried by this tag, from separate changes by another author**
+(`26b3ee6`, `03d85aa`): smoke `29b`–`29e` no longer assert against the
+AMBIENT auto-core checkout — they build a deterministic fixture repo in
+a tempdir — and the dead `#branches == 0` disjunct is gone. That
+fragility had been failing on perfectly valid clones whose directory
+name did not contain "auto-core", twice in one day on a reviewer who
+already knew about it.
+
+Recorded after the fact: those two landed on `main` between this release
+branch being cut and its rebase-merge, so the entry above was written
+without them. The tag is published and stays where it is; the note is
+the correction. Anyone cutting a release here should re-read
+`git log <prev-tag>..HEAD` immediately BEFORE merging, not when drafting.
+
 ## [v0.2.18] — 2026-09-05 — todo.assign status decoupling, in-place buffer reload (MF2), and mtime save gating (SF2)
 
 Strictly additive patch. No public Lua surface changed, so `api_version`
