@@ -13187,6 +13187,152 @@ print("\n[86] todo — log records land on the component axis")
   vim.fn.delete(tmp_root, "rf")
 end)()
 
+-- ── [88] ui.edit — open a file in a window that can TAKE one ──────────
+--
+-- The case that motivated the module: an agent's remote call lands in
+-- whichever window is CURRENT, and in a live layout that is usually a panel or
+-- a winfixbuf'd terminal. Every cell here therefore CALLS FROM a window that
+-- cannot take a file, because calling from a good window tests nothing.
+print("\n[88] ui.edit — open a file from a window that cannot take one")
+;(function()
+  local edit = require("auto-core.ui.edit")
+  local Panel = require("auto-core.ui.panel")
+
+  local dir = vim.fn.tempname() .. "_edit88"
+  vim.fn.mkdir(dir, "p")
+  local file = dir .. "/target.txt"
+  local lines = {}
+  for i = 1, 60 do lines[i] = "line " .. i end
+  vim.fn.writefile(lines, file)
+
+  -- A panel, so there is a real winfixbuf'd, marker-stamped window present —
+  -- not a synthetic imitation. The measurement that drove this module's design
+  -- was that synthetic windows do NOT reproduce the panel's interception.
+  local p = Panel.new({
+    name  = "edit88-probe",
+    side  = "left",
+    width = { default = 30, min = 10, max = 80 },
+  })
+  local panel_win = p:open(true)
+  local panel_buf_before = vim.api.nvim_win_get_buf(panel_win)
+  ok("p88: the probe panel is open and winfixbuf'd",
+    panel_win ~= nil and vim.wo[panel_win].winfixbuf == true,
+    "winfixbuf=" .. tostring(vim.wo[panel_win].winfixbuf))
+
+  -- CALL FROM THE PANEL. This is the motivating case, and the assertion that
+  -- matters most is the one about what did NOT happen to the panel.
+  vim.api.nvim_set_current_win(panel_win)
+  local caller = vim.api.nvim_get_current_win()
+  local res, err = edit.open(file, { line = 40, col = 3 })
+
+  ok("p88: open() succeeds when called FROM a winfixbuf panel",
+    res ~= nil, tostring(err))
+  if res then
+    ok("p88: it did NOT use the panel window",
+      res.win ~= panel_win,
+      ("chose win=%s, panel=%s"):format(tostring(res.win), tostring(panel_win)))
+    ok("p88: and the panel's own buffer is untouched",
+      vim.api.nvim_win_get_buf(panel_win) == panel_buf_before,
+      "the panel's buffer was replaced — the interception this module exists "
+        .. "to avoid")
+    ok("p88: the file is in the window it named",
+      vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(res.win)) == file,
+      vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(res.win)))
+    ok("p88: cursor is at the requested 1-based line and col",
+      (function()
+        local c = vim.api.nvim_win_get_cursor(res.win)
+        -- col is 1-based in this API and 0-based in nvim, so 3 -> 2.
+        return c[1] == 40 and c[2] == 2, ("%d:%d"):format(c[1], c[2])
+      end)())
+    ok("p88: focus was NOT stolen (Q2 default)",
+      vim.api.nvim_get_current_win() == caller,
+      ("current=%s caller=%s"):format(tostring(vim.api.nvim_get_current_win()),
+        tostring(caller)))
+    ok("p88: the response NAMES the window and counts the panels it skipped",
+      type(res.win) == "number" and type(res.panel_windows_skipped) == "number"
+        and res.panel_windows_skipped >= 1,
+      vim.inspect({ win = res.win, skipped = res.panel_windows_skipped }))
+  end
+
+  -- Q1's ruling: SPLIT when nothing usable exists. Reached by closing every
+  -- non-panel window, so the only windows left are the panel and whatever
+  -- ui.edit makes for itself.
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if w ~= panel_win and vim.api.nvim_win_is_valid(w)
+      and #vim.api.nvim_tabpage_list_wins(0) > 1 then
+      pcall(vim.api.nvim_win_close, w, true)
+    end
+  end
+  vim.api.nvim_set_current_win(panel_win)
+  local only = vim.api.nvim_tabpage_list_wins(0)
+  ok("p88: control — the panel is now the ONLY window, so nothing is usable",
+    #only == 1 and only[1] == panel_win,
+    ("%d windows"):format(#only))
+
+  local res2, err2 = edit.open(file, { line = 5 })
+  ok("p88: open() creates a window rather than refusing or taking the panel",
+    res2 ~= nil and res2.created_window == true, tostring(err2))
+  if res2 then
+    ok("p88: …and the panel STILL has its own buffer",
+      vim.api.nvim_win_get_buf(panel_win) == panel_buf_before,
+      "the split loaded the file into the panel — the measured failure mode")
+    ok("p88: …in a window that is not the panel",
+      res2.win ~= panel_win, tostring(res2.win))
+  end
+
+  -- Input contract. A relative path is refused loudly rather than resolved
+  -- against whichever cwd the host happens to have.
+  local rel, relerr = edit.open("target.txt")
+  ok("p88: a relative path is refused, naming why",
+    rel == nil and tostring(relerr):find("ABSOLUTE", 1, true) ~= nil,
+    tostring(relerr))
+  local badcol, colerr = edit.open(file, { col = 0 })
+  ok("p88: col is 1-BASED and 0 is refused",
+    badcol == nil and tostring(colerr):find("1-BASED", 1, true) ~= nil,
+    tostring(colerr))
+
+  -- A stale line number opens the file at the end rather than refusing: the
+  -- file is what the caller wanted to see.
+  local clamped = edit.open(file, { line = 9999 })
+  ok("p88: an out-of-range line CLAMPS instead of failing",
+    clamped ~= nil and clamped.line == 60, vim.inspect(clamped and clamped.line))
+
+  -- ── the mailbox verb, through the SAME entry point the router uses ──
+  local commands = require("auto-core.mailbox.commands")
+  local listed
+  for _, e in ipairs(commands.list()) do
+    if e.name == "editor.open" then listed = e end
+  end
+  ok("p88: `editor.open` is DISCOVERABLE — commands_list relays this list",
+    listed ~= nil and listed.owner == "auto-core"
+      and type(listed.schema) == "table" and listed.schema.path == "string",
+    vim.inspect(listed))
+
+  local resp = commands.handle_message({
+    kind = "command", command = "editor.open",
+    from = "agent:p88", to = "nvim",
+    args = { path = file, line = 12 },
+  })
+  ok("p88: and DISPATCHABLE through handle_message, naming its window",
+    resp ~= nil and resp.ok == true and type(resp.result) == "table"
+      and resp.result.win ~= nil and resp.result.line == 12,
+    vim.inspect(resp))
+
+  local bad = commands.handle_message({
+    kind = "command", command = "editor.open",
+    from = "agent:p88", to = "nvim",
+    args = { path = 42 },
+  })
+  ok("p88: a bad arg is rejected by the SCHEMA, before the handler runs",
+    bad ~= nil and bad.ok == false and bad.code == "bad_args",
+    vim.inspect(bad))
+
+  p:close()
+  Panel._reset_for_tests()
+  events._reset_for_tests()
+  vim.fn.delete(dir, "rf")
+end)()
+
 -- Convention §3: emit the `<P> passed, <F> failed` summary and exit
 -- EXPLICITLY — os.exit(1) on any failure, os.exit(0) otherwise. Do not
 -- rely on falling off the end for the success exit: an explicit 0 keeps
