@@ -160,24 +160,42 @@ local function make_window()
   -- A scratch buffer, so the new window never briefly displays somebody
   -- else's buffer — the real one is set below once the window is known good.
   local scratch = vim.api.nvim_create_buf(false, true)
+  -- `wipe`, so replacing it below disposes of it. Without this the window
+  -- creation leaked one orphan buffer per call on the primary path (and two on
+  -- the fallback). (gold-man r0 nit 2.)
+  pcall(function() vim.bo[scratch].bufhidden = "wipe" end)
   local ok, win = pcall(vim.api.nvim_open_win, scratch, false,
     { split = "below", win = anchor })
 
   if not ok or type(win) ~= "number" then
     -- Older Neovim without `split` support in nvim_open_win. Fall back to the
     -- Ex command AND assert it, because this is the path that lies.
+    -- `botright new` ENTERS the new window, so the caller's focus has to be
+    -- put back by hand. Q2 says focus is not stolen, and this path was
+    -- stealing it — measured by stubbing nvim_open_win to fail so the real
+    -- fallback ran: primary kept the caller's focus, fallback did not.
+    -- (gold-man r0 nit 1.)
+    local caller_win = vim.api.nvim_get_current_win()
     local okc, errc = pcall(vim.cmd, "botright new")
     if not okc then
+      pcall(vim.api.nvim_set_current_win, caller_win)
       return nil, "could not create a window: " .. tostring(errc)
     end
     local after = vim.api.nvim_tabpage_list_wins(0)
     if #after <= before then
+      pcall(vim.api.nvim_set_current_win, caller_win)
       return nil, ("could not create a window: nvim_open_win split is unavailable "
         .. "and `botright new` reported success while creating nothing "
         .. "(%d windows before and after) — that is the panel interception "
         .. "described at the top of ui/edit.lua"):format(before)
     end
     win = vim.api.nvim_get_current_win()
+    -- The buffer `new` created is an orphan once the file goes in; wipe it
+    -- with the window's buffer rather than leaving it listed.
+    pcall(function() vim.bo[vim.api.nvim_win_get_buf(win)].bufhidden = "wipe" end)
+    if caller_win ~= win and vim.api.nvim_win_is_valid(caller_win) then
+      pcall(vim.api.nvim_set_current_win, caller_win)
+    end
   end
 
   if not vim.api.nvim_win_is_valid(win) then
@@ -228,11 +246,19 @@ function M.open(path, opts)
   end
   local line = opts.line
   local col = opts.col
-  if line ~= nil and (type(line) ~= "number" or line < 1) then
-    return nil, "ui.edit.open: line must be a positive integer (1-based), got " .. tostring(line)
+  -- INTEGERS, matching the mailbox schema's `integer` check. These two gates
+  -- guard the same contract and the Lua one was the weaker: it accepted 2.5,
+  -- `nvim_win_set_cursor` refused it, the pcall ate the error, and the response
+  -- reported a line number that cannot exist in any buffer. (gold-man r0 nit 3.)
+  local function bad_int(v)
+    return type(v) ~= "number" or v < 1 or v % 1 ~= 0
   end
-  if col ~= nil and (type(col) ~= "number" or col < 1) then
-    return nil, "ui.edit.open: col must be a positive integer (1-BASED here, "
+  if line ~= nil and bad_int(line) then
+    return nil, "ui.edit.open: line must be a positive INTEGER (1-based), got "
+      .. tostring(line)
+  end
+  if col ~= nil and bad_int(col) then
+    return nil, "ui.edit.open: col must be a positive INTEGER (1-BASED here, "
       .. "unlike nvim_win_set_cursor), got " .. tostring(col)
   end
 
@@ -264,17 +290,37 @@ function M.open(path, opts)
   end
   vim.bo[buf].buflisted = true
 
-  local final_line, final_col = 1, 1
-  if line then
-    -- Clamp rather than error: a stale line number from a moved file should
-    -- still open the file, at the end, rather than refusing to show it.
+  -- Position when either coordinate was asked for. `col` alone used to be
+  -- validated and then DISCARDED — it had its own type check, its own error
+  -- message, and its only use sat inside `if line then`. That is the one
+  -- behaviour a caller cannot discover from outside, so col alone is now
+  -- honoured against the line the cursor is already on. (gold-man r0 MF2.)
+  if line or col then
     local n = vim.api.nvim_buf_line_count(buf)
-    final_line = math.min(line, n)
-    final_col = col or 1
-    pcall(vim.api.nvim_win_set_cursor, win, { final_line, final_col - 1 })
-    -- Centre it, in the TARGET window, without moving the caller's cursor.
+    local at = vim.api.nvim_win_get_cursor(win)
+    -- Clamp rather than error: a stale line number from a moved file should
+    -- still show you the file, at its end, rather than refusing.
+    local want_line = math.min(line or at[1], n)
+    local want_col = (col or (at[2] + 1)) - 1
+    pcall(vim.api.nvim_win_set_cursor, win, { want_line, math.max(want_col, 0) })
+    -- Centre it in the TARGET window, without moving the caller's cursor.
     pcall(vim.api.nvim_win_call, win, function() vim.cmd("normal! zz") end)
   end
+
+  -- REPORT THE CURSOR, NEVER THE REQUEST. The response is the only thing a
+  -- mailbox caller ever sees — it cannot look at the screen — and this used to
+  -- echo `opts` back: four measured rows where the report disagreed with the
+  -- window, including a `line = 2.5` that returned a line number no buffer can
+  -- have. `panel_windows_skipped` already carries the argument ("an agent that
+  -- cannot tell where the file went cannot report it"); it simply was not
+  -- applied to the position, which is the part the caller asked for.
+  --
+  -- Reading it back is also what makes the clamping HONEST, and answers the
+  -- open question about it: `line` clamps here and `col` clamps inside nvim, so
+  -- a clamp the caller can see needs no defending, while one it cannot see is
+  -- indistinguishable from the request having been honoured. (gold-man r0 MF1.)
+  local got = vim.api.nvim_win_get_cursor(win)
+  local final_line, final_col = got[1], got[2] + 1
 
   if opts.focus then pcall(vim.api.nvim_set_current_win, win) end
 
