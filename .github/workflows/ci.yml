@@ -5,57 +5,79 @@ on:
     branches: [main]
   pull_request:
 
-# auto-core is the foundation every sibling plugin depends on, and until now
-# it had NO automated gate at all — every suite ran only where someone
-# happened to run it. A regression here reaches auto-agents, auto-finder,
-# worktree, md-harpoon and autodb before anyone notices locally.
+# Least privilege: this job only reads the tree.
+permissions:
+  contents: read
+
+# A superseded run proves nothing about the head that replaced it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# auto-core is the foundation every sibling plugin depends on, and until now it
+# had NO automated gate at all — every suite ran only where someone happened to
+# run it. A regression here reaches auto-agents, auto-finder, worktree,
+# md-harpoon and autodb before anyone notices locally.
 #
-# This job runs `tests/run-all.sh`, the runner that already exists and already
-# knows how to turn a silent abort into a loud failure (it parses the
-# `<P> passed, <F> failed` summary and treats its ABSENCE as a hard failure).
-# CI does not reimplement that logic; it supplies the environment and lets the
-# runner be the judge.
+# This job runs `tests/run-all.sh`, which already knows how to turn a silent
+# abort into a loud failure (it parses the `<P> passed, <F> failed` summary and
+# treats its ABSENCE as a hard failure). CI does not reimplement that logic; it
+# supplies the environment and lets the runner be the judge.
 jobs:
   lua:
     runs-on: ubuntu-latest
+    # The pty suite has an OPEN, un-root-caused deadlock todo
+    # (2026-08-24-auto-core-pty-suite-…): nvim can block at startup on a
+    # hit-enter prompt when the runner's pty does not answer the DSR probe, and
+    # it is INVOCATION-dependent — it deadlocks through run-all.sh, the
+    # invocation this job uses. The per-test watchdog bounds each test; this
+    # bounds the job, so the failure mode is a red run rather than a hung one.
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          # Full history: the suite inspects THIS repository through
+          # Full history: the suite inspects this repository through
           # auto-core.git.*, so a shallow clone hides refs it reads.
           fetch-depth: 0
 
-      # actions/checkout leaves a DETACHED HEAD with no local branches. That
-      # is not a repo shape any real clone has, and two smoke assertions
-      # inspect this very repository through git.worktree.list_branches(),
-      # which reads refs/heads — so it correctly returns {} and they fail.
+      # actions/checkout leaves a DETACHED HEAD with no local branches.
       #
-      # Restore the shape a normal clone has rather than weakening the
-      # assertions: the tests are right, the CI checkout was unrealistic.
-      # Printed either way, so the next failure here is diagnosable from the
-      # log instead of needing a re-run to investigate.
-      - name: restore a realistic repo shape (local default branch)
+      # Read this carefully before changing it, because the obvious fix is
+      # wrong. `git branch --force main origin/main` ALONE makes the two
+      # branch assertions pass for the wrong reason: default_branch() runs
+      # `git symbolic-ref --short HEAD`, which FAILS on a detached HEAD and
+      # returns its literal fallback string "main" — so creating a branch of
+      # that name reduces `local_branch_exists(default_branch(root))` to "the
+      # workflow created a branch called main". A test of the workflow, by the
+      # workflow.
+      #
+      # Attaching HEAD is what makes them pass for the same reason they pass on
+      # a developer machine: default_branch() then returns a real symbolic ref.
+      # The tested commit does not move — `checkout -B` only names it.
+      - name: attach HEAD and provide the default branch
         run: |
-          git branch --force main origin/main \
-            || git fetch --no-tags origin +refs/heads/main:refs/heads/main
-          echo "local branches after fixup:"
-          git branch --list
+          git branch --force "$DEFAULT_BRANCH" "origin/$DEFAULT_BRANCH" \
+            || git fetch --no-tags origin \
+                 "+refs/heads/$DEFAULT_BRANCH:refs/heads/$DEFAULT_BRANCH"
+          git checkout -B ci-head
+          echo "branches:"; git branch --list
+          echo "HEAD: $(git symbolic-ref --short HEAD)"
+        env:
+          # Survives a default-branch rename, unlike a hardcoded "main".
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
 
       - name: install neovim
         env:
-          # Pinned to the version these suites were verified against, not
-          # 'stable' — a moving target makes a blocking gate non-reproducible
-          # and turns an upstream change into a mystery failure on an
-          # unrelated PR.
-          #
-          # The SHA-256 is the REAL pin: a GitHub release asset can be
+          # Pinned by VERSION AND CHECKSUM. A GitHub release asset can be
           # replaced under the same tag and name, so the version alone is not
-          # reproducible. Recompute it when bumping (the value below was
-          # computed from the actual asset, not copied from a sibling repo).
+          # reproducible; the SHA-256 is the real pin. v0.12.5 is the version
+          # these suites were verified against locally. Recompute when bumping.
           NVIM_VERSION: "v0.12.5"
           NVIM_SHA256: "bce0f56eda1f1b1db6eee8f4133d7a38813ea07933837dd1777411ca384c6875"
         run: |
-          curl -fsSL -o /tmp/nvim.tar.gz \
+          # --retry: a transient network blip should not fail a PR for reasons
+          # unrelated to its change.
+          curl -fsSL --retry 3 --retry-delay 2 -o /tmp/nvim.tar.gz \
             "https://github.com/neovim/neovim/releases/download/$NVIM_VERSION/nvim-linux-x86_64.tar.gz"
           echo "$NVIM_SHA256  /tmp/nvim.tar.gz" | sha256sum -c -
           sudo tar -C /opt -xzf /tmp/nvim.tar.gz
@@ -64,9 +86,9 @@ jobs:
       - name: install plenary.nvim
         env:
           # Hard dependency per ADR-0006 §"Resolutions" #3; tests/smoke.lua
-          # asserts on its presence rather than skipping, so a missing plenary
-          # is a red suite and not a quiet gap. Pinned for the same
-          # reproducibility reason as neovim above.
+          # ASSERTS its presence rather than skipping, so a missing plenary is a
+          # red suite and not a quiet gap. Pinned for the same reproducibility
+          # reason as neovim above.
           PLENARY_SHA: "74b06c6c75e4eeb3108ec01852001636d85a932b"
         run: |
           dest="$HOME/.local/share/nvim/lazy/plenary.nvim"
@@ -74,17 +96,31 @@ jobs:
           git clone --filter=blob:none https://github.com/nvim-lua/plenary.nvim "$dest"
           git -C "$dest" checkout "$PLENARY_SHA"
 
-      - name: verify the toolchain is the pinned one
+      # Named "assert", not "verify", because it CAN fail: it compares the
+      # running nvim against the pin. A step named "verify" that only prints a
+      # version and checks a directory exists is the present-and-blind shape —
+      # it converts "nobody checked" into "checked and fine".
+      - name: assert the toolchain matches the pin
+        env:
+          NVIM_VERSION: "v0.12.5"
         run: |
-          nvim --version | head -1
+          got="$(nvim --version | head -1 | awk '{print $2}')"
+          echo "nvim: $got (pinned $NVIM_VERSION)"
+          test "$got" = "$NVIM_VERSION"
           test -d "$HOME/.local/share/nvim/lazy/plenary.nvim"
 
-      # The pty suite is deliberately NOT skipped here. It asserts behaviour
-      # Neovim only exhibits with a UI attached — WinScrolled never fires
-      # headlessly, so a headless assertion on that path passes while testing
-      # nothing. `script` (util-linux) is present on ubuntu-latest, so CI can
-      # run the one gate a headless developer environment cannot. That makes
-      # this job strictly stronger than a local run, which is the point of
-      # having it.
+      # The pty suite is deliberately NOT skipped. It asserts behaviour Neovim
+      # only exhibits with a UI attached — WinScrolled never fires headlessly,
+      # so a headless assertion on that path passes while testing nothing.
+      # `script` (util-linux) is present on ubuntu-latest, so CI runs the one
+      # gate a headless developer environment cannot.
       - name: tests/run-all.sh (smoke + standalones + pty + bench)
         run: ./tests/run-all.sh
+
+      # The pty runner writes its transcript to tests/ui/.<name>.log. Locally
+      # you open that file; in CI the runner is gone and cannot be reproduced,
+      # so without this the gate's LIKELIEST failure — the open pty deadlock
+      # todo above — would arrive with no evidence attached.
+      - name: pty transcript on failure
+        if: failure()
+        run: tail -40 tests/ui/.*.log || true
