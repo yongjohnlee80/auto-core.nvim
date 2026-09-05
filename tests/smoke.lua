@@ -1642,39 +1642,108 @@ ok("detached entry flagged",
 ok("bare entry flagged",
   parsed[4].bare == true and parsed[4].path == "/home/u/repo/.bare")
 
--- 29b. list — against this auto-core repo (we know it has worktrees)
-local self_root = require("auto-core.git.repo").root()
-ok("repo root resolved", type(self_root) == "string")
-local listed = wt.list(self_root)
-ok("list returns a table", type(listed) == "table")
-ok("list has at least one entry", #listed >= 1, vim.inspect(listed))
-ok("list entries include the auto-core path",
-  (function()
-    for _, e in ipairs(listed) do
-      if e.path:find("auto%-core") then return true end
-    end
-    return false
-  end)())
+do
+  -- 29b-29e: fixture repo with known worktrees and branches
+  -- Instead of asserting against the ambient auto-core checkout (which varies by
+  -- clone path, detached HEAD in CI, worktree name, etc.), build a deterministic
+  -- fixture repo in a tempdir with known branches and a linked worktree.
+  local fix_repo = vim.fs.normalize(vim.fn.tempname() .. "_wt_fixture")
+  vim.fn.mkdir(fix_repo, "p")
+  vim.fn.system({ "git", "-C", fix_repo, "init", "-q", "--initial-branch=main" })
+  vim.fn.system({ "git", "-C", fix_repo, "-c", "user.email=t@t", "-c", "user.name=t",
+    "commit", "--allow-empty", "-q", "-m", "init" })
+  vim.fn.system({ "git", "-C", fix_repo, "branch", "feature-b" })
+  vim.fn.system({ "git", "-C", fix_repo, "branch", "alpha-a" })
 
--- 29c. list_branches — main/master should float to top
-local branches = wt.list_branches(self_root)
-ok("list_branches returns a table with main first (or master)",
-  #branches >= 1
-    and (branches[1] == "main" or branches[1] == "master"
-         or #branches == 0),
-  vim.inspect(branches))
+  local fix_linked = vim.fs.normalize(vim.fn.tempname() .. "_wt_linked")
+  vim.fn.system({ "git", "-C", fix_repo, "worktree", "add", "-q", fix_linked, "feature-b" })
 
--- 29d. local_branch_exists / worktree_for_branch
-ok("local_branch_exists true on default branch",
-  wt.local_branch_exists(self_root, wt.default_branch(self_root)))
-ok("local_branch_exists false on bogus branch",
-  wt.local_branch_exists(self_root,
-    "definitely-no-such-branch-xyz") == false)
+  -- 29b. list — against the fixture repo (main + linked worktree)
+  local listed = wt.list(fix_repo)
+  ok("list returns a table", type(listed) == "table")
+  ok("list has exactly two entries (main + linked worktree)", #listed == 2, vim.inspect(listed))
+  ok("list includes the main worktree path and branch",
+    (function()
+      for _, e in ipairs(listed) do
+        if e.path == fix_repo and e.branch == "main" then return true end
+      end
+      return false
+    end)(), vim.inspect(listed))
+  ok("list includes the linked worktree path and branch",
+    (function()
+      for _, e in ipairs(listed) do
+        if e.path == fix_linked and e.branch == "feature-b" then return true end
+      end
+      return false
+    end)(), vim.inspect(listed))
 
--- 29e. default_branch
-local def = wt.default_branch(self_root)
-ok("default_branch returns a non-empty string",
-  type(def) == "string" and #def > 0, tostring(def))
+  -- Also verify list on the ambient checkout asserts something honest for ANY checkout
+  local self_root = require("auto-core.git.repo").root()
+  ok("ambient repo root resolved", type(self_root) == "string")
+  local self_listed = wt.list(self_root)
+  ok("ambient list returns a table with at least one entry",
+    type(self_listed) == "table" and #self_listed >= 1)
+  ok("ambient list entries include the current checkout root",
+    (function()
+      local norm_self = vim.fs.normalize(self_root)
+      for _, e in ipairs(self_listed) do
+        if vim.fs.normalize(e.path) == norm_self then return true end
+      end
+      return false
+    end)(), "self_root=" .. tostring(self_root))
+
+  -- 29c. list_branches — main/master floats to top + empty-branch tolerance is reachable
+  local branches = wt.list_branches(fix_repo)
+  ok("list_branches returns all fixture branches with main first",
+    #branches == 3 and branches[1] == "main" and branches[2] == "alpha-a" and branches[3] == "feature-b",
+    vim.inspect(branches))
+
+  -- Dead disjunct regression test: empty repo returns {} and tolerance is reachable
+  local empty_repo = vim.fs.normalize(vim.fn.tempname() .. "_wt_empty")
+  vim.fn.mkdir(empty_repo, "p")
+  vim.fn.system({ "git", "-C", empty_repo, "init", "-q" })
+  local empty_branches = wt.list_branches(empty_repo)
+  ok("list_branches on empty repo returns empty list", #empty_branches == 0)
+  -- Under the old buggy form `#branches >= 1 and (branches[1] == "main" or ... or #branches == 0)`,
+  -- evaluating an empty list returned false. Assert the hoisted disjunction reaches the empty case:
+  local function branch_list_matches(b)
+    return #b == 0 or (#b >= 1 and (b[1] == "main" or b[1] == "master"))
+  end
+  ok("branch list tolerance accepts empty branches (#branches == 0)",
+    branch_list_matches(empty_branches) == true)
+  ok("branch list tolerance accepts fixture branches",
+    branch_list_matches(branches) == true)
+
+  -- 29d. local_branch_exists / worktree_for_branch
+  ok("local_branch_exists true for existing main branch",
+    wt.local_branch_exists(fix_repo, "main") == true)
+  ok("local_branch_exists true for existing feature branch",
+    wt.local_branch_exists(fix_repo, "feature-b") == true)
+  ok("local_branch_exists false on bogus branch",
+    wt.local_branch_exists(fix_repo, "definitely-no-such-branch-xyz") == false)
+  ok("worktree_for_branch finds main worktree path",
+    wt.worktree_for_branch(fix_repo, "main") == fix_repo)
+  ok("worktree_for_branch finds linked worktree path",
+    wt.worktree_for_branch(fix_repo, "feature-b") == fix_linked)
+  ok("worktree_for_branch returns nil for branch without worktree",
+    wt.worktree_for_branch(fix_repo, "alpha-a") == nil)
+
+  -- 29e. default_branch
+  local def = wt.default_branch(fix_repo)
+  ok("default_branch on fixture repo with symbolic HEAD returns main", def == "main", tostring(def))
+
+  -- Bare repo default_branch (the primary production consumer in worktree.nvim)
+  local fix_bare = vim.fs.normalize(vim.fn.tempname() .. "_wt_bare")
+  vim.fn.system({ "git", "clone", "--bare", "-q", fix_repo, fix_bare })
+  local def_bare = wt.default_branch(fix_bare)
+  ok("default_branch on bare repo returns symbolic HEAD (main)", def_bare == "main", tostring(def_bare))
+
+  -- Clean up fixture repositories
+  pcall(vim.fn.delete, fix_linked, "rf")
+  pcall(vim.fn.delete, fix_repo, "rf")
+  pcall(vim.fn.delete, fix_bare, "rf")
+  pcall(vim.fn.delete, empty_repo, "rf")
+end
 
 -- 29f. repo_name_from_url — pure function
 ok("repo_name from ssh url",
