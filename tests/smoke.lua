@@ -1698,21 +1698,13 @@ do
     #branches == 3 and branches[1] == "main" and branches[2] == "alpha-a" and branches[3] == "feature-b",
     vim.inspect(branches))
 
-  -- Dead disjunct regression test: empty repo returns {} and tolerance is reachable
+  -- Dead disjunct regression test: empty repo returns {} strictly without needing a tolerance
   local empty_repo = vim.fs.normalize(vim.fn.tempname() .. "_wt_empty")
   vim.fn.mkdir(empty_repo, "p")
   vim.fn.system({ "git", "-C", empty_repo, "init", "-q" })
   local empty_branches = wt.list_branches(empty_repo)
   ok("list_branches on empty repo returns empty list", #empty_branches == 0)
-  -- Under the old buggy form `#branches >= 1 and (branches[1] == "main" or ... or #branches == 0)`,
-  -- evaluating an empty list returned false. Assert the hoisted disjunction reaches the empty case:
-  local function branch_list_matches(b)
-    return #b == 0 or (#b >= 1 and (b[1] == "main" or b[1] == "master"))
-  end
-  ok("branch list tolerance accepts empty branches (#branches == 0)",
-    branch_list_matches(empty_branches) == true)
-  ok("branch list tolerance accepts fixture branches",
-    branch_list_matches(branches) == true)
+
 
   -- 29d. local_branch_exists / worktree_for_branch
   ok("local_branch_exists true for existing main branch",
