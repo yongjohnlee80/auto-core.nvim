@@ -56,10 +56,19 @@ jobs:
       # The tested commit does not move — `checkout -B` only names it.
       - name: attach HEAD and provide the default branch
         run: |
+          # ATTACH FIRST, THEN CREATE. The order is load-bearing, not stylistic.
+          # On a PUSH event actions/checkout does NOT detach — it checks the
+          # branch out — so creating it while it is the current branch fails
+          # with "cannot force update the branch 'main' used by worktree", and
+          # the || fallback fails for the same reason ("refusing to fetch into
+          # branch ... checked out"). Under bash -e that kills the step before
+          # the checkout that would have made the update legal ever runs.
+          # Measured on a real clone in both shapes: this order exits 0 on
+          # both; the reverse exits 128 on push.
+          git checkout -B ci-head
           git branch --force "$DEFAULT_BRANCH" "origin/$DEFAULT_BRANCH" \
             || git fetch --no-tags origin \
                  "+refs/heads/$DEFAULT_BRANCH:refs/heads/$DEFAULT_BRANCH"
-          git checkout -B ci-head
           echo "branches:"; git branch --list
           echo "HEAD: $(git symbolic-ref --short HEAD)"
         env:
