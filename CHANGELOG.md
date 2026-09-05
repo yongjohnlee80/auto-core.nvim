@@ -10,6 +10,31 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.2.18] — 2026-09-05 — todo.assign status decoupling, in-place buffer reload (MF2), and mtime save gating (SF2)
+
+Strictly additive patch. No public Lua surface changed, so `api_version`
+stays at `0.1`.
+
+**Decouples `auto-core.todo.assign` from status progression (ADR-0035 r5).**
+Assigning an open task no longer auto-flips status to `in-progress` or moves
+the task out of `.todo-list/open/`. Starting work is now an explicit lifecycle
+action performed via `todos.status(id, "in-progress")`, eliminating the false
+board signal that work has begun purely because assignment occurred.
+
+**In-place buffer reload on task frontmatter rewrites (MF2).**
+When `move_task` performs an in-place rewrite (`from_path == to_path`),
+`reload_buffers` reloads open, loaded, unmodified buffers via `silent! keepalt edit!`,
+ensuring in-memory buffer state reflects on-disk frontmatter and preventing a
+subsequent `:w` from clobbering disk state with stale memory.
+
+**Modified-buffer protection via modification-time check and W12 prompt (SF2).**
+A modified buffer is preserved intact without reload. Protection against silent
+clobbering is provided by Neovim's built-in file modification-time (`mtime`)
+conflict detection, which triggers a `W12` conflict prompt on a bare `:w`.
+`log.notify` alerts the user when a task file changes on disk while unsaved
+edits are held in an open buffer. Also corrects `log.warn` call sites in
+`todo/init.lua` to pass the component name first.
+
 ## [v0.2.17] — 2026-09-05 — UI pty test harness hit-enter prompt immunity
 
 Strictly additive patch. No public Lua surface changed, so `api_version`
