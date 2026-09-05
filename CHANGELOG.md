@@ -10,6 +10,26 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.2.17] — 2026-09-05 — UI pty test harness hit-enter prompt immunity
+
+Strictly additive patch. No public Lua surface changed, so `api_version`
+stays at `0.1`.
+
+**The UI pty test harness deadlocked on startup warnings under `script`.**
+In Neovim 0.10+, startup in a pseudo-terminal allocated by `script` emits
+`E1568: Terminal did not respond to DSR request for 'background' color`
+because `script` does not answer Device Status Report queries. Combined
+with test setup noise like `vim.cmd("only")` emitting `Already only one window`,
+the messages overflowed default `cmdheight=1` and halted Neovim at a
+`Press ENTER or type command to continue` prompt, starving deferred assertion
+callbacks until the 120s watchdog fired.
+
+The fix configures `--cmd 'set nomore shortmess+=F cmdheight=2'` on the
+Neovim invocation, redirects stdin from `/dev/null` to prevent `SIGTTIN` in
+background subshells, silences `only` calls in test suites, improves watchdog
+timeout diagnostics to print the transcript tail, and adds
+`tests/ui/pty_startup_noise.lua` verifying prompt immunity.
+
 ## [v0.2.16] — 2026-09-05 — the log's component axis becomes filterable, and CI stops cancelling its own verdicts
 
 Strictly additive patch. No public Lua surface changed, so `api_version`
