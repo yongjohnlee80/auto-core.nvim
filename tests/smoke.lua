@@ -12776,6 +12776,14 @@ print("\n[87] ui.panel — an external close clears both sides exactly once")
   closes = 0
   vim.api.nvim_win_close(w5, true)
   vim.wait(200, function() return closes > 0 end, 5)
+  -- Asserted BEFORE the second call, so this cell is self-contained rather
+  -- than leaning on its neighbours: if the external close ever stopped
+  -- transitioning entirely, closes would be 0 here, p:close() would then fire
+  -- once, and a single `closes == 1` at the end would PASS on a broken
+  -- transition. (gold-man, #30 r1 — specificity.)
+  ok("p87: the external half of the pair actually transitioned",
+    closes == 1 and p.winid == nil,
+    ("closes=%d panel=%s"):format(closes, tostring(p.winid)))
   p:close()
   ok("p87: an external close then a later close() fires on_close once, not twice",
     closes == 1 and p.winid == nil and mirror == nil,
