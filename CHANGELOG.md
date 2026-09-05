@@ -10,6 +10,49 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.2.16] — 2026-09-05 — the log's component axis becomes filterable, and CI stops cancelling its own verdicts
+
+Strictly additive patch. No public Lua surface changed, so `api_version`
+stays at `0.1`.
+
+**`auto-core.todo`'s WARN records were unfilterable, and the axis they
+broke is the one `:AutoCoreLog` filters on.** `log.warn`/`log.info` take
+the COMPONENT first; both emissions in `todo/init.lua` passed their
+formatted message there instead, leaving the body empty. Because each
+message embeds a task id and two paths, every emission became its own
+unique component value — so filtering by component returned exactly one
+record per emission, which is the same as not filtering at all.
+
+The fix is two call sites and a `LOG_COMPONENT` constant, but the survey
+behind it is the point: the whole `lua/auto-core/` tree was checked
+rather than the reported line, and every other module already passes a
+proper component (`rpc`, `mailbox/router`, `todo/automation`). So the
+defect really was exactly two sites, `todo/automation.lua` served as the
+in-repo positive control for the correct idiom, and there is nothing
+left to chase. Verified by execution with a positive control first — a
+nil-vs-nil comparison would otherwise have passed — and locked by smoke
+[86], including a decoy cell asserting the component carries no task id
+and no path.
+
+**CI no longer cancels its own verdicts.** `group: ci-${{ github.ref }}`
+looks event-agnostic and is not: two runs of different events can share
+a ref, so they land in one group and `cancel-in-progress` gives it to
+whichever arrived last. There is no schedule job here yet, so that half
+is latent; the half that is not is that a merge to main can cancel an
+EARLIER merge's in-flight run. And a cancelled run is not a failure — it
+reports nothing and looks like nothing happened, so the verdict is lost
+quietly, on the branch every sibling plugin depends on. The event is now
+part of the group and `cancel-in-progress` is limited to `pull_request`.
+
+This landed here last: the family rollout carried the same fix to
+auto-agents, auto-finder, worktree, md-harpoon and auto-run first, and
+left it out of the one repo whose regressions reach all five.
+
+**Also in this release, from a separate change (PR #24):** `todos.*`
+supports unassign over the mailbox wire, accepting both JSON `null` and
+an empty string. Recorded here for completeness of the tag rather than
+described by its author.
+
 ## [v0.2.15] — 2026-09-05 — first CI, and open buffers follow a task's bucket move
 
 Strictly additive patch. No public Lua surface changed, so `api_version`
