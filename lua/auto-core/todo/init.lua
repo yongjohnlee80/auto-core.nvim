@@ -653,16 +653,32 @@ end
 ---agent completed it, saved back into `in-progress` as a new task.
 ---
 ---Unsaved user edits are never discarded: a modified buffer is only
----renamed, so the edits survive and Neovim's own `checktime` surfaces
----the on-disk divergence. An unmodified buffer is reloaded, so the
----reader sees the frontmatter auto-core just rewrote.
+---renamed, so the edits survive, and the user is warned that it happened.
+---Their next `:w` is then refused with `E13: File exists (add ! to
+---override)` rather than silently clobbering the frontmatter auto-core
+---wrote — verified, and locked by a cell. (`:set writeany` defeats that
+---refusal; a caller who has opted out of Neovim's overwrite protection
+---keeps what they chose.) An unmodified buffer is reloaded, so the reader
+---sees the frontmatter auto-core just rewrote.
 ---@param from_path string
 ---@param to_path string
 local function retarget_buffers(from_path, to_path)
   if from_path == to_path then return end
   local function apply()
     for _, b in ipairs(vim.api.nvim_list_bufs()) do
-      if vim.api.nvim_buf_is_loaded(b)
+      if vim.api.nvim_buf_is_valid(b)
+        and not vim.api.nvim_buf_is_loaded(b)
+        and vim.api.nvim_buf_get_name(b) == from_path then
+        -- ALREADY UNLOADED before the move (`:bdelete`, a restored session).
+        -- Only the NAME survives, and that name is the resurrection vector:
+        -- reopen it with `:buffer` and the next `:w` recreates the vacated
+        -- bucket. Deleting it is safe because Neovim REFUSES to unload a
+        -- modified buffer (`E89: No write since last change`), so unloaded
+        -- implies unmodified — there is no unsaved work to lose. Same policy
+        -- the stale sweep below applies to a name set_name leaves behind;
+        -- this applies it to one that was already there.
+        pcall(vim.api.nvim_buf_delete, b, { force = true })
+      elseif vim.api.nvim_buf_is_loaded(b)
         and vim.api.nvim_buf_get_name(b) == from_path then
         local modified = vim.api.nvim_get_option_value("modified", { buf = b })
         local ok_name = pcall(vim.api.nvim_buf_set_name, b, to_path)
@@ -683,6 +699,22 @@ local function retarget_buffers(from_path, to_path)
             vim.api.nvim_buf_call(b, function()
               pcall(vim.cmd, "silent! keepalt edit!")
             end)
+          else
+            -- The user has unsaved edits and we just renamed the buffer under
+            -- them. Say so: without this they meet a bare "E13: File exists"
+            -- on their next :w with no idea the path moved, and THEY are the
+            -- one who has to resolve the divergence.
+            local ok_log, log = pcall(require, "auto-core.log")
+            if ok_log and log and type(log.warn) == "function" then
+              pcall(log.warn, string.format(
+                "[auto-core.todo] task moved while you had unsaved edits; buffer %d now points at %s "
+                .. "(was %s). Your edits are intact; :w will refuse until you resolve the divergence.",
+                b, to_path, from_path))
+            end
+            pcall(vim.notify, string.format(
+              "auto-core.todo: task file moved to %s — your unsaved edits are kept, but :w will refuse "
+              .. "(E13) until you reconcile.", vim.fn.fnamemodify(to_path, ":t")),
+              vim.log.levels.WARN)
           end
         end
       end
@@ -702,11 +734,18 @@ end
 ---retarget cannot be forgotten by a future fourth caller. Before
 ---this was centralised the same write-new-then-unlink-old sequence
 ---was open-coded three times, with two different unlink calls.
+---`what` names the CALLER for the unlink-failure warning. Consolidating
+---three open-coded move sequences into this one function would otherwise
+---have cost observability: M.status()'s warning used to name the task id
+---and the operation, and every failure would now be reported as a
+---refresh. An operator diagnosing a stray duplicate from the log is
+---exactly who needs to know which API produced it.
 ---@param from_path string
 ---@param to_path string
 ---@param text string
+---@param what string? caller tag for diagnostics (e.g. `status(id, completed)`)
 ---@return boolean ok, string? err
-local function move_task(from_path, to_path, text)
+local function move_task(from_path, to_path, text, what)
   if from_path == to_path then
     -- In-place rewrite (errors:[] etc. — task 7).
     return atomic_write(from_path, text)
@@ -718,8 +757,8 @@ local function move_task(from_path, to_path, text)
     local ok_log, log = pcall(require, "auto-core.log")
     if ok_log and log and type(log.warn) == "function" then
       pcall(log.warn, string.format(
-        "[auto-core.todo.refresh] moved %s → %s but failed to unlink old: %s",
-        from_path, to_path, tostring(uerr)))
+        "[auto-core.todo] %s: moved %s → %s but failed to unlink old: %s",
+        what or "move", from_path, to_path, tostring(uerr)))
     end
   end
   retarget_buffers(from_path, to_path)
@@ -1067,7 +1106,7 @@ function M.refresh()
               if render_err then
                 summary.skipped = summary.skipped + 1
               else
-                local mok, _merr = move_task(file, target_path, rendered)
+                local mok, _merr = move_task(file, target_path, rendered, "refresh")
                 if mok then
                   if target_path ~= file then
                     summary.moved = summary.moved + 1
@@ -1270,7 +1309,8 @@ function M.status(id, new)
   -- move_task owns the write-new-then-unlink-old order AND the buffer
   -- retarget, so a status change cannot leave a buffer naming the bucket
   -- the task just left (which a later `:w` would recreate).
-  local ok, err = move_task(file, new_file, rendered)
+  local ok, err = move_task(file, new_file, rendered,
+    string.format("status(%s, %s)", id, new))
   if not ok then return nil, "write: " .. tostring(err) end
 
   -- Best-effort event publish so consumers (auto-finder panel,
@@ -1389,7 +1429,8 @@ function M.assign(id, assignee, reason)
 
   -- Same choke point as M.status(): move_task carries the crash-safe
   -- ordering and retargets any buffer open on the old bucket path.
-  local ok, err = move_task(old_file_path, target_path, rendered)
+  local ok, err = move_task(old_file_path, target_path, rendered,
+    string.format("assign(%s, %s)", id, tostring(assignee)))
   if not ok then return nil, "write: " .. tostring(err) end
 
   -- Best-effort event publish so consumers (mailbox router, panel)

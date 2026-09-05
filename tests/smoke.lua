@@ -12719,13 +12719,18 @@ print("\n[85] todo — open buffers follow the bucket move")
   -- change cleared that protection — reloading modified buffers, or
   -- resetting `modified` after the rename — this cell is what notices.
   local p3_done = td .. "/completed/" .. id3 .. ".md"
-  local wrote = pcall(function()
+  local wrote, werr = pcall(function()
     vim.api.nvim_buf_call(buf3, function() vim.cmd("silent noautocmd write") end)
   end)
   local disk3 = table.concat(vim.fn.readfile(p3_done), "\n")
-  ok("[85] a modified retargeted buffer cannot silently clobber the new file",
-    (not wrote) and disk3:find("status: completed", 1, true) ~= nil,
-    "write succeeded=" .. tostring(wrote))
+  -- Assert the SPECIFIC refusal, not merely that something threw: `not wrote`
+  -- alone is satisfied by E212, a permission failure, or a future refactor
+  -- that throws before ever reaching :write. The comment above names E13 as
+  -- the property, so the cell names it too.
+  ok("[85] a modified retargeted buffer is refused with E13, not silently clobbered",
+    (not wrote) and tostring(werr):find("E13", 1, true) ~= nil
+      and disk3:find("status: completed", 1, true) ~= nil,
+    "wrote=" .. tostring(wrote) .. " err=" .. tostring(werr))
   ok("[85] and the user's edit is still not on disk (they must resolve it)",
     disk3:find("USER EDIT SENTINEL", 1, true) == nil)
 
@@ -12751,7 +12756,39 @@ print("\n[85] todo — open buffers follow the bucket move")
     vim.api.nvim_buf_get_name(buf5) == td .. "/deferred/" .. id5 .. ".md",
     "buffer name = " .. vim.api.nvim_buf_get_name(buf5))
 
-  for _, b in ipairs({ buf, buf2, buf3, buf4, buf5 }) do
+  -- MF1 (gold-man r0): the reported defect via a buffer that was ALREADY
+  -- UNLOADED when the task moved. `:bdelete` unlists and unloads it but the
+  -- NAME survives, and that name is the resurrection vector — reopen with
+  -- `:buffer` and the next `:w` recreates the vacated bucket. Every other
+  -- cell here uses bufadd+bufload, so all of them missed this: they were one
+  -- bufload away from catching it.
+  --
+  -- Driven through :edit/:bdelete/:buffer rather than bufadd-without-bufload
+  -- because that is the shape a user actually produces.
+  local id6 = todo.add({ title = "Unloaded buffer must not resurrect" })
+  local p6_open = td .. "/open/" .. id6 .. ".md"
+  vim.cmd("edit " .. vim.fn.fnameescape(p6_open))
+  local buf6 = vim.fn.bufnr(p6_open)
+  vim.cmd("enew")
+  vim.cmd("bdelete " .. buf6)
+  ok("[85] precondition: the buffer is unloaded but still names the old path",
+    vim.api.nvim_buf_is_loaded(buf6) == false
+      and vim.api.nvim_buf_get_name(buf6) == p6_open)
+
+  todo.status(id6, "completed")
+  ok("[85] an ALREADY-UNLOADED buffer stops naming the vacated path",
+    not (vim.api.nvim_buf_is_valid(buf6)
+      and vim.api.nvim_buf_get_name(buf6) == p6_open),
+    "still names it: " .. tostring(vim.api.nvim_buf_is_valid(buf6)
+      and vim.api.nvim_buf_get_name(buf6)))
+
+  pcall(vim.cmd, "buffer " .. buf6)
+  pcall(vim.cmd, "silent noautocmd write")
+  ok("[85] reopening and saving it does NOT resurrect the old bucket",
+    vim.fn.filereadable(p6_open) == 0,
+    "resurrected at " .. p6_open)
+
+  for _, b in ipairs({ buf, buf2, buf3, buf4, buf5, buf6 }) do
     pcall(vim.api.nvim_buf_delete, b, { force = true })
   end
   cleanup()
