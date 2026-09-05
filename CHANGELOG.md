@@ -52,13 +52,20 @@ synchronously, so a handler that transitions unconditionally fires
 `on_close` twice and a cell checking only "the mirror is nil" passes on
 the bug. Every mutation in the matrix is caught by a named cell.
 
-**Also carried by this tag, from separate changes by another author**
-(`26b3ee6`, `03d85aa`): smoke `29b`–`29e` no longer assert against the
-AMBIENT auto-core checkout — they build a deterministic fixture repo in
-a tempdir — and the dead `#branches == 0` disjunct is gone. That
-fragility had been failing on perfectly valid clones whose directory
-name did not contain "auto-core", twice in one day on a reviewer who
-already knew about it.
+**Also carried by this tag, from separate changes by another author.**
+`26b3ee6`: smoke `29b`–`29e` no longer assert against the AMBIENT
+auto-core checkout — they build a deterministic fixture repo in a
+tempdir — and the dead `#branches == 0` disjunct is gone. That fragility
+had been failing on perfectly valid clones whose directory name did not
+contain "auto-core", twice in one day on a reviewer who already knew
+about it. `03d85aa`: removes the `branch_list_matches` helper that the
+corrected disjunct left with no callers, and the assertions it had made
+redundant.
+
+Both are review items rather than new work — `03d85aa` is a nit from
+PR #32, and `101c987` above is a specificity note from #30 r1. Naming
+one of two SHAs and describing only one would have been a smaller
+version of the omission this note exists to correct.
 
 Recorded after the fact: those two landed on `main` between this release
 branch being cut and its rebase-merge, so the entry above was written
