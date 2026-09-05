@@ -933,6 +933,6 @@ return {
   -- what caught the omission here: the release PR went red on
   -- `module=0.2.15` before the tag existed. That gate is the reason this file
   -- can be trusted at all, given the drift recorded above.
-  version     = "0.2.18",
+  version     = "0.2.19",
   api_version = "0.1",
 }

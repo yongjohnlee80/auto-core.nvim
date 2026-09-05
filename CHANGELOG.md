@@ -10,6 +10,48 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.2.19] — 2026-09-05 — an external panel close finally tells the consumer
+
+Strictly additive patch. No public Lua surface changed, so `api_version`
+stays at `0.1`.
+
+**`Panel:close()` was the only path that cleared `self.winid` and invoked
+`on_close`.** The `WinClosed` autocmd merely logged, so `:q`, `:close`, a
+layout change, or any other plugin closing the window left BOTH
+`panel.winid` and every consumer's mirror pointing at a dead window with
+`on_close` never fired. `WinClosed` now performs the same transition for
+a close this module did not initiate — direction 1 of the winid-mirror
+desync, whose direction 2 shipped in `v0.2.6`.
+
+This had been written and parked for eleven days behind a consumer
+ordering hazard: it turned auto-finder's suite red (697/2), because four
+of its probes close the panel unintentionally and the transition then
+correctly tears down cached section buffers. Re-measured against current
+auto-finder before unparking — with the instrument validated in both
+directions first — the same run is **708/0 with and without it**. The
+probes still close the panel exactly seven times per run; only the
+consequence moved. auto-finder now carries a tripwire pinning that
+mechanism so the finding cannot decay.
+
+**Two guards, two different properties**, which the tests now separate:
+
+- `_api_closing` carries ORDERING — without it the consumer is notified
+  from inside `nvim_win_close` with its window still alive, so a consumer
+  deleting buffers in `on_close` does it mid-teardown.
+- `finish_close`'s `p.winid == nil` early return carries IDEMPOTENCE
+  ACROSS SEPARATE CALLS — an external close followed by a later
+  `Panel:close()` fires `on_close` twice without it.
+
+They are not interchangeable, and an earlier draft of this work said they
+were: removing the second changed nothing in the suite, which was a fact
+about the inputs the suite drove rather than about the guard.
+
+Regression: smoke `[87]`, nine cells, asserting the COUNT throughout
+rather than the end state — `nvim_win_close` fires `WinClosed`
+synchronously, so a handler that transitions unconditionally fires
+`on_close` twice and a cell checking only "the mirror is nil" passes on
+the bug. Every mutation in the matrix is caught by a named cell.
+
 ## [v0.2.18] — 2026-09-05 — todo.assign status decoupling, in-place buffer reload (MF2), and mtime save gating (SF2)
 
 Strictly additive patch. No public Lua surface changed, so `api_version`
