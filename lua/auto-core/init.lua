@@ -130,6 +130,25 @@ function M.setup(opts)
     persist_dir = M.config.state and M.config.state.persist_dir,
   })
 
+  -- auto-core's FIRST mailbox verb of its own: `editor.open`.
+  --
+  -- Registered here rather than left to the consumer, because the point of the
+  -- verb is that an agent DISCOVERS it through `commands_list` — a verb a
+  -- consumer has to remember to register is one an agent cannot rely on
+  -- finding. auto-core owns the registry and the dispatch, so registering here
+  -- makes it available family-wide with no sibling change.
+  --
+  -- pcall'd and non-fatal: setup must not fail because a mailbox surface is
+  -- unavailable in some embedding, and the registry itself refuses a
+  -- conflicting owner rather than clobbering.
+  local ok_reg, reg_err = pcall(function()
+    return require("auto-core.ui.edit").register_command()
+  end)
+  if not ok_reg then
+    require("auto-core.log").warn("auto-core.setup",
+      "editor.open registration failed: " .. tostring(reg_err))
+  end
+
   -- Forward log config. `level` accepts "error"|"warn"|"info"|"debug"
   -- |"trace" or a numeric `M.log.levels.<NAME>`.
   M.log.configure({

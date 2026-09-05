@@ -17,6 +17,7 @@ local M = {}
 M.panel      = require("auto-core.ui.panel")
 M.winbar     = require("auto-core.ui.winbar")
 M.section    = require("auto-core.ui.section")
+M.edit       = require("auto-core.ui.edit")
 M.float      = require("auto-core.ui.float")
 M.grid       = require("auto-core.ui.grid")
 M.highlights = require("auto-core.ui.highlights")
