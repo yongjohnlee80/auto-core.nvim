@@ -12833,6 +12833,44 @@ print("\n[85] todo — open buffers follow the bucket move")
   ok("[85] MF2: modified buffer kept user unsaved edits across assign",
     b4_mod_text:find("user uncommitted draft") ~= nil)
 
+  -- SF2: The modified buffer's save is gated by Neovim's modification-time (mtime)
+  -- conflict check (W12). In-place rewrite leaves the buffer modified while
+  -- updating disk mtime. checktime triggers FileChangedShell with v:fcs_reason="conflict".
+  local fcs_reason = nil
+  local au_fcs = vim.api.nvim_create_autocmd("FileChangedShell", {
+    buffer = buf4,
+    callback = function() fcs_reason = vim.v.fcs_reason end,
+  })
+  vim.api.nvim_buf_call(buf4, function() vim.cmd("checktime") end)
+  pcall(vim.api.nvim_del_autocmd, au_fcs)
+  ok("[85] SF2: Neovim mtime check flags conflict on modified buffer",
+    fcs_reason == "conflict",
+    "fcs_reason = " .. tostring(fcs_reason))
+
+  -- A bare :w triggers the W12 warning ("The file has been changed since reading it!!!");
+  -- declining (feeding 'n') keeps the disk file safe without silent clobber.
+  vim.api.nvim_feedkeys("n\n", "t", false)
+  pcall(function()
+    vim.api.nvim_buf_call(buf4, function() vim.cmd("write") end)
+  end)
+  local disk_after_w = table.concat(vim.fn.readfile(p4_open), "\n")
+  ok("[85] SF2: bare write was gated by mtime check and did not clobber disk",
+    disk_after_w:find("assignee: \"agent:other\"") ~= nil
+      and disk_after_w:find("user uncommitted draft") == nil)
+
+  -- log.notify alerted the user about the divergence on the modified buffer
+  local ok_log, log = pcall(require, "auto-core.log")
+  local notified = false
+  if ok_log and log and type(log.recent) == "function" then
+    for _, r in ipairs(log.recent(10)) do
+      if tostring(r.message or r.msg or ""):find("task modified on disk while you had unsaved edits", 1, true) then
+        notified = true
+        break
+      end
+    end
+  end
+  ok("[85] SF2: log.notify alerted user to task modification under dirty buffer", notified)
+
   -- Explicit status(in-progress) moves bucket and retargets buffer
   todo.status(id4, "in-progress")
   ok("[85] status(in-progress) retargets buffer to in-progress path",
