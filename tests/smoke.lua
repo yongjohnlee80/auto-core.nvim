@@ -8711,9 +8711,9 @@ end)()
 
 -- ───────────────────── 68. ADR-0035 Phase 1 ─────────────────────────
 -- Schema additions (in-progress, automated statuses + automation
--- frontmatter fields), six-bucket reconciliation, and the atomic
--- in-line `open → in-progress` transition inside M.assign().
-print("\n[68] ADR-0035 Phase 1 — in-progress / automated buckets + atomic assign hook")
+-- frontmatter fields), six-bucket reconciliation, and the explicit
+-- status transition decoupled from assign (ADR-0035 r5).
+print("\n[68] ADR-0035 Phase 1 — in-progress / automated buckets + status decoupling")
 ;(function()
   local ok_t, todo = pcall(require, "auto-core.todo")
   if not ok_t then return end
@@ -8790,7 +8790,7 @@ print("\n[68] ADR-0035 Phase 1 — in-progress / automated buckets + atomic assi
   ok("schema rejects automated with origin: set",
     not v_auto_origin.ok, "got: " .. tostring(v_auto_origin.err))
 
-  -- 68d. atomic in-line assign transition: open → in-progress.
+  -- 68d. assign decoupled from status transition (ADR-0035 r5).
   local tmp_root = vim.fn.tempname()
   vim.fn.mkdir(tmp_root, "p")
   local worktree = require("auto-core.git.worktree")
@@ -8798,8 +8798,9 @@ print("\n[68] ADR-0035 Phase 1 — in-progress / automated buckets + atomic assi
   local function cleanup() worktree.set_workspace_root(nil); vim.fn.delete(tmp_root, "rf") end
 
   local id = todo.add({ title = "Phase 1 assign hook" })
+  local t_before = todo.get(id)
   ok("freshly added task starts as open",
-    (todo.get(id) or {}).status == "open")
+    t_before and t_before.status == "open")
 
   -- Capture both event types around the assign call.
   local events = require("auto-core.events")
@@ -8811,41 +8812,59 @@ print("\n[68] ADR-0035 Phase 1 — in-progress / automated buckets + atomic assi
   ok("assign returns no error", err_assign == nil, "got: " .. tostring(err_assign))
 
   local t_after = todo.get(id)
-  ok("status flipped open → in-progress atomically",
-    t_after and t_after.status == "in-progress",
+  ok("status remains open on assign (decoupled, ADR-0035 r5)",
+    t_after and t_after.status == "open",
     "got: " .. tostring(t_after and t_after.status))
   ok("assignee landed in the same write",
     t_after and t_after.assignee == "agent:foo")
-  ok("status_changed bumped to a non-empty ISO datetime",
-    t_after and type(t_after.status_changed) == "string"
-      and t_after.status_changed:match("^%d%d%d%d%-%d%d%-%d%d") ~= nil)
+  ok("status_changed not bumped on assign",
+    t_after and t_after.status_changed == t_before.status_changed)
 
-  -- File moved bucket: must now live in `.todo-list/in-progress/`.
+  -- File remains in `.todo-list/open/`.
   local td = paths.default_todo_dir(tmp_root)
+  local open_path = paths.task_file_path(td, id, "open", nil)
+  ok("file remains in .todo-list/open/",
+    vim.fn.filereadable(open_path) == 1,
+    "expected: " .. open_path)
   local ip_path = paths.task_file_path(td, id, "in-progress", nil)
-  ok("file relocated into .todo-list/in-progress/",
-    vim.fn.filereadable(ip_path) == 1,
-    "expected: " .. ip_path)
-  local old_open_path = paths.task_file_path(td, id, "open", nil)
-  ok("stale file in .todo-list/open/ was unlinked",
-    vim.fn.filereadable(old_open_path) == 0)
+  ok("file does NOT exist in .todo-list/in-progress/",
+    vim.fn.filereadable(ip_path) == 0)
 
   vim.wait(50, function() return false end)
   ok("core.todo.assignee:changed event fired",
     assignee_evt ~= nil and assignee_evt.to == "agent:foo")
-  ok("core.todo.status:changed event ALSO fired (atomic transition)",
+  ok("core.todo.status:changed event did NOT fire on assign",
+    status_evt == nil)
+
+  -- Explicit status call transitions to in-progress
+  assignee_evt, status_evt = nil, nil
+  local _, err_status = todo.status(id, "in-progress")
+  ok("explicit status(in-progress) succeeds", err_status == nil)
+  vim.wait(50, function() return false end)
+  local t_ip = todo.get(id)
+  ok("status transitioned to in-progress via explicit status call",
+    t_ip and t_ip.status == "in-progress")
+  ok("file relocated into .todo-list/in-progress/",
+    vim.fn.filereadable(ip_path) == 1,
+    "expected: " .. ip_path)
+  ok("stale file in .todo-list/open/ was unlinked",
+    vim.fn.filereadable(open_path) == 0)
+  ok("core.todo.status:changed event fired on explicit status call",
     status_evt ~= nil
       and status_evt.from == "open"
       and status_evt.to == "in-progress")
+  ok("status_changed bumped to a non-empty ISO datetime",
+    t_ip and type(t_ip.status_changed) == "string"
+      and t_ip.status_changed:match("^%d%d%d%d%-%d%d%-%d%d") ~= nil)
 
-  -- OQ1: clearing the assignee does NOT reverse the transition.
+  -- Clearing the assignee does NOT reverse the transition.
   assignee_evt, status_evt = nil, nil
   todo.assign(id, nil)
   vim.wait(50, function() return false end)
   local t_cleared = todo.get(id)
-  ok("OQ1: clearing assignee leaves status at in-progress (no reversal)",
+  ok("clearing assignee leaves status at in-progress (no reversal)",
     t_cleared and t_cleared.status == "in-progress" and t_cleared.assignee == nil)
-  ok("OQ1: no status event fired on assignee-clear",
+  ok("no status event fired on assignee-clear",
     status_evt == nil)
 
   -- Re-assigning an in-progress task does NOT re-fire status event.
@@ -8878,7 +8897,8 @@ print("\n[68] ADR-0035 Phase 1 — in-progress / automated buckets + atomic assi
   local id_comp   = todo.add({ id = "2026-05-30-bucket-comp",   title = "bucket completed" })
   todo.status(id_comp, "completed")
   local id_ip     = todo.add({ id = "2026-05-30-bucket-ip",     title = "bucket in-progress" })
-  todo.assign(id_ip, "agent:bucket")  -- triggers the auto-transition
+  todo.assign(id_ip, "agent:bucket")
+  todo.status(id_ip, "in-progress")  -- explicit status transition (ADR-0035 r5)
   local id_auto   = todo.add({ id = "2026-05-30-bucket-auto",   title = "bucket automated" })
   todo.status(id_auto, "automated")
 
@@ -12778,15 +12798,45 @@ print("\n[85] todo — open buffers follow the bucket move")
   ok("[85] and the user's edit is still not on disk (they must resolve it)",
     disk3:find("USER EDIT SENTINEL", 1, true) == nil)
 
-  -- ── assign() moves open → in-progress; the buffer must follow ──
-  local id4 = todo.add({ title = "Assign moves the bucket" })
+  -- ── assign() decoupled from bucket move; buffer reloaded in-place (MF2) ──
+  local id4 = todo.add({ title = "Assign keeps open bucket and reloads buffer" })
   local p4_open = td .. "/open/" .. id4 .. ".md"
   local buf4 = vim.fn.bufadd(p4_open)
   vim.fn.bufload(buf4)
   todo.assign(id4, "agent:kimmy-vision")
-  ok("[85] assign(open→in-progress) retargets the buffer too",
-    vim.api.nvim_buf_get_name(buf4) == td .. "/in-progress/" .. id4 .. ".md",
-    "buffer name = " .. vim.api.nvim_buf_get_name(buf4))
+  ok("[85] assign(open) leaves file in open/ (decoupled ADR-0035 r5)",
+    vim.fn.filereadable(p4_open) == 1 and vim.fn.filereadable(td .. "/in-progress/" .. id4 .. ".md") == 0)
+  ok("[85] buffer still names open/ path",
+    vim.api.nvim_buf_get_name(buf4) == p4_open)
+  -- MF2 verification: unmodified buffer was reloaded with the new content
+  local b4_lines = vim.api.nvim_buf_get_lines(buf4, 0, -1, false)
+  local b4_text = table.concat(b4_lines, "\n")
+  ok("[85] MF2: unmodified buffer reloaded to reflect assignee",
+    b4_text:find("agent:kimmy-vision", 1, true) ~= nil,
+    "buffer content: " .. b4_text)
+  ok("[85] MF2: buffer is not dirty after reload",
+    not vim.api.nvim_get_option_value("modified", { buf = buf4 }))
+  -- Saving the buffer with :write! does NOT revert assignee on disk
+  vim.api.nvim_buf_call(buf4, function() vim.cmd("silent! write!") end)
+  local disk_lines = vim.fn.readfile(p4_open)
+  local disk_text = table.concat(disk_lines, "\n")
+  ok("[85] MF2: saving buffer preserves assignee on disk",
+    disk_text:find("agent:kimmy-vision", 1, true) ~= nil)
+
+  -- Modified buffer is NOT reloaded / clobbered on in-place rewrite
+  vim.api.nvim_buf_set_lines(buf4, -1, -1, false, { "user uncommitted draft" })
+  ok("[85] MF2: buffer is marked modified",
+    vim.api.nvim_get_option_value("modified", { buf = buf4 }))
+  todo.assign(id4, "agent:other")
+  local b4_mod_lines = vim.api.nvim_buf_get_lines(buf4, 0, -1, false)
+  local b4_mod_text = table.concat(b4_mod_lines, "\n")
+  ok("[85] MF2: modified buffer kept user unsaved edits across assign",
+    b4_mod_text:find("user uncommitted draft") ~= nil)
+
+  -- Explicit status(in-progress) moves bucket and retargets buffer
+  todo.status(id4, "in-progress")
+  ok("[85] status(in-progress) retargets buffer to in-progress path",
+    vim.api.nvim_buf_get_name(buf4) == td .. "/in-progress/" .. id4 .. ".md")
 
   -- ── refresh() reconciles a hand-edited status; the buffer must follow ──
   local id5 = todo.add({ title = "Refresh moves the bucket" })
