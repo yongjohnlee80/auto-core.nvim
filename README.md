@@ -19,10 +19,10 @@ introspection, and an agent task-queue infrastructure.
 
 ## Status
 
-**`v0.1.0` — solid beta (2026-05-11).** First release covered by the
-**additive-only minor-bump** stability rule: every `v0.X.Y` from
-here forward will never rename, remove, or break-shape an existing
-function, state-namespace key, event topic, or persisted schema.
+**`v0.2.x` — solid beta.** `v0.1.0` (2026-05-11) was the first release
+covered by the **additive-only minor-bump** stability rule: every
+`v0.X.Y` from there forward will never rename, remove, or break-shape an
+existing function, state-namespace key, event topic, or persisted schema.
 Removals require deprecation + a major bump. See the
 [`auto-core-maintenance` convention](https://github.com/yongjohnlee80/auto-agents)
 in the auto-agents kb for the full eleven-rule contract.
@@ -39,8 +39,10 @@ in the auto-agents kb for the full eleven-rule contract.
 | Phase 5 — tasks queue + channel + status + `:AutoCoreChannel` | `v0.0.8` |
 | Phase 6 — `ui.float` (help_overlay/confirm) + `ui.highlights` | `v0.0.9` |
 | Phase 7 — `log` + `health` (`:checkhealth auto-core`) | `v0.0.10` |
-| **v0.1.0 bundle** — `lsp.reset` (tech-stack-aware) + `ui.float.multi` (gitsgraph-shaped multi-pane) + `git.graph` (multi-repo discovery + commit caches) + `git.fetch` + `git.pull` + `git.worktree.destroy` (consultative round-trip) + `files` (global file-filter prefs) + `state.namespace` `VimLeavePre` flush + `doc:pinned`/`doc:unpinned` topics | **`v0.1.0` ← here** |
-| `ui.grid` — reusable tabular result model + window-owning view (ADR 0058, autodb M7) | `v0.1.x` (additive) |
+| **v0.1.0 bundle** — `lsp.reset` (tech-stack-aware) + `ui.float.multi` (gitsgraph-shaped multi-pane) + `git.graph` (multi-repo discovery + commit caches) + `git.fetch` + `git.pull` + `git.worktree.destroy` (consultative round-trip) + `files` (global file-filter prefs) + `state.namespace` `VimLeavePre` flush + `doc:pinned`/`doc:unpinned` topics | `v0.1.0` |
+| `ui.grid` — reusable tabular result model + window-owning view (ADR 0058, autodb M7) | `v0.1.64` |
+| `git.log` + `git.diff` + `ui.marks` + `ui.diffview` | `v0.2.0` |
+| `ui.edit.open` + the `editor.open` mailbox verb — open a file from outside the layout | **`v0.2.x` ← here** |
 | Family cleanup + post-1.0 prep | `v0.X.0` minors (additive only) |
 | API freeze | `v1.0.0` |
 
@@ -154,6 +156,97 @@ refreshed on `WinScrolled`, since a winbar does not scroll with the text.
 
 `WinScrolled` does not fire in a headless Neovim, so that wiring is
 covered by `tests/ui/run.sh` (a real pty) rather than `tests/smoke.lua`.
+
+## `ui.edit` — opening a file from outside the layout
+
+`auto-core.ui.panel` sets `winfixbuf = true` on every panel it creates
+(see **Known integrations** below for why). That protection has a cost
+for anything driving Neovim from the outside — an agent, a remote call,
+a hook:
+
+```
+nvim --server $NVIM --remote-silent <file>
+-> E1513: Cannot switch buffer. 'winfixbuf' is enabled
+```
+
+`ui.edit.open` is the sanctioned way to do it. It finds a window that
+can actually take a file, opens the buffer there, positions the cursor,
+and reports where the file went.
+
+```lua
+local res, err = require("auto-core").ui.edit.open("/abs/path/file.lua", {
+  line  = 42,     -- 1-based, optional
+  col   = 7,      -- 1-based, optional
+  focus = false,  -- default: do NOT move the cursor there
+})
+-- res = {
+--   win, buf, path,
+--   line, col,                  -- where the cursor ACTUALLY is
+--   created_window,             -- true when nothing usable existed
+--   panel_windows_skipped,      -- how many panels were passed over
+-- }
+```
+
+**Four properties are part of the contract, not implementation detail:**
+
+1. **`line` and `col` are both 1-based.** Neovim is inconsistent here —
+   `nvim_win_set_cursor` takes a 1-based line and a **0-based** column —
+   and a public API that inherits that inconsistency arrives later as an
+   off-by-one bug report. The conversion happens inside. Non-integers are
+   refused rather than truncated.
+2. **The returned `line`/`col` are read back off the window**, not echoed
+   from `opts`. A request past the end of the file is clamped, and the
+   result tells you where the cursor landed — so a caller reporting "opened
+   at 42:7" is never reporting a position that does not exist.
+3. **Focus is not stolen.** An agent moving the cursor while somebody is
+   typing is exactly the hijack `winfixbuf` exists to prevent, so `focus`
+   defaults to `false`: the file is opened and positioned, and the caller's
+   window keeps the cursor. Pass `focus = true` to jump.
+4. **The path must be absolute.** A relative path is refused with an error
+   rather than resolved — an agent's cwd is not the user's, so a relative
+   path would resolve against whichever the host happens to have.
+
+A window qualifies as usable when it is not a panel, not floating, has
+`buftype == ""`, and does not have `winfixbuf`. In one measured session
+there were ~50 windows and exactly **one** could take a file, which is why
+`panel_windows_skipped` is reported: an agent that cannot tell where the
+file went cannot report it.
+
+When nothing usable exists, a split is created with
+`nvim_open_win(buf, false, { split = "below", win = anchor })`. The Ex-command
+form (`botright new`, `topleft split <file>`) is deliberately **not** used:
+a panel's autocmds intercept it, and the observed outcome is `ok = true`,
+window count unchanged, and the panel's own buffer replaced by the file.
+`nvim_open_win` is not interceptable, so success means a window.
+
+### The `editor.open` mailbox verb
+
+The same surface is registered on auto-core's command registry at
+`setup()`, so anything speaking the mailbox protocol can use it. The
+fields that matter (a real message also carries `id` / `from` / `to`):
+
+```json
+{ "kind": "command", "command": "editor.open",
+  "args": { "path": "/abs/path/file.lua", "line": 42, "col": 7 } }
+```
+
+```
+schema: { path = "string", line = "integer?", col = "integer?", focus = "boolean?" }
+```
+
+Only `path` is required; the `?` suffix marks a field optional, and the
+schema is validated **before** the handler runs, so a bad call comes back
+as `bad_args` rather than a Lua error.
+
+**This verb lives in auto-core alone — there is no matching change in
+auto-agents.** auto-core owns the whole surface an agent talks to: the
+registry is `auto-core.mailbox.commands`, dispatch is
+`auto-core.mailbox.router` calling `commands.handle_message`, and discovery
+is auto-agents' `commands_list`, whose handler is a **relay** — it calls
+`commands.list()` and forwards the entries, schema included. A verb
+registered here is therefore discovered and dispatched with no auto-agents
+change at all. Registering it in both places would be a second implementation
+of the window logic, which is the thing this module exists to prevent.
 
 ## Logging — the family contract (ADR 0021 / v0.1.11+)
 
@@ -416,6 +509,71 @@ implementation lives in
 `lua/plugins/snacks-picker-winfixbuf.lua`.
 
 This is tracked as **ADR 0027** in the auto-agents knowledge base.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs one job, `lua`, on **every push to `main`
+and every pull request**. It installs the toolchain and then hands the
+verdict to `tests/run-all.sh` — CI does not reimplement the gate, it
+supplies the environment and lets the runner be the judge.
+
+| Pinned by | What | Why |
+|---|---|---|
+| commit SHA | `actions/checkout` | a tag can be moved to different code under the same name |
+| version **and SHA-256** | Neovim (`v0.12.5`) | a release asset can be replaced under the same tag and name, so the version alone is not reproducible |
+| commit SHA | `plenary.nvim` | the only plugin dependency the suites need |
+
+A step named **`assert the toolchain matches the pin`** compares the
+running Neovim against the pinned version and fails on a mismatch. It is
+called *assert*, not *verify*, because it can fail: a step that only prints
+a version is present-and-blind, and converts "nobody checked" into
+"checked and fine".
+
+**`tests/run-all.sh` is the whole gate.** It runs the smoke suite, the
+standalone suites, the UI-attached pty suite and the `rpc.frame` bench, and
+it treats a **missing** `N passed, M failed` summary line as a hard failure
+rather than parsing whatever partial PASS lines a suite emitted. That
+sentinel is the only thing that catches a C-level crash mid-run, which is
+why running a single suite by hand is not a substitute. On failure the
+workflow tails the pty runner's transcript into the log — locally you open
+`tests/ui/.<name>.log`, but in CI the runner is gone and cannot be
+reproduced, so the gate's likeliest failure would otherwise arrive with no
+evidence attached.
+
+### Why the workflow attaches HEAD
+
+`actions/checkout` leaves a **detached HEAD with no local branches** on a
+`pull_request` event, and auto-core's own suites read its refs —
+`git.worktree.default_branch()` runs `git symbolic-ref --short HEAD`. So the
+workflow attaches HEAD (`git checkout -B ci-head`) and names the default
+branch before the suites run, with `fetch-depth: 0`.
+
+The obvious shortcut is wrong and worth recording. `git branch --force main
+origin/main` **alone** makes the branch assertions pass for the wrong
+reason: on a detached HEAD `symbolic-ref` fails and `default_branch()`
+returns its literal fallback string `"main"`, so creating a branch of that
+name reduces the assertion to "the workflow created a branch called main" —
+a test of the workflow, by the workflow. Attaching HEAD is what makes those
+cells pass for the same reason they pass on a developer machine. The order
+is load-bearing too: on a `push` event `actions/checkout` does *not* detach,
+so creating the branch first fails with `cannot force update the branch
+'main' used by worktree`.
+
+### auto-core has no `drift` job — its consumers do
+
+Every other family repo's workflow carries a second job, `drift`, that
+resolves **auto-core at its default branch** instead of the commit its
+gating job pins. auto-core is the dependency, so it has nothing to drift
+against; the reason the consumers need it is that a regression here reaches
+them before anyone notices, and a consumer pinned to a frozen auto-core is
+precisely the thing that cannot notice.
+
+Practical consequence when landing a change here: a consumer's `lua` job
+stays green because it pins, and its `drift` job is what goes red. Those
+run on a schedule (Mondays, 06:00 UTC) and on manual dispatch — **not** on
+push — so a breaking change on `main` here is not visible in the consumers'
+PR checks. If a change is expected to need consumer updates, dispatch the
+consumers' `drift` jobs rather than waiting for Monday.
 
 ## License
 
