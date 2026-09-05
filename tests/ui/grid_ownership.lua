@@ -40,7 +40,7 @@ for i = 1, 12 do
 end
 local model = grid.model({ columns = cols, rows = { row, row, row } })
 
-vim.cmd("only")
+vim.cmd("silent! only")
 vim.cmd("vsplit")
 local win = vim.api.nvim_get_current_win()
 vim.api.nvim_win_set_width(win, 30)

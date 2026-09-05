@@ -45,7 +45,7 @@ for i = 1, 12 do
 end
 local model = grid.model({ columns = cols, rows = { row, row, row } })
 
-vim.cmd("only")
+vim.cmd("silent! only")
 local win = vim.api.nvim_get_current_win()
 -- Narrow the window so the header is far wider than the viewport and a
 -- modest cursor move forces a real horizontal scroll.
