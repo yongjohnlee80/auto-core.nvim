@@ -4875,6 +4875,24 @@ local opt_absent = commands.handle_message(message.build({
 ok("schema: optional field omitted is accepted",
   opt_absent.ok == true)
 
+-- Optional field with vim.NIL (JSON null) is accepted and normalized to nil.
+local opt_nil = commands.handle_message(message.build({
+  from = "a", to = "b", kind = "command", command = "opendiff",
+  args = { old_file_path = "/a", new_file_path = "/b", tab_name = vim.NIL },
+}))
+ok("schema: optional field with vim.NIL (JSON null) is accepted",
+  opt_nil.ok == true)
+ok("schema: optional field with vim.NIL is normalized to nil for handler",
+  opt_nil.value.tab_name == nil)
+
+-- Required field with vim.NIL (JSON null) is rejected with bad_args.
+local req_nil = commands.handle_message(message.build({
+  from = "a", to = "b", kind = "command", command = "opendiff",
+  args = { old_file_path = "/a", new_file_path = vim.NIL },
+}))
+ok("schema: required field with vim.NIL is rejected as bad_args",
+  req_nil.ok == false and req_nil.code == "bad_args" and req_nil.field == "new_file_path")
+
 -- Integer type rejects floats.
 commands.register("setline", {
   owner = "test", schema = { n = "integer" },
@@ -8657,9 +8675,35 @@ print("\n[67] todo.assign — sets assignee + fires core.todo.assignee:changed")
   ok("clear fires event with to=nil",
     captured ~= nil and captured.to == nil and captured.from == "agent:lector")
 
+  -- Clear assignee with "" (empty string unassigns over the wire / API)
+  todo.assign(id, "agent:lector")
+  captured = nil
+  local res_empty, err_empty = todo.assign(id, "")
+  ok("assign with empty string succeeds (unassigns)", res_empty and err_empty == nil)
+  vim.wait(50, function() return false end)
+  local t_empty = todo.get(id)
+  ok("clear assignee with '' writes back nil",
+    t_empty and t_empty.assignee == nil,
+    "got: " .. tostring(t_empty and t_empty.assignee))
+  ok("clear with '' fires event with to=nil",
+    captured ~= nil and captured.to == nil and captured.from == "agent:lector")
+
+  -- Clear assignee with vim.NIL (JSON null over mailbox wire)
+  todo.assign(id, "agent:lector")
+  captured = nil
+  local res_nil, err_nil = todo.assign(id, vim.NIL)
+  ok("assign with vim.NIL succeeds (unassigns)", res_nil and err_nil == nil)
+  vim.wait(50, function() return false end)
+  local t_nil = todo.get(id)
+  ok("clear assignee with vim.NIL writes back nil",
+    t_nil and t_nil.assignee == nil,
+    "got: " .. tostring(t_nil and t_nil.assignee))
+  ok("clear with vim.NIL fires event with to=nil",
+    captured ~= nil and captured.to == nil and captured.from == "agent:lector")
+
   -- Bad args
-  ok("rejects empty id",       select(2, todo.assign("",         "agent:x")) ~= nil)
-  ok("rejects empty assignee", select(2, todo.assign(id,         ""))       ~= nil)
+  ok("rejects empty id",            select(2, todo.assign("", "agent:x")) ~= nil)
+  ok("rejects non-string assignee", select(2, todo.assign(id, 123))       ~= nil)
 
   events.unsubscribe(handle)
   cleanup()
