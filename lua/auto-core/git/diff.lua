@@ -219,11 +219,147 @@ end
 ---
 ---Hunks are separated by a `gap` entry in BOTH columns; because every hunk
 ---leaves the columns equal-length, the divider lands on the same row in each.
+---_sides_full renders full file context (ADR-0083 §2.4).
+---Unchanged lines outside and between hunks are rendered as kind="context",
+---with no "gap" dividers, so the reviewer can inspect surrounding code.
+function M._sides_full(file, opts)
+  opts = opts or {}
+  local blines = opts.before_lines
+  local alines = opts.after_lines
+  if not blines and opts.read_file then
+    local res = opts.read_file("before", file.old_path or file.path)
+    if type(res) == "string" then blines = vim.split(res:gsub("\r\n", "\n"), "\n", { plain = true })
+    elseif type(res) == "table" then blines = res end
+  end
+  if not alines and opts.read_file then
+    local res = opts.read_file("after", file.new_path or file.path)
+    if type(res) == "string" then alines = vim.split(res:gsub("\r\n", "\n"), "\n", { plain = true })
+    elseif type(res) == "table" then alines = res end
+  end
+
+  -- Fallback to git/worktree if available and lines are missing
+  if (not blines or not alines) and (opts.worktree or opts.cwd) then
+    local dir = opts.worktree or opts.cwd
+    if not blines and file.old_path and file.kind ~= "added" then
+      local rev
+      if opts.uncommitted then rev = "HEAD"
+      elseif opts.base then rev = opts.base
+      elseif opts.sha then rev = opts.sha .. "~1" end
+      if rev then
+        local out = vim.system({ "git", "-C", dir, "show", rev .. ":" .. file.old_path }, { text = true }):wait()
+        if out.code == 0 and out.stdout then
+          blines = vim.split(out.stdout:gsub("\r\n", "\n"), "\n", { plain = true })
+          if #blines > 0 and blines[#blines] == "" and out.stdout:sub(-1) == "\n" then
+            table.remove(blines)
+          end
+        end
+      end
+    end
+    if not alines and file.new_path and file.kind ~= "deleted" then
+      if opts.uncommitted then
+        local p = dir .. "/" .. file.new_path
+        local f = io.open(p, "r")
+        if f then
+          local content = f:read("*a")
+          f:close()
+          if content then
+            alines = vim.split(content:gsub("\r\n", "\n"), "\n", { plain = true })
+            if #alines > 0 and alines[#alines] == "" and content:sub(-1) == "\n" then
+              table.remove(alines)
+            end
+          end
+        end
+      elseif opts.sha then
+        local out = vim.system({ "git", "-C", dir, "show", opts.sha .. ":" .. file.new_path }, { text = true }):wait()
+        if out.code == 0 and out.stdout then
+          alines = vim.split(out.stdout:gsub("\r\n", "\n"), "\n", { plain = true })
+          if #alines > 0 and alines[#alines] == "" and out.stdout:sub(-1) == "\n" then
+            table.remove(alines)
+          end
+        end
+      end
+    end
+  end
+
+  if not blines and not alines then
+    return M.sides(file, { context = "hunk" })
+  end
+
+  blines = blines or {}
+  alines = alines or {}
+
+  local before, after = {}, {}
+  local dels, adds = {}, {}
+  local function flush_block()
+    local n = math.max(#dels, #adds)
+    for k = 1, n do
+      before[#before + 1] = dels[k] or { kind = "pad", text = "", lineno = nil }
+      after[#after + 1] = adds[k] or { kind = "pad", text = "", lineno = nil }
+    end
+    dels, adds = {}, {}
+  end
+
+  local cur_old, cur_new = 1, 1
+  for _, h in ipairs(file.hunks or {}) do
+    -- Pre-hunk context lines
+    while cur_old < h.old_start and cur_new < h.new_start do
+      flush_block()
+      local txt = blines[cur_old] or alines[cur_new] or ""
+      before[#before + 1] = { kind = "context", text = txt, lineno = cur_old }
+      after[#after + 1] = { kind = "context", text = txt, lineno = cur_new }
+      cur_old = cur_old + 1
+      cur_new = cur_new + 1
+    end
+
+    -- Hunk lines
+    for _, l in ipairs(h.lines) do
+      if l.kind == "context" then
+        flush_block()
+        before[#before + 1] = { kind = "context", text = l.text, lineno = l.old }
+        after[#after + 1] = { kind = "context", text = l.text, lineno = l.new }
+      elseif l.kind == "del" then
+        dels[#dels + 1] = { kind = "del", text = l.text, lineno = l.old }
+      elseif l.kind == "add" then
+        adds[#adds + 1] = { kind = "add", text = l.text, lineno = l.new }
+      end
+    end
+    flush_block()
+    cur_old = h.old_start + h.old_count
+    cur_new = h.new_start + h.new_count
+  end
+
+  -- Post-hunk tail context lines
+  while cur_old <= #blines or cur_new <= #alines do
+    flush_block()
+    local txt = blines[cur_old] or alines[cur_new] or ""
+    local o_no = (cur_old <= #blines) and cur_old or nil
+    local n_no = (cur_new <= #alines) and cur_new or nil
+    before[#before + 1] = { kind = "context", text = txt, lineno = o_no }
+    after[#after + 1] = { kind = "context", text = txt, lineno = n_no }
+    cur_old = cur_old + 1
+    cur_new = cur_new + 1
+  end
+
+  return { before = before, after = after }
+end
+
+---sides projects one file into the two column buffers a three-column view
+---renders: BEFORE and AFTER, each entry carrying its real line number so a
+---review comment's `(line, side)` resolves to a row by lookup rather than
+---arithmetic.
+---
+---Supports opts.context = "hunk" (default) or "full" (ADR-0083 §2.4).
 ---@param file AutoCoreDiffFile
+---@param opts table?
 ---@return { before: table[], after: table[] }
-function M.sides(file)
+function M.sides(file, opts)
   local before, after = {}, {}
   if not file then return { before = before, after = after } end
+
+  local context_mode = (opts and opts.context) or "hunk"
+  if context_mode == "full" then
+    return M._sides_full(file, opts)
+  end
 
   local dels, adds = {}, {}
   local function flush_block()
