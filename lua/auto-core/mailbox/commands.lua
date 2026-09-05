@@ -372,6 +372,10 @@ end
 ---callers that want strict-shape enforcement can layer their own
 ---check on top.
 ---
+---Note: Mutates `args` in-place when optional fields carry `vim.NIL`
+---(JSON null), normalizing them to `nil` so `vim.NIL` userdata
+---cannot leak into command handlers.
+---
 ---Returns ok, err_msg?, field?. err_msg is a human-readable
 ---explanation; field is the offending field name (or nil).
 ---@param args   table
@@ -389,10 +393,13 @@ function M.validate_args(args, schema)
     local optional = type_spec:sub(-1) == "?"
     local want = optional and type_spec:sub(1, -2) or type_spec
     local got = args[field]
-    if got == nil then
+    local is_nil_val = (got == nil) or (vim and vim.NIL and got == vim.NIL)
+    if is_nil_val then
       if not optional then
         return false, "missing required field '" .. field
           .. "' (expected " .. want .. ")", field
+      else
+        args[field] = nil
       end
     else
       local got_t = type(got)
