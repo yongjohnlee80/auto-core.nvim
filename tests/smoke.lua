@@ -12825,6 +12825,51 @@ print("\n[85] todo — open buffers follow the bucket move")
 end)()
 
 
+-- ─────────────────────── 86. todo — log records land on the COMPONENT axis ──
+-- log.warn/info take the COMPONENT FIRST. Every emission in auto-core.todo
+-- used to pass its whole formatted message as that argument, so the message
+-- body was empty and — because each message embeds a task id and two absolute
+-- paths — EVERY WARNING BECAME ITS OWN UNIQUE COMPONENT VALUE. The component
+-- axis is what :AutoCoreLog triage filters on, so it was unusable for exactly
+-- the records an operator would search for.
+print("\n[86] todo — log records land on the component axis")
+;(function()
+  local ok_log, log = pcall(require, "auto-core.log")
+  local ok_todo, todo = pcall(require, "auto-core.todo")
+  if not (ok_log and ok_todo) or type(log.recent) ~= "function" then return end
+
+  -- POSITIVE CONTROL FIRST. Without it, "component == auto-core.todo" could
+  -- pass because the ring reports nothing at all and both sides compare nil.
+  log.warn("smoke.control", "component-axis control emission")
+  local ctl = log.recent(1)[1]
+  ok("[86] control: the ring records a component at all",
+    ctl ~= nil and ctl.component == "smoke.control",
+    vim.inspect(ctl and ctl.component))
+
+  local tmp_root = vim.fn.tempname()
+  vim.fn.mkdir(tmp_root, "p")
+  require("auto-core.git.worktree").set_workspace_root(tmp_root)
+  local id = todo.add({ title = "component axis cell" })
+  todo.remove(id)
+
+  local rec
+  for _, r in ipairs(log.recent(8)) do
+    if tostring(r.message or r.msg or ""):find("removed task", 1, true) then rec = r end
+  end
+  ok("[86] the emission was recorded", rec ~= nil)
+  ok("[86] component is the MODULE, not the message",
+    rec ~= nil and rec.component == "auto-core.todo",
+    vim.inspect(rec and rec.component))
+  -- The decoy the old code would have passed: a component carrying the task id
+  -- is a per-emission value and defeats filtering.
+  ok("[86] and it carries no task id or path — it stays filterable",
+    rec ~= nil and rec.component ~= nil
+      and not rec.component:find(id, 1, true)
+      and not rec.component:find("/", 1, true),
+    vim.inspect(rec and rec.component))
+  vim.fn.delete(tmp_root, "rf")
+end)()
+
 -- Convention §3: emit the `<P> passed, <F> failed` summary and exit
 -- EXPLICITLY — os.exit(1) on any failure, os.exit(0) otherwise. Do not
 -- rely on falling off the end for the success exit: an explicit 0 keeps

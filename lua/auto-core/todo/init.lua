@@ -20,6 +20,13 @@ local schema = require("auto-core.todo.schema")
 local paths  = require("auto-core.todo.paths")
 local fs_path = require("auto-core.fs.path")
 
+-- The component axis for this module's log records. It is an AXIS, not a
+-- prefix: log.warn(component, msg) takes the component FIRST, so passing a
+-- formatted message there makes every emission its own unique component
+-- value -- unusable as the filter an operator actually reaches for. Same
+-- idiom as mailbox/router.lua's LOG_COMPONENT.
+local LOG_COMPONENT = "auto-core.todo"
+
 local M = {}
 
 -- ─── Field-policy catalog (kept in sync with schema.lua) ──────
@@ -715,7 +722,7 @@ local function retarget_buffers(from_path, to_path)
                 "task moved while you had unsaved edits; buffer %d now points at %s (was %s). "
                 .. "Your edits are intact; :w will refuse with E13 until you resolve the divergence.",
                 b, to_path, from_path),
-                { level = "warn", component = "auto-core.todo" })
+                { level = "warn", component = LOG_COMPONENT })
             end
           end
         end
@@ -758,8 +765,8 @@ local function move_task(from_path, to_path, text, what)
   if uerr then
     local ok_log, log = pcall(require, "auto-core.log")
     if ok_log and log and type(log.warn) == "function" then
-      pcall(log.warn, string.format(
-        "[auto-core.todo] %s: moved %s → %s but failed to unlink old: %s",
+      pcall(log.warn, LOG_COMPONENT, string.format(
+        "%s: moved %s → %s but failed to unlink old: %s",
         what or "move", from_path, to_path, tostring(uerr)))
     end
   end
@@ -1499,7 +1506,8 @@ function M.remove(id)
   -- Best-effort audit line.
   local ok_log, log = pcall(require, "auto-core.log")
   if ok_log and log and type(log.info) == "function" then
-    pcall(log.info, string.format("[auto-core.todo] removed task '%s' (was at %s)", id, file))
+    pcall(log.info, LOG_COMPONENT,
+      string.format("removed task '%s' (was at %s)", id, file))
   end
 
   -- v0.1.46: announce the mutation (see M.add for rationale).
