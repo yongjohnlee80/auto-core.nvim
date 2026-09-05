@@ -13297,6 +13297,131 @@ print("\n[88] ui.edit — open a file from a window that cannot take one")
   ok("p88: an out-of-range line CLAMPS instead of failing",
     clamped ~= nil and clamped.line == 60, vim.inspect(clamped and clamped.line))
 
+  -- ── the response must describe the CURSOR, not the request ──────────
+  --
+  -- r0 MF1: this used to echo `opts` back. Four measured rows disagreed with
+  -- the window, including a `line = 2.5` that returned a line number no buffer
+  -- can hold. The response is the only thing a mailbox caller ever sees, so a
+  -- position it did not verify is worse than no position.
+  do
+    local n2 = dir .. "/short.txt"
+    vim.fn.writefile({ "short", "second line is longer here", "third" }, n2)
+
+    -- A column past the end of the line: nvim clamps, and the caller has to be
+    -- TOLD it clamped rather than handed back the number it asked for.
+    local r = edit.open(n2, { line = 1, col = 999 })
+    local c = r and vim.api.nvim_win_get_cursor(r.win)
+    ok("p88: a clamped column is REPORTED clamped, not echoed back",
+      r ~= nil and c ~= nil and r.col == c[2] + 1 and r.col < 999,
+      vim.inspect({ reported = r and r.col, actual = c and (c[2] + 1) }))
+
+    -- col WITHOUT line: r0 MF2 — it was validated and then discarded.
+    local r2 = edit.open(n2, { col = 4 })
+    local c2 = r2 and vim.api.nvim_win_get_cursor(r2.win)
+    ok("p88: col alone is applied to the current line, not ignored",
+      r2 ~= nil and c2 ~= nil and r2.col == c2[2] + 1 and c2[2] + 1 == 4,
+      vim.inspect({ reported = r2 and r2.col, actual = c2 and (c2[2] + 1) }))
+
+    -- No position asked for: the response must describe where the cursor
+    -- actually is, not assert 1:1 about a cursor it never touched.
+    local r3 = edit.open(n2)
+    local c3 = r3 and vim.api.nvim_win_get_cursor(r3.win)
+    ok("p88: with no position asked for, the report still matches the window",
+      r3 ~= nil and c3 ~= nil and r3.line == c3[1] and r3.col == c3[2] + 1,
+      vim.inspect({ reported = r3 and { r3.line, r3.col },
+                    actual = c3 and { c3[1], c3[2] + 1 } }))
+
+    -- r0 nit 3: the Lua gate was weaker than the mailbox schema's `integer`.
+    local frac, fracerr = edit.open(n2, { line = 2.5 })
+    ok("p88: a fractional line is refused by the Lua entry point too",
+      frac == nil and tostring(fracerr):find("INTEGER", 1, true) ~= nil,
+      tostring(fracerr))
+  end
+
+  -- ── the fallback path must not steal focus either (r0 nit 1) ────────
+  --
+  -- Reached by stubbing nvim_open_win so the REAL fallback runs, rather than
+  -- by trusting that the branch behaves like the primary one. Restored
+  -- immediately, and asserted to have actually been taken — a stub that did
+  -- not fire would make this cell pass while testing the primary path.
+  do
+    -- make_window() is only REACHED when nothing usable exists, and by this
+    -- point earlier cells have left usable windows around. Close them first,
+    -- or the stub never fires and this cell silently tests the primary path —
+    -- which is exactly what the control below caught on the first run.
+    for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      if w ~= panel_win and vim.api.nvim_win_is_valid(w)
+        and #vim.api.nvim_tabpage_list_wins(0) > 1 then
+        pcall(vim.api.nvim_win_close, w, true)
+      end
+    end
+    vim.api.nvim_set_current_win(panel_win)
+
+    local real_open_win = vim.api.nvim_open_win
+    local took_fallback = false
+    vim.api.nvim_open_win = function(...)
+      took_fallback = true
+      error("stubbed: forcing the Ex-command fallback")
+    end
+    local before_bufs = #vim.api.nvim_list_bufs()
+    local caller = vim.api.nvim_get_current_win()
+    local rf, rferr = edit.open(file, { line = 2 })
+    vim.api.nvim_open_win = real_open_win
+
+    ok("p88: control — the stub fired, so the FALLBACK path is what ran",
+      took_fallback, "the stub never fired; this cell tested the primary path")
+    -- With the panel as the ONLY window the Ex-command fallback CANNOT work —
+    -- that is the measurement that made the primary path use nvim_open_win in
+    -- the first place. So the correct outcome here is a LOUD failure naming the
+    -- interception, not a window. This cell asserted a window on its first
+    -- draft and the error message is what corrected it.
+    ok("p88: the fallback fails LOUDLY when the Ex command is intercepted",
+      rf == nil and tostring(rferr):find("reported success while creating nothing",
+        1, true) ~= nil,
+      tostring(rferr))
+    -- Nit 1's actual content: focus is kept even down the failure path.
+    ok("p88: and the caller keeps focus even when the fallback fails",
+      vim.api.nvim_get_current_win() == caller,
+      ("current=%s caller=%s"):format(tostring(vim.api.nvim_get_current_win()),
+        tostring(caller)))
+    -- r0 nit 2: the scratch buffers must not accumulate. `bufhidden=wipe`
+    -- disposes of them as the real buffer replaces them.
+    ok("p88: and it does not leak scratch buffers",
+      #vim.api.nvim_list_bufs() <= before_bufs + 1,
+      ("buffers %d -> %d"):format(before_bufs, #vim.api.nvim_list_bufs()))
+  end
+
+  -- The fallback SUCCEEDING, which needs a window that can be split from but
+  -- cannot take a file — a nofile scratch window, not a panel. Without one,
+  -- `find_usable` short-circuits and make_window is never reached; with only a
+  -- panel, the Ex command is intercepted. This is the narrow case where the
+  -- old-Neovim path actually works, and it is the one worth pinning.
+  do
+    vim.cmd("botright new")
+    local scratch_win = vim.api.nvim_get_current_win()
+    vim.bo[vim.api.nvim_win_get_buf(scratch_win)].buftype = "nofile"
+    vim.api.nvim_set_current_win(panel_win)
+
+    local real_open_win = vim.api.nvim_open_win
+    local fired = false
+    vim.api.nvim_open_win = function(...)
+      fired = true
+      error("stubbed: forcing the Ex-command fallback")
+    end
+    local caller = vim.api.nvim_get_current_win()
+    local rf2, rf2err = edit.open(file, { line = 3 })
+    vim.api.nvim_open_win = real_open_win
+
+    ok("p88: control — the stub fired again", fired, "stub did not fire")
+    ok("p88: the fallback DOES create a window when it can be split from",
+      rf2 ~= nil and rf2.created_window == true and rf2.win ~= panel_win
+        and rf2.win ~= scratch_win, vim.inspect({ err = rf2err, res = rf2 }))
+    ok("p88: …and still does not steal focus (Q2 on the fallback path)",
+      vim.api.nvim_get_current_win() == caller,
+      ("current=%s caller=%s"):format(tostring(vim.api.nvim_get_current_win()),
+        tostring(caller)))
+  end
+
   -- ── the mailbox verb, through the SAME entry point the router uses ──
   local commands = require("auto-core.mailbox.commands")
   local listed
