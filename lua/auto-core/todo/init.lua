@@ -1360,17 +1360,21 @@ end
 ---record an assignment without pinging anyone.
 ---
 ---Idempotent: assigning a task to its current assignee is a
----no-op (no rewrite, no event).
+---no-op (no rewrite, no event). Pass `nil`, `""`, or `vim.NIL`
+---to unassign/clear.
 ---
 ---@param id string              task id
----@param assignee string?       agent name or `nil` to clear
+---@param assignee string?       agent name, or `nil`/`""`/`vim.NIL` to clear
 ---@param reason string?         optional one-line context
 ---@return table? updated_task, string? err
 function M.assign(id, assignee, reason)
   if type(id) ~= "string" or id == "" then
     return nil, "auto-core.todo.assign: id must be a non-empty string"
   end
-  if assignee ~= nil and (type(assignee) ~= "string" or assignee == "") then
+  if assignee == "" or (vim and vim.NIL and assignee == vim.NIL) then
+    assignee = nil
+  end
+  if assignee ~= nil and type(assignee) ~= "string" then
     return nil, "auto-core.todo.assign: assignee must be a non-empty string or nil"
   end
   if reason ~= nil and type(reason) ~= "string" then
@@ -1398,9 +1402,7 @@ function M.assign(id, assignee, reason)
   -- nil-vs-"" both count as "unassigned" for this comparison.
   local same =
         (old == assignee)
-     or (old == nil and assignee == nil)
-     or (old == ""  and assignee == nil)
-     or (old == nil and assignee == "")
+     or ((old == nil or old == "") and assignee == nil)
   if same then return task end
 
   local now = M._now_iso()
