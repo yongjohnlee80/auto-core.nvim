@@ -13198,6 +13198,18 @@ print("\n[88] ui.edit — open a file from a window that cannot take one")
   local edit = require("auto-core.ui.edit")
   local Panel = require("auto-core.ui.panel")
 
+  -- The measure that discriminates a leaked scratch from the legitimate file
+  -- buffer: a buffer with no name that no window is showing.
+  local function undisplayed_unnamed()
+    local n = 0
+    for _, b in ipairs(vim.api.nvim_list_bufs()) do
+      if vim.api.nvim_buf_get_name(b) == "" and #vim.fn.win_findbuf(b) == 0 then
+        n = n + 1
+      end
+    end
+    return n
+  end
+
   local dir = vim.fn.tempname() .. "_edit88"
   vim.fn.mkdir(dir, "p")
   local file = dir .. "/target.txt"
@@ -13269,9 +13281,18 @@ print("\n[88] ui.edit — open a file from a window that cannot take one")
     #only == 1 and only[1] == panel_win,
     ("%d windows"):format(#only))
 
+  local orphans_primary = undisplayed_unnamed()
   local res2, err2 = edit.open(file, { line = 5 })
   ok("p88: open() creates a window rather than refusing or taking the panel",
     res2 ~= nil and res2.created_window == true, tostring(err2))
+  -- The PRIMARY path's scratch buffer. `bufhidden = "wipe"` disposes of it
+  -- when nvim_win_set_buf replaces it, and until this cell existed nothing
+  -- checked that: deleting the flag left the suite at 1903/0. It was the only
+  -- fix in the round with no witness, which is what makes it the one most
+  -- likely to come back. (gold-man r1.)
+  ok("p88: …and the primary path leaks no undisplayed scratch buffer",
+    undisplayed_unnamed() == orphans_primary,
+    ("undisplayed-unnamed %d -> %d"):format(orphans_primary, undisplayed_unnamed()))
   if res2 then
     ok("p88: …and the panel STILL has its own buffer",
       vim.api.nvim_win_get_buf(panel_win) == panel_buf_before,
@@ -13364,6 +13385,7 @@ print("\n[88] ui.edit — open a file from a window that cannot take one")
       error("stubbed: forcing the Ex-command fallback")
     end
     local before_bufs = #vim.api.nvim_list_bufs()
+    local orphans_before = undisplayed_unnamed()
     local caller = vim.api.nvim_get_current_win()
     local rf, rferr = edit.open(file, { line = 2 })
     vim.api.nvim_open_win = real_open_win
@@ -13384,11 +13406,16 @@ print("\n[88] ui.edit — open a file from a window that cannot take one")
       vim.api.nvim_get_current_win() == caller,
       ("current=%s caller=%s"):format(tostring(vim.api.nvim_get_current_win()),
         tostring(caller)))
-    -- r0 nit 2: the scratch buffers must not accumulate. `bufhidden=wipe`
-    -- disposes of them as the real buffer replaces them.
-    ok("p88: and it does not leak scratch buffers",
-      #vim.api.nvim_list_bufs() <= before_bufs + 1,
-      ("buffers %d -> %d"):format(before_bufs, #vim.api.nvim_list_bufs()))
+    -- r0 nit 2, tightened at r1. `#list_bufs() <= before + 1` was too loose to
+    -- discriminate: the file buffer is a legitimate +1, so a leaked scratch
+    -- hides inside the allowance. The measure that separates them is
+    -- UNDISPLAYED, UNNAMED buffers — a scratch that never reached a window —
+    -- and it was delta 0 on the primary path and delta 1 here, which is
+    -- exactly what `bufhidden = "wipe"` cannot catch: it is a hidden trigger,
+    -- so a buffer never displayed never fires it.
+    ok("p88: and the fallback leaks no undisplayed scratch buffer",
+      undisplayed_unnamed() == orphans_before,
+      ("undisplayed-unnamed %d -> %d"):format(orphans_before, undisplayed_unnamed()))
   end
 
   -- The fallback SUCCEEDING, which needs a window that can be split from but

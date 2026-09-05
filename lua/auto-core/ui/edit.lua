@@ -168,6 +168,13 @@ local function make_window()
     { split = "below", win = anchor })
 
   if not ok or type(win) ~= "number" then
+    -- DELETE the scratch explicitly. `bufhidden = "wipe"` above is a HIDDEN
+    -- trigger: it fires when a DISPLAYED buffer is abandoned, so a buffer that
+    -- never reached a window can never fire it. The flag fixed the path it was
+    -- written for and was inert on this one — measured as undisplayed-unnamed
+    -- buffers: primary delta 0, fallback delta 1. (gold-man r1.)
+    pcall(vim.api.nvim_buf_delete, scratch, { force = true })
+
     -- Older Neovim without `split` support in nvim_open_win. Fall back to the
     -- Ex command AND assert it, because this is the path that lies.
     -- `botright new` ENTERS the new window, so the caller's focus has to be
