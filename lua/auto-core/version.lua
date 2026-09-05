@@ -912,10 +912,16 @@ return {
   -- a stale one is worse than none because it invites exactly the check it
   -- cannot support. Corrected here to the version being tagged.
   --
-  -- The v0.2.12 release carries ADR-0081: auto-core now owns document
-  -- persistence for the family (`docstore`, `docstore.revisions`,
-  -- `docstore.lock`, `drafts`), plus `git.log.unpushed`. `api_version` stays at
-  -- `0.1`: every surface added is additive, and nothing existing changed shape.
-  version     = "0.2.12",
+  -- v0.2.15 carries the repo's FIRST CI (GitHub Actions, running the existing
+  -- tests/run-all.sh including the pty suite) and a todo fix: a task file moves
+  -- bucket directories on every status change, and a buffer open on it kept the
+  -- old path, so the user's next `:w` recreated the task in the bucket it had
+  -- just left. `api_version` stays at `0.1`: no public Lua surface changed.
+  --
+  -- The string above had drifted three releases behind the tags -- v0.2.13 and
+  -- v0.2.14 both shipped reporting "0.2.12", and v0.2.11 reported "0.1.62".
+  -- Consumers can feature-detect on this value, so a tag whose code reports a
+  -- different version is a defective release. Bump it WITH the tag.
+  version     = "0.2.15",
   api_version = "0.1",
 }

@@ -10,6 +10,63 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.2.15] — 2026-09-05 — first CI, and open buffers follow a task's bucket move
+
+Strictly additive patch. No public Lua surface changed, so `api_version`
+stays at `0.1`.
+
+**Housekeeping, in the same spirit as the `v0.2.12` entry below.** That
+entry corrected a `version.lua` that had gone ten releases stale — and it
+drifted again immediately: `v0.2.13` and `v0.2.14` both shipped reporting
+`0.2.12`, and neither has an entry here. This release bumps the string
+WITH the tag and adds its entry in the same commit, because a tag whose
+code reports a different version is a defective release and three in a
+row is a pattern rather than an oversight. The two missing entries are
+not reconstructed here — they are other authors' releases and inventing
+their notes after the fact would be worse than the gap.
+
+### Added
+
+- **CI (GitHub Actions) — the repo's first automated gate.** auto-core is
+  the foundation `auto-agents`, `auto-finder`, `worktree`, `md-harpoon`
+  and `autodb` all depend on, and until now every suite ran only where
+  someone happened to run it. The workflow reimplements no test logic: it
+  supplies the environment and lets `tests/run-all.sh` judge, since that
+  runner already treats a missing `<P> passed, <F> failed` summary as a
+  hard failure — the only thing that catches a C-level crash mid-suite.
+  Neovim is pinned by version **and SHA-256** (a release asset can be
+  replaced under the same tag, so the version alone is not reproducible)
+  and plenary by commit.
+
+  **The pty suite runs in CI and is not skipped.** It asserts behaviour
+  Neovim only exhibits with a UI attached — `WinScrolled` never fires
+  headlessly, so a headless assertion on that path passes while testing
+  nothing. That makes CI strictly stronger than a local run on a headless
+  machine, which is most of the reason to have it.
+
+### Fixed
+
+- **`auto-core.todo` — a task file moving buckets no longer strands the
+  buffer open on it.** A task file physically moves between
+  `.todo-list/<status>/` directories on every status change, and a buffer
+  opened on it kept naming the OLD path — so the user's next `:w`
+  **recreated the task in the bucket it had just left**, carrying whatever
+  stale frontmatter the buffer still held. Reported case: a task edited in
+  `in-progress` while an agent completed it, saved back into
+  `in-progress` as a duplicate.
+
+  `status()`, `assign()` and `refresh()` now route their file move through
+  one function, so the retarget cannot be forgotten by a fourth caller —
+  the same write-new-then-unlink-old sequence had been open-coded three
+  times, with two different unlink calls.
+
+  Unsaved edits are never discarded: a modified buffer is only renamed,
+  the user is told it happened, and their next `:w` is refused with `E13`
+  rather than silently clobbering the frontmatter auto-core wrote. An
+  unmodified buffer is reloaded so the reader sees the new status, and a
+  buffer that was already **unloaded** when the task moved is dropped —
+  its surviving name was the resurrection vector.
+
 ## [v0.2.12] — 2026-09-03 — ADR-0081: auto-core owns document persistence
 
 Strictly additive patch. Every surface below is new; nothing existing
