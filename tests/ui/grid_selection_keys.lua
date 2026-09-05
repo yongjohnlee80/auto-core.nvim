@@ -81,7 +81,7 @@ local model = grid.model({
   },
 })
 
-vim.cmd("only")
+vim.cmd("silent! only")
 local win = vim.api.nvim_get_current_win()
 local view = grid.attach(model, { win = win })
 

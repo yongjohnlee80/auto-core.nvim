@@ -52,11 +52,15 @@ for test_file in tests/ui/*.lua; do
   # captured to $cap rather than discarded, so the NO OUTPUT / TIMED OUT
   # paths have something to show. nvim still attaches a UI: the pty comes
   # from `script`, independent of where script's own stdout is pointed.
-  $TIMEOUT script -qec "nvim --clean -u $test_file" /dev/null >"$cap" 2>&1
+  # We pass `--cmd "set nomore shortmess+=F cmdheight=2"` so unexpected
+  # startup messages (e.g. terminal DSR probes) never block on a hit-enter
+  # prompt, and redirect stdin from /dev/null so background/CI runners
+  # do not stall or catch SIGTTIN.
+  $TIMEOUT script -qec "nvim --clean --cmd 'set nomore shortmess+=F cmdheight=2' -u $test_file" /dev/null </dev/null >"$cap" 2>&1
   rc=$?
 
   if [ "$rc" -eq 124 ]; then
-    echo "[ui] $name — TIMED OUT (watchdog fired; a deferred assertion hung nvim)"
+    echo "[ui] $name — TIMED OUT (watchdog fired; nvim hung or timed out after 120s)"
     [ -s "$cap" ] && { echo "     ── transcript ──"; sed 's/^/     /' "$cap"; }
     status=1
     continue
