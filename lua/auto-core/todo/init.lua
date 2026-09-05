@@ -736,7 +736,14 @@ end
 ---Reload unmodified open buffers naming `path` after an in-place rewrite.
 ---An unmodified buffer is reloaded so the reader sees the frontmatter
 ---auto-core just rewrote, preventing a subsequent `:w` from reverting the
----disk file with stale memory (MF2). A modified buffer is preserved intact.
+---disk file with stale memory (MF2).
+---
+---A modified buffer is preserved intact without reload. Neovim's built-in
+---file modification time (mtime) check guards against silent clobbering:
+---a subsequent bare `:w` triggers a W12 conflict prompt ("The file has been
+---changed since reading it!!!") rather than silently overwriting disk state.
+---Like retarget_buffers, we notify via log.notify so the user is informed
+---that the underlying file changed while they held unsaved edits.
 ---@param path string
 local function reload_buffers(path)
   local function apply()
@@ -750,6 +757,15 @@ local function reload_buffers(path)
           vim.api.nvim_buf_call(b, function()
             pcall(vim.cmd, "silent! keepalt edit!")
           end)
+        else
+          local ok_log, log = pcall(require, "auto-core.log")
+          if ok_log and log and type(log.notify) == "function" then
+            pcall(log.notify, string.format(
+              "task modified on disk while you had unsaved edits; buffer %d points at %s. "
+              .. "Your edits are intact; :w will prompt (file changed on disk) until you resolve the divergence.",
+              b, path),
+              { level = "warn", component = LOG_COMPONENT })
+          end
         end
       end
     end
