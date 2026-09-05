@@ -9,10 +9,28 @@ on:
 permissions:
   contents: read
 
-# A superseded run proves nothing about the head that replaced it.
+# The EVENT is part of the group, and cancellation is limited to PRs.
+#
+# `github.ref` alone is not enough. Two runs of different EVENTS can share a
+# ref — on a `schedule` event it is the default branch ref, the same value a
+# push to main carries — so they land in one group and cancel-in-progress
+# hands the group to whichever arrived last. This workflow has no schedule
+# job today, so that half is latent here; the half that is not latent is that
+# a merge to main can cancel an EARLIER merge's in-flight run.
+#
+# And a cancelled run is not a failure. It reports nothing and looks like
+# nothing happened, so the verdict on the earlier merge is not lost loudly —
+# it is lost quietly, on the branch every sibling plugin depends on. This is
+# the repo whose regressions reach auto-agents, auto-finder, worktree,
+# md-harpoon and autodb, and it was the one left without the fix after the
+# family rollout carried it everywhere else. (gold-man, family CI rollout r2.)
+#
+# cancel-in-progress is kept for pull_request, where a superseded run genuinely
+# proves nothing about the head that replaced it, and dropped everywhere else,
+# where each commit deserves its own verdict.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # auto-core is the foundation every sibling plugin depends on, and until now it
 # had NO automated gate at all — every suite ran only where someone happened to
