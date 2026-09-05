@@ -643,10 +643,65 @@ local function walk_task_files(td)
   return out
 end
 
+---Retarget every loaded buffer naming `from_path` onto `to_path`.
+---
+---A task file physically moves between bucket directories on every
+---status change, and a buffer opened on it keeps naming the OLD path.
+---The user's next `:w` then RECREATES the task in the bucket it just
+---left — a duplicate carrying whatever stale frontmatter the buffer
+---still held. Reported case: a task edited in `in-progress` while an
+---agent completed it, saved back into `in-progress` as a new task.
+---
+---Unsaved user edits are never discarded: a modified buffer is only
+---renamed, so the edits survive and Neovim's own `checktime` surfaces
+---the on-disk divergence. An unmodified buffer is reloaded, so the
+---reader sees the frontmatter auto-core just rewrote.
+---@param from_path string
+---@param to_path string
+local function retarget_buffers(from_path, to_path)
+  if from_path == to_path then return end
+  local function apply()
+    for _, b in ipairs(vim.api.nvim_list_bufs()) do
+      if vim.api.nvim_buf_is_loaded(b)
+        and vim.api.nvim_buf_get_name(b) == from_path then
+        local modified = vim.api.nvim_get_option_value("modified", { buf = b })
+        local ok_name = pcall(vim.api.nvim_buf_set_name, b, to_path)
+        if ok_name then
+          -- set_name leaves the old name behind as an unlisted buffer;
+          -- drop it, or a later `:w` from it resurrects the old bucket.
+          for _, stale in ipairs(vim.api.nvim_list_bufs()) do
+            if stale ~= b
+              and vim.api.nvim_buf_get_name(stale) == from_path
+              and not vim.api.nvim_get_option_value("modified", { buf = stale })
+            then
+              pcall(vim.api.nvim_buf_delete, stale, { force = true })
+            end
+          end
+          if not modified then
+            -- Unmodified: adopt the file auto-core just wrote. `edit!` also
+            -- clears the modified flag set_name raises on the rename.
+            vim.api.nvim_buf_call(b, function()
+              pcall(vim.cmd, "silent! keepalt edit!")
+            end)
+          end
+        end
+      end
+    end
+  end
+  -- Buffer APIs are unavailable in a fast event (uv callbacks, fs watchers).
+  if vim.in_fast_event() then vim.schedule(apply) else apply() end
+end
+
 ---Move a task file from `from_path` to `to_path` atomically. The
 ---write-new-then-unlink-old order matches M.status() so a crash mid-
 ---move leaves a duplicate that refresh can recover from on the next
 ---run.
+---
+---THE SINGLE CHOKE POINT for a task file changing path: status(),
+---assign() and refresh() all route through here, so the buffer
+---retarget cannot be forgotten by a future fourth caller. Before
+---this was centralised the same write-new-then-unlink-old sequence
+---was open-coded three times, with two different unlink calls.
 ---@param from_path string
 ---@param to_path string
 ---@param text string
@@ -667,6 +722,7 @@ local function move_task(from_path, to_path, text)
         from_path, to_path, tostring(uerr)))
     end
   end
+  retarget_buffers(from_path, to_path)
   return true
 end
 
@@ -1211,22 +1267,11 @@ function M.status(id, new)
   local new_file = paths.task_file_path(td, id, new, task.archived_at)
   local rendered, render_err = render_task(task)
   if render_err then return nil, render_err end
-  local ok, err = atomic_write(new_file, rendered)
+  -- move_task owns the write-new-then-unlink-old order AND the buffer
+  -- retarget, so a status change cannot leave a buffer naming the bucket
+  -- the task just left (which a later `:w` would recreate).
+  local ok, err = move_task(file, new_file, rendered)
   if not ok then return nil, "write: " .. tostring(err) end
-
-  if new_file ~= file then
-    local _, unlink_err = vim.uv.fs_unlink(file)
-    if unlink_err then
-      -- Best-effort cleanup; the new file is the source of truth and a
-      -- subsequent refresh() will reconcile a stray old file.
-      local ok_log, log = pcall(require, "auto-core.log")
-      if ok_log and log and type(log.warn) == "function" then
-        pcall(log.warn, string.format(
-          "[auto-core.todo] status(%s, %s) wrote new file but failed to unlink old: %s",
-          id, new, tostring(unlink_err)))
-      end
-    end
-  end
 
   -- Best-effort event publish so consumers (auto-finder panel,
   -- auto-agents admin panel) can react in-process without polling.
@@ -1342,15 +1387,10 @@ function M.assign(id, assignee, reason)
     target_path = paths.task_file_path(td, id, task.status, nil)
   end
 
-  local ok, err = atomic_write(target_path, rendered)
+  -- Same choke point as M.status(): move_task carries the crash-safe
+  -- ordering and retargets any buffer open on the old bucket path.
+  local ok, err = move_task(old_file_path, target_path, rendered)
   if not ok then return nil, "write: " .. tostring(err) end
-
-  if status_changed_now and target_path ~= old_file_path then
-    -- Best-effort unlink of the source. A failed unlink leaves a
-    -- duplicate that `refresh()` will reconcile on next pass; we
-    -- prefer that over rolling back the new write.
-    pcall(vim.fn.delete, old_file_path)
-  end
 
   -- Best-effort event publish so consumers (mailbox router, panel)
   -- can react. Carry enough context for a one-shot notification

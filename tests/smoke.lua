@@ -12615,6 +12615,149 @@ print("\n[84] ui.panel — adopt-on-open refreshes the consumer mirror")
 end)()
 
 -- ─────────────────────── summary ─────────────────────────
+-- ─────────────────────── 85. todo — open buffers follow the bucket move ──
+-- A task file physically MOVES between bucket directories on every status
+-- change. A buffer opened on it keeps naming the OLD path, so the user's
+-- next `:w` recreates the task in the bucket it just left — a duplicate,
+-- carrying whatever stale frontmatter the buffer still held. That is the
+-- reported defect: "edited in In Progress, completed by an agent, saved
+-- back into In Progress as a new task."
+--
+-- The contract these cells lock: whenever auto-core relocates a task file,
+-- every loaded buffer naming the old path is retargeted to the new one.
+print("\n[85] todo — open buffers follow the bucket move")
+;(function()
+  local ok_req, todo = pcall(require, "auto-core.todo")
+  if not ok_req then return end
+
+  local tmp_root = vim.fn.tempname()
+  vim.fn.mkdir(tmp_root, "p")
+  require("auto-core.git.worktree").set_workspace_root(tmp_root)
+  local function cleanup() vim.fn.delete(tmp_root, "rf") end
+
+  -- Counts EVERY buffer naming the path, loaded or not. nvim_buf_set_name
+  -- leaves the old name behind as an UNLOADED, unlisted buffer (verified:
+  -- 2 buffers before the rename, 3 after), so a loaded-only count cannot
+  -- see the stale one — and the stale one is exactly how the old path
+  -- stays reachable after the retarget.
+  local function bufs_named(path)
+    local n = 0
+    for _, b in ipairs(vim.api.nvim_list_bufs()) do
+      if vim.api.nvim_buf_get_name(b) == path then n = n + 1 end
+    end
+    return n
+  end
+
+  -- ── status(): the buffer must follow the file ────────────────
+  local id = todo.add({ title = "Buffer follows the move" })
+  local td = todo._todo_dir()
+  local open_path = td .. "/open/" .. id .. ".md"
+  ok("[85] precondition: task starts in open/", vim.fn.filereadable(open_path) == 1)
+
+  local buf = vim.fn.bufadd(open_path)
+  vim.fn.bufload(buf)
+  ok("[85] precondition: buffer is loaded on the open/ path",
+    vim.api.nvim_buf_get_name(buf) == open_path)
+
+  local _, serr = todo.status(id, "completed")
+  ok("[85] status(completed) succeeded", serr == nil, tostring(serr))
+  local done_path = td .. "/completed/" .. id .. ".md"
+  ok("[85] file physically moved to completed/", vim.fn.filereadable(done_path) == 1)
+  ok("[85] old open/ file is gone", vim.fn.filereadable(open_path) == 0)
+
+  -- THE DEFECT: the buffer still names the old path.
+  ok("[85] buffer was retargeted to the new path",
+    vim.api.nvim_buf_get_name(buf) == done_path,
+    "buffer name = " .. vim.api.nvim_buf_get_name(buf))
+  ok("[85] no buffer is left naming the old path — loaded OR stale",
+    bufs_named(open_path) == 0,
+    "buffers still naming it: " .. bufs_named(open_path))
+
+  -- THE USER-VISIBLE CONSEQUENCE: saving must not resurrect the old bucket.
+  vim.api.nvim_buf_call(buf, function() pcall(vim.cmd, "silent noautocmd write") end)
+  ok("[85] writing the buffer does NOT recreate the task in open/",
+    vim.fn.filereadable(open_path) == 0,
+    "a duplicate reappeared at " .. open_path)
+  ok("[85] writing the buffer lands on the completed/ path",
+    vim.fn.filereadable(done_path) == 1)
+
+  -- ── an UNMODIFIED buffer picks up the rewritten frontmatter ──
+  local id2 = todo.add({ title = "Unmodified buffer refreshes" })
+  local p2_open = td .. "/open/" .. id2 .. ".md"
+  local buf2 = vim.fn.bufadd(p2_open)
+  vim.fn.bufload(buf2)
+  todo.status(id2, "completed")
+  local p2_done = td .. "/completed/" .. id2 .. ".md"
+  local body2 = table.concat(vim.api.nvim_buf_get_lines(buf2, 0, -1, false), "\n")
+  ok("[85] unmodified buffer shows the NEW status after the move",
+    body2:find("status: completed", 1, true) ~= nil,
+    "buffer still shows stale frontmatter")
+  ok("[85] unmodified buffer is not left dirty by the retarget",
+    vim.api.nvim_get_option_value("modified", { buf = buf2 }) == false)
+  ok("[85] unmodified buffer names the new path", vim.api.nvim_buf_get_name(buf2) == p2_done)
+
+  -- ── a MODIFIED buffer keeps the user's edits (never silently discarded) ──
+  local id3 = todo.add({ title = "Modified buffer keeps edits" })
+  local p3_open = td .. "/open/" .. id3 .. ".md"
+  local buf3 = vim.fn.bufadd(p3_open)
+  vim.fn.bufload(buf3)
+  vim.api.nvim_buf_set_lines(buf3, -1, -1, false, { "USER EDIT SENTINEL" })
+  ok("[85] precondition: buffer is modified",
+    vim.api.nvim_get_option_value("modified", { buf = buf3 }) == true)
+  todo.status(id3, "completed")
+  local body3 = table.concat(vim.api.nvim_buf_get_lines(buf3, 0, -1, false), "\n")
+  ok("[85] modified buffer keeps the user's unsaved edit",
+    body3:find("USER EDIT SENTINEL", 1, true) ~= nil,
+    "the retarget discarded unsaved user work")
+  ok("[85] modified buffer still follows the path",
+    vim.api.nvim_buf_get_name(buf3) == td .. "/completed/" .. id3 .. ".md")
+
+  -- The safety property the modified path DEPENDS on: retargeting must not
+  -- turn the user's next `:w` into a silent clobber of the frontmatter
+  -- auto-core just wrote. Neovim refuses with `E13: File exists (add ! to
+  -- override)`, so the user is gated rather than surprised. If a future
+  -- change cleared that protection — reloading modified buffers, or
+  -- resetting `modified` after the rename — this cell is what notices.
+  local p3_done = td .. "/completed/" .. id3 .. ".md"
+  local wrote = pcall(function()
+    vim.api.nvim_buf_call(buf3, function() vim.cmd("silent noautocmd write") end)
+  end)
+  local disk3 = table.concat(vim.fn.readfile(p3_done), "\n")
+  ok("[85] a modified retargeted buffer cannot silently clobber the new file",
+    (not wrote) and disk3:find("status: completed", 1, true) ~= nil,
+    "write succeeded=" .. tostring(wrote))
+  ok("[85] and the user's edit is still not on disk (they must resolve it)",
+    disk3:find("USER EDIT SENTINEL", 1, true) == nil)
+
+  -- ── assign() moves open → in-progress; the buffer must follow ──
+  local id4 = todo.add({ title = "Assign moves the bucket" })
+  local p4_open = td .. "/open/" .. id4 .. ".md"
+  local buf4 = vim.fn.bufadd(p4_open)
+  vim.fn.bufload(buf4)
+  todo.assign(id4, "agent:kimmy-vision")
+  ok("[85] assign(open→in-progress) retargets the buffer too",
+    vim.api.nvim_buf_get_name(buf4) == td .. "/in-progress/" .. id4 .. ".md",
+    "buffer name = " .. vim.api.nvim_buf_get_name(buf4))
+
+  -- ── refresh() reconciles a hand-edited status; the buffer must follow ──
+  local id5 = todo.add({ title = "Refresh moves the bucket" })
+  local p5_open = td .. "/open/" .. id5 .. ".md"
+  local raw = table.concat(vim.fn.readfile(p5_open), "\n")
+  vim.fn.writefile(vim.split((raw:gsub("status: open", "status: deferred")), "\n"), p5_open)
+  local buf5 = vim.fn.bufadd(p5_open)
+  vim.fn.bufload(buf5)
+  todo.refresh()
+  ok("[85] refresh() retargets a buffer whose task it relocated",
+    vim.api.nvim_buf_get_name(buf5) == td .. "/deferred/" .. id5 .. ".md",
+    "buffer name = " .. vim.api.nvim_buf_get_name(buf5))
+
+  for _, b in ipairs({ buf, buf2, buf3, buf4, buf5 }) do
+    pcall(vim.api.nvim_buf_delete, b, { force = true })
+  end
+  cleanup()
+end)()
+
+
 -- Convention §3: emit the `<P> passed, <F> failed` summary and exit
 -- EXPLICITLY — os.exit(1) on any failure, os.exit(0) otherwise. Do not
 -- rely on falling off the end for the success exit: an explicit 0 keeps
