@@ -1,0 +1,70 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# auto-core is the foundation every sibling plugin depends on, and until now
+# it had NO automated gate at all — every suite ran only where someone
+# happened to run it. A regression here reaches auto-agents, auto-finder,
+# worktree, md-harpoon and autodb before anyone notices locally.
+#
+# This job runs `tests/run-all.sh`, the runner that already exists and already
+# knows how to turn a silent abort into a loud failure (it parses the
+# `<P> passed, <F> failed` summary and treats its ABSENCE as a hard failure).
+# CI does not reimplement that logic; it supplies the environment and lets the
+# runner be the judge.
+jobs:
+  lua:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install neovim
+        env:
+          # Pinned to the version these suites were verified against, not
+          # 'stable' — a moving target makes a blocking gate non-reproducible
+          # and turns an upstream change into a mystery failure on an
+          # unrelated PR.
+          #
+          # The SHA-256 is the REAL pin: a GitHub release asset can be
+          # replaced under the same tag and name, so the version alone is not
+          # reproducible. Recompute it when bumping (the value below was
+          # computed from the actual asset, not copied from a sibling repo).
+          NVIM_VERSION: "v0.12.5"
+          NVIM_SHA256: "bce0f56eda1f1b1db6eee8f4133d7a38813ea07933837dd1777411ca384c6875"
+        run: |
+          curl -fsSL -o /tmp/nvim.tar.gz \
+            "https://github.com/neovim/neovim/releases/download/$NVIM_VERSION/nvim-linux-x86_64.tar.gz"
+          echo "$NVIM_SHA256  /tmp/nvim.tar.gz" | sha256sum -c -
+          sudo tar -C /opt -xzf /tmp/nvim.tar.gz
+          echo "/opt/nvim-linux-x86_64/bin" >> "$GITHUB_PATH"
+
+      - name: install plenary.nvim
+        env:
+          # Hard dependency per ADR-0006 §"Resolutions" #3; tests/smoke.lua
+          # asserts on its presence rather than skipping, so a missing plenary
+          # is a red suite and not a quiet gap. Pinned for the same
+          # reproducibility reason as neovim above.
+          PLENARY_SHA: "74b06c6c75e4eeb3108ec01852001636d85a932b"
+        run: |
+          dest="$HOME/.local/share/nvim/lazy/plenary.nvim"
+          mkdir -p "$(dirname "$dest")"
+          git clone --filter=blob:none https://github.com/nvim-lua/plenary.nvim "$dest"
+          git -C "$dest" checkout "$PLENARY_SHA"
+
+      - name: verify the toolchain is the pinned one
+        run: |
+          nvim --version | head -1
+          test -d "$HOME/.local/share/nvim/lazy/plenary.nvim"
+
+      # The pty suite is deliberately NOT skipped here. It asserts behaviour
+      # Neovim only exhibits with a UI attached — WinScrolled never fires
+      # headlessly, so a headless assertion on that path passes while testing
+      # nothing. `script` (util-linux) is present on ubuntu-latest, so CI can
+      # run the one gate a headless developer environment cannot. That makes
+      # this job strictly stronger than a local run, which is the point of
+      # having it.
+      - name: tests/run-all.sh (smoke + standalones + pty + bench)
+        run: ./tests/run-all.sh
