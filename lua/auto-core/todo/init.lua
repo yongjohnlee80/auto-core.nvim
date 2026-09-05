@@ -704,17 +704,19 @@ local function retarget_buffers(from_path, to_path)
             -- them. Say so: without this they meet a bare "E13: File exists"
             -- on their next :w with no idea the path moved, and THEY are the
             -- one who has to resolve the divergence.
+            -- log.notify, not log.warn + a bare vim.notify: its doc says
+            -- "Use this instead of bare vim.notify(...) so every visible toast
+            -- also lands in the ring for :AutoCoreLog triage". The pair emits
+            -- the same event twice in two shapes AND lets the toast bypass the
+            -- level filter, so a user who set ERROR still gets it.
             local ok_log, log = pcall(require, "auto-core.log")
-            if ok_log and log and type(log.warn) == "function" then
-              pcall(log.warn, string.format(
-                "[auto-core.todo] task moved while you had unsaved edits; buffer %d now points at %s "
-                .. "(was %s). Your edits are intact; :w will refuse until you resolve the divergence.",
-                b, to_path, from_path))
+            if ok_log and log and type(log.notify) == "function" then
+              pcall(log.notify, string.format(
+                "task moved while you had unsaved edits; buffer %d now points at %s (was %s). "
+                .. "Your edits are intact; :w will refuse with E13 until you resolve the divergence.",
+                b, to_path, from_path),
+                { level = "warn", component = "auto-core.todo" })
             end
-            pcall(vim.notify, string.format(
-              "auto-core.todo: task file moved to %s — your unsaved edits are kept, but :w will refuse "
-              .. "(E13) until you reconcile.", vim.fn.fnamemodify(to_path, ":t")),
-              vim.log.levels.WARN)
           end
         end
       end

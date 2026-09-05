@@ -12782,11 +12782,41 @@ print("\n[85] todo — open buffers follow the bucket move")
     "still names it: " .. tostring(vim.api.nvim_buf_is_valid(buf6)
       and vim.api.nvim_buf_get_name(buf6)))
 
-  pcall(vim.cmd, "buffer " .. buf6)
-  pcall(vim.cmd, "silent noautocmd write")
+  -- Bind the write to buf6 when it still exists. After the fix buf6 is DELETED,
+  -- so `:buffer` fails and an unconditional `:write` would run against whatever
+  -- buffer happens to be current (the enew scratch — E32, swallowed). The cell
+  -- reddens on the intended mutant either way, but an unconditional write is a
+  -- hazard the next section inherits.
+  if vim.api.nvim_buf_is_valid(buf6) then
+    pcall(vim.cmd, "buffer " .. buf6)
+    if vim.api.nvim_get_current_buf() == buf6 then
+      pcall(vim.cmd, "silent noautocmd write")
+    end
+  end
   ok("[85] reopening and saving it does NOT resurrect the old bucket",
     vim.fn.filereadable(p6_open) == 0,
     "resurrected at " .. p6_open)
+
+  -- The panel's common case, and nothing covered it: a task buffer DISPLAYED IN
+  -- A WINDOW with the cursor mid-file survives the retarget intact. Measured
+  -- before celling (cursor 12 before and after) rather than taken from the
+  -- reviewer who reported it. The plausible future change — swapping
+  -- `keepalt edit!` for a bufload or a set_lines refresh — would scroll the
+  -- reader to the top without reddening any other cell here.
+  local id7 = todo.add({ title = "Windowed cursor survives", description = ("line\n"):rep(40) })
+  local p7_open = td .. "/open/" .. id7 .. ".md"
+  vim.cmd("edit " .. vim.fn.fnameescape(p7_open))
+  local buf7, win7 = vim.fn.bufnr(p7_open), vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_cursor(win7, { 12, 0 })
+  todo.status(id7, "completed")
+  ok("[85] a windowed task buffer keeps its window and buffer across the move",
+    vim.api.nvim_win_is_valid(win7) and vim.api.nvim_win_get_buf(win7) == buf7)
+  ok("[85] and the reader is not scrolled to the top (cursor preserved)",
+    vim.api.nvim_win_is_valid(win7)
+      and vim.api.nvim_win_get_cursor(win7)[1] == 12,
+    "cursor = " .. tostring(vim.api.nvim_win_is_valid(win7)
+      and vim.api.nvim_win_get_cursor(win7)[1]))
+  pcall(vim.api.nvim_buf_delete, buf7, { force = true })
 
   for _, b in ipairs({ buf, buf2, buf3, buf4, buf5, buf6 }) do
     pcall(vim.api.nvim_buf_delete, b, { force = true })
