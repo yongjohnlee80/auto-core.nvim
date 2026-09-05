@@ -733,6 +733,30 @@ local function retarget_buffers(from_path, to_path)
   if vim.in_fast_event() then vim.schedule(apply) else apply() end
 end
 
+---Reload unmodified open buffers naming `path` after an in-place rewrite.
+---An unmodified buffer is reloaded so the reader sees the frontmatter
+---auto-core just rewrote, preventing a subsequent `:w` from reverting the
+---disk file with stale memory (MF2). A modified buffer is preserved intact.
+---@param path string
+local function reload_buffers(path)
+  local function apply()
+    for _, b in ipairs(vim.api.nvim_list_bufs()) do
+      if vim.api.nvim_buf_is_valid(b)
+        and vim.api.nvim_buf_is_loaded(b)
+        and vim.api.nvim_buf_get_name(b) == path
+      then
+        local modified = vim.api.nvim_get_option_value("modified", { buf = b })
+        if not modified then
+          vim.api.nvim_buf_call(b, function()
+            pcall(vim.cmd, "silent! keepalt edit!")
+          end)
+        end
+      end
+    end
+  end
+  if vim.in_fast_event() then vim.schedule(apply) else apply() end
+end
+
 ---Move a task file from `from_path` to `to_path` atomically. The
 ---write-new-then-unlink-old order matches M.status() so a crash mid-
 ---move leaves a duplicate that refresh can recover from on the next
@@ -756,8 +780,11 @@ end
 ---@return boolean ok, string? err
 local function move_task(from_path, to_path, text, what)
   if from_path == to_path then
-    -- In-place rewrite (errors:[] etc. — task 7).
-    return atomic_write(from_path, text)
+    -- In-place rewrite (assign without bucket move, errors:[] etc. — task 7).
+    local wok, werr = atomic_write(from_path, text)
+    if not wok then return false, werr end
+    reload_buffers(from_path)
+    return true
   end
   local wok, werr = atomic_write(to_path, text)
   if not wok then return false, werr end
@@ -1359,6 +1386,10 @@ end
 ---be notified; edit the file directly if you just want to
 ---record an assignment without pinging anyone.
 ---
+---Assignment does NOT change task status: starting work is an
+---explicit `todos.status` call (starting work should not be claimed
+---purely because ownership changed; ADR-0035 r5).
+---
 ---Idempotent: assigning a task to its current assignee is a
 ---no-op (no rewrite, no event). Pass `nil`, `""`, or `vim.NIL`
 ---to unassign/clear.
@@ -1395,7 +1426,6 @@ function M.assign(id, assignee, reason)
   end
 
   local old           = task.assignee
-  local old_status    = task.status
   local old_file_path = file
 
   -- Idempotent no-op when the assignee is already what's requested.
@@ -1409,19 +1439,9 @@ function M.assign(id, assignee, reason)
   task.assignee = assignee  -- nil clears the field
   task.updated  = now
 
-  -- ADR-0035 §2: atomic same-write-path `open → in-progress`
-  -- transition. When an open task gets a non-nil assignee, flip the
-  -- status in-line so the assignment AND the bucket move land in a
-  -- single file write — no event-subscriber chain, no recursion
-  -- hazard. Status reverse on assignee-clear is intentionally NOT
-  -- performed (Lector OQ1: clearing during reassignment/handoff
-  -- shouldn't churn the bucket).
-  local status_changed_now = false
-  if old_status == "open" and assignee ~= nil and assignee ~= "" then
-    task.status         = "in-progress"
-    task.status_changed = now
-    status_changed_now  = true
-  end
+  -- Assignment does NOT change task status — starting work is an explicit
+  -- `todos.status` call (ADR-0035 r5 amendment). The task file remains in its
+  -- current bucket directory.
 
   local v = schema.validate(task)
   if not v.ok then return nil, "schema: " .. tostring(v.err) end
@@ -1429,18 +1449,9 @@ function M.assign(id, assignee, reason)
   local rendered, render_err = render_task(task)
   if render_err then return nil, render_err end
 
-  -- When the status transitioned, the file must land in a different
-  -- bucket directory than it currently sits in. Write the new file
-  -- first, then unlink the old one — same crash-safe order
-  -- `M.status()` uses (see §775 comment).
-  local target_path = file
-  if status_changed_now then
-    target_path = paths.task_file_path(td, id, task.status, nil)
-  end
-
-  -- Same choke point as M.status(): move_task carries the crash-safe
-  -- ordering and retargets any buffer open on the old bucket path.
-  local ok, err = move_task(old_file_path, target_path, rendered,
+  -- In-place rewrite: file stays in its current bucket. move_task reloads
+  -- unmodified buffers naming this path to prevent stale memory reverts (MF2).
+  local ok, err = move_task(old_file_path, old_file_path, rendered,
     string.format("assign(%s, %s)", id, tostring(assignee)))
   if not ok then return nil, "write: " .. tostring(err) end
 
@@ -1452,24 +1463,12 @@ function M.assign(id, assignee, reason)
     pcall(events.publish, "core.todo.assignee:changed", {
       id        = id,
       title     = task.title,
-      file_path = target_path,
+      file_path = old_file_path,
       from      = old,
       to        = assignee,
       reason    = reason,
       at        = now,
     })
-    -- Second event ONLY when the in-line transition actually fired.
-    -- Mirrors `M.status()`'s emission shape so panel + auto-archive
-    -- subscribers see a uniform event regardless of which API path
-    -- produced the move.
-    if status_changed_now then
-      pcall(events.publish, "core.todo.status:changed", {
-        id   = id,
-        from = old_status,
-        to   = task.status,
-        at   = now,
-      })
-    end
   end
 
   return task

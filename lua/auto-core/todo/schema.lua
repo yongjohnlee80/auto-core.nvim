@@ -14,9 +14,9 @@ M.VERSION = 1
 ---@type table<string, true>
 ---
 ---ADR-0035 extends this enum from the original four (ADR-0031) to six:
----  - `in-progress` — task is being actively worked on. Auto-engaged
----    by `M.assign()` on `open → in-progress` when an open task gets
----    a non-nil assignee (atomic same-write-path).
+---  - `in-progress` — task is being actively worked on. Transitioned
+---    via `M.status(id, "in-progress")`; assigning a task does NOT
+---    auto-flip status (starting work is an explicit status call; ADR-0035 r5).
 ---  - `automated` — template task; never transitions on its own.
 ---    Lives in `.todo-list/automated/`; consumed by the automation
 ---    engine (Phase 2) which clones it on each condition match.
