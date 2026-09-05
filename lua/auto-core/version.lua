@@ -922,6 +922,17 @@ return {
   -- v0.2.14 both shipped reporting "0.2.12", and v0.2.11 reported "0.1.62".
   -- Consumers can feature-detect on this value, so a tag whose code reports a
   -- different version is a defective release. Bump it WITH the tag.
-  version     = "0.2.15",
+  --
+  -- v0.2.16 puts todo's WARN records on a filterable component axis (both
+  -- emissions passed their formatted message as the COMPONENT, so every record
+  -- became its own unique component value) and scopes CI concurrency by event,
+  -- so a merge can no longer silently cancel an earlier merge's verdict on the
+  -- branch five sibling plugins depend on. `api_version` stays at `0.1`.
+  --
+  -- The smoke cell that ties this string to the CHANGELOG's newest entry is
+  -- what caught the omission here: the release PR went red on
+  -- `module=0.2.15` before the tag existed. That gate is the reason this file
+  -- can be trusted at all, given the drift recorded above.
+  version     = "0.2.16",
   api_version = "0.1",
 }
