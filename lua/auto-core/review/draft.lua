@@ -198,7 +198,29 @@ end
 ---module's own fields on the same table.
 ---@return table
 function M.draft(slug, sha, opts)
-  local d = _drafts().get(M.scope(slug, sha))
+  -- `scope` refuses anything that is not a 40-hex sha and an @-free slug, and
+  -- it refuses by returning nil. Passing that nil straight into the store gave
+  -- back nil, and the next line indexed it:
+  --
+  --   draft.lua:202: attempt to index local 'd' (a nil value)
+  --
+  -- which names neither the caller's mistake nor this function. It reached a
+  -- user through worktree.nvim's graph, where gitgraph supplies a NINE-CHARACTER
+  -- hash and `o` simply died (2026-09-07).
+  --
+  -- `draft_working` already guarded its own scope and is typed `@return table?`.
+  -- This one is typed `@return table` — a harder promise — so returning nil
+  -- here would only push the same crash one frame out, into every caller. It
+  -- fails loudly instead, naming what was wrong with what it was given.
+  local scope = M.scope(slug, sha)
+  if not scope then
+    error(("auto-core.review.draft: cannot bind a draft — slug=%s sha=%s. "
+      .. "A slug must be non-empty and free of '@'; a sha must be the FULL 40 "
+      .. "hex characters (an abbreviation cannot key a draft: two commits can "
+      .. "share a prefix, and the scopes would silently merge)."):format(
+        vim.inspect(slug), vim.inspect(sha)), 0)
+  end
+  local d = _drafts().get(scope)
   if d.verdict == nil then d.verdict = "comment" end
   -- SNAPSHOT the reviewer when the draft is first bound (ADR-0081 §2.5).
   -- `submit` used to resolve `git config user.name` at WRITE time, so a draft
