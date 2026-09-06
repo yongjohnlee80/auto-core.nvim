@@ -321,6 +321,22 @@ local function _show(idx)
     uncommitted = _state.uncommitted,
     read_file = _state.read_file,
   })
+
+  -- "full" is a REQUEST, not a guarantee: `sides()` can only widen the render
+  -- when it can read the file, and it reports `degraded` when it could not.
+  -- Carrying that into state is what stops the footer claiming a context the
+  -- panes are not showing — the failure Johno hit, where `X` moved a label and
+  -- nothing else. Recorded per render because it is a per-FILE answer: a
+  -- deleted path can be unreadable in a view whose other files are fine.
+  _state.context_degraded = (_state.context == "full") and sides.degraded or nil
+  if _state.context_degraded and not _state.context_degraded_told then
+    _state.context_degraded_told = true
+    vim.schedule(function()
+      vim.notify("auto-core.diffview: full context unavailable — "
+        .. tostring(_state and _state.context_degraded), vim.log.levels.WARN)
+    end)
+  end
+
   local anns = (_state.annotations or {})[f.path]
     or (f.new_path and (_state.annotations or {})[f.new_path])
     or (f.old_path and (_state.annotations or {})[f.old_path])
@@ -810,15 +826,33 @@ function M.open(opts)
     end
   end
 
-  -- Cross-pane file navigation (`]f` and `[f`) and context toggle (`X`) on content panes (ADR-0083 §2.3/§2.4)
-  for _, pane in ipairs({ "middle", "preview" }) do
+  -- File navigation and the context toggle, on EVERY pane (ADR-0083 §2.3/§2.4).
+  --
+  -- `f` / `F` are the primary keys. They replaced `]f` / `[f`, which Johno
+  -- reported did nothing in the real UI (2026-09-06) even though both the
+  -- binding and its handler were correct and two suites asserted so — one via
+  -- `vim.cmd("normal ]f")`, one by invoking the callback directly. Both
+  -- bypass interactive keystroke dispatch, so neither could ever observe what
+  -- he was hitting. A single-key lhs sidesteps the whole multi-char /
+  -- which-key-trigger question rather than diagnosing it. `f` and `F` shadow
+  -- find-char, which has nothing to find in a read-only diff pane; `]f` / `[f`
+  -- stay bound as aliases because they cost nothing.
+  --
+  -- The LEFT pane is included now. It was excluded, so the one pane whose job
+  -- is picking a file had no file-navigation key at all — while the footer
+  -- advertised `[f/]f file` in every pane. A key the focused pane does not
+  -- have must never appear in the hint line.
+  for _, pane in ipairs({ "left", "middle", "preview" }) do
     local b = float:bufnr(pane)
     if b and vim.api.nvim_buf_is_valid(b) then
-      pcall(vim.keymap.set, "n", "]f", function()
+      local function _next_file()
         if not _state then return end
         if _state.idx < #_state.files then
           local cur_w = vim.api.nvim_get_current_win()
-          local cur_pane = (cur_w == _state.float:winid("middle")) and "middle" or "preview"
+          -- `_focused_pane()` rather than a middle/preview coin flip: with the
+          -- left pane bound too, the old expression labelled the file list
+          -- "preview" and stored the reader's position against the wrong pane.
+          local cur_pane = _focused_pane() or "preview"
           local c = vim.api.nvim_win_get_cursor(cur_w)
           local cur_f = _state.files[_state.idx]
           if cur_f then
@@ -851,13 +885,16 @@ function M.open(opts)
           end
           M._render_footer()
         end
-      end, { buffer = b, silent = true, nowait = true, desc = "auto-core.diffview: next file" })
+      end
 
-      pcall(vim.keymap.set, "n", "[f", function()
+      local function _prev_file()
         if not _state then return end
         if _state.idx > 1 then
           local cur_w = vim.api.nvim_get_current_win()
-          local cur_pane = (cur_w == _state.float:winid("middle")) and "middle" or "preview"
+          -- `_focused_pane()` rather than a middle/preview coin flip: with the
+          -- left pane bound too, the old expression labelled the file list
+          -- "preview" and stored the reader's position against the wrong pane.
+          local cur_pane = _focused_pane() or "preview"
           local c = vim.api.nvim_win_get_cursor(cur_w)
           local cur_f = _state.files[_state.idx]
           if cur_f then
@@ -890,9 +927,9 @@ function M.open(opts)
           end
           M._render_footer()
         end
-      end, { buffer = b, silent = true, nowait = true, desc = "auto-core.diffview: prev file" })
+      end
 
-      pcall(vim.keymap.set, "n", "X", function()
+      local function _toggle_context()
         if not _state then return end
         _state.context = (_state.context == "full") and "hunk" or "full"
         local cur_w = vim.api.nvim_get_current_win()
@@ -904,7 +941,22 @@ function M.open(opts)
           local last = vim.api.nvim_buf_line_count(b_cur)
           pcall(vim.api.nvim_win_set_cursor, cur_w, { math.min(cur_c[1], last), cur_c[2] })
         end
-      end, { buffer = b, silent = true, nowait = true, desc = "auto-core.diffview: toggle context" })
+      end
+
+      -- One handler, several lhs. `f`/`F` and `T` are what the footer
+      -- advertises; `]f`/`[f` and `X` remain for muscle memory.
+      for _, m in ipairs({
+        { "f",  _next_file,      "next file" },
+        { "]f", _next_file,      "next file" },
+        { "F",  _prev_file,      "prev file" },
+        { "[f", _prev_file,      "prev file" },
+        { "T",  _toggle_context, "toggle context" },
+        { "X",  _toggle_context, "toggle context" },
+      }) do
+        pcall(vim.keymap.set, "n", m[1], m[2],
+          { buffer = b, silent = true, nowait = true,
+            desc = "auto-core.diffview: " .. m[3] })
+      end
     end
   end
 
@@ -1043,9 +1095,20 @@ function M._render_footer()
   -- the other. The footer is a ONE-LINE pane: anything past its width is simply
   -- not drawn, and the tail is where the pending count lives — so an untrimmed
   -- line loses exactly the signal that must never go missing.
-  local ctx_label = (_state.context == "full") and "[context: full]" or "[context: 3L]"
-  local prose = { "j/k file", "[f/]f file", ctx_label, "<Tab> pane", "a/ = old, b/ = new" }
-  local keys = { "X context" }
+  -- The label reports what the PANES show, not what was asked for. Saying
+  -- "full" over a hunk render is how this bug stayed invisible: the toggle
+  -- looked like it worked and the reader trusted it. When the file could not
+  -- be read, the request is named as unmet rather than reported as met.
+  local ctx_label
+  if _state.context == "full" then
+    ctx_label = _state.context_degraded and "[context: full UNAVAILABLE]" or "[context: full]"
+  else
+    ctx_label = "[context: 3L]"
+  end
+  -- `f/F` because that is what is bound on every pane now. The old hint said
+  -- `[f/]f` in the file list, where neither key existed.
+  local prose = { "j/k file", "f/F file", ctx_label, "<Tab> pane", "a/ = old, b/ = new" }
+  local keys = { "T context" }
   local ann = _state.annotate
   if ann then
     keys[#keys + 1] = ann.disabled_reason and "c unavailable" or "c annotate"
