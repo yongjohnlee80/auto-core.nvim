@@ -10,6 +10,68 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.2.20] — 2026-09-07 — a label that reported a success nothing had observed
+
+Strictly additive patch. No existing function, key, event topic or schema
+changed shape, so `api_version` stays at `0.1`.
+
+**The diff view's context toggle moved a label and nothing else.** Pressing
+`X` flipped the footer from `[context: 3L]` to `[context: full]` and redrew
+exactly the same hunks — reported from a real review session, with both panes
+still jumping line 6 to line 610 across a gap while the footer claimed full
+context.
+
+`git.diff._sides_full` cannot synthesise whole-file context from a patch; it
+shells out to `git -C <dir> show <rev>:<path>` per side. Given neither a
+directory nor a revision it read nothing, fell through its
+`if not blines and not alines` guard, and returned the HUNK render — in
+silence. The caller went on believing it had full context, and the view said
+so. (The missing caller arguments are auto-finder's half, fixed in its
+`v0.4.22`; this is the half that made the failure *visible* rather than
+silent.)
+
+`sides()` now sets an additive **`degraded`** field naming what was missing,
+`_show` carries it into state, and the footer prints
+`[context: full UNAVAILABLE]` instead of claiming a context the panes are not
+showing. A one-shot notify names the reason. Every existing reader of
+`.before` / `.after` is untouched, and a caller that ignores the field behaves
+exactly as before.
+
+**`]f` / `[f` did nothing in the real UI**, and two test suites said otherwise.
+Both keys were bound and both handlers were correct — this repo's
+`adr0083-diffview-nav.lua` asserted it by invoking
+`km_map["]f"].callback()`, and auto-finder's resumption suite by
+`vim.cmd("normal ]f")`. Both bypass interactive keystroke dispatch, so neither
+could observe the thing a reader actually presses, and both stayed green for
+as long as the key was dead.
+
+**`f` / `F` are now the primary file-navigation keys**, with `T` joining `X` on
+the context toggle. A single-key lhs sidesteps the multi-char / which-key
+trigger question rather than diagnosing it; both shadow find-char, which has
+nothing to find in a read-only diff pane. `]f` / `[f` and `X` remain bound as
+aliases.
+
+**The file list had no file-navigation key at all.** The bind loop was
+`{ "middle", "preview" }`, so the one pane whose job is picking a file was
+excluded — while the footer advertised `[f/]f file` in every pane. All three
+panes are bound now, and pane detection inside the handlers moved from a
+middle-or-preview coin flip to `_focused_pane()`: with the left pane bound, the
+old expression labelled the file list `"preview"` and filed the reader's cursor
+position against the wrong pane.
+
+One existing assertion was **changed rather than added to**:
+`adr0083-diffview-nav.lua` asserted `[context: full]` on a fixture with no
+readable source — it was asserting the lie. It now asserts the honest label
+there, and the readable case is covered by the new suite.
+
+New `tests/adr0083-diffview-keys.lua` feeds keys through
+`nvim_feedkeys(..., "x")` so mappings are **resolved, not called**, and drives
+`f`/`F` from all three panes. It opens with a baseline check that its fixture
+has a gap three-line context cannot bridge, so no context assertion can pass by
+observing nothing. Mutation matrix, each reverted alone: left pane excluded → 2
+red; `f`/`F`/`T` dropped → 8 red; silent fallback restored → 2 red here and 2 in
+`diffview-nav`; none → 22/22 and 28/28 green.
+
 ## [v0.2.19] — 2026-09-05 — an external panel close finally tells the consumer
 
 Strictly additive patch. No public Lua surface changed, so `api_version`
