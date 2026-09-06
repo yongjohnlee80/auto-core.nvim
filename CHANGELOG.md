@@ -10,6 +10,28 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.2.21] — 2026-09-07 — version.lua lagged the CHANGELOG at v0.2.20
+
+Patch. One string.
+
+`v0.2.20` shipped with `version.lua` still reading `0.2.19`. The release commit
+added the CHANGELOG entry and never bumped the module, so `M.version`
+disagreed with the newest entry the moment the tag was pushed.
+
+The repo already had the guard: `tests/smoke.lua` asserts `M.version` is semver
+AND matches the CHANGELOG's newest heading, and it went red on `main` straight
+after the release — which is how this was caught rather than shipped onward.
+The failure is worth recording plainly: the check existed, worked, and was run
+only *after* the tag, so a green pre-release gate was never the thing that
+confirmed the release.
+
+`v0.2.20`'s tag is not moved — a pushed tag is immutable, so the remedy is the
+next patch rather than a rewrite. Installs pinned to `^0.2.0` pick this up
+automatically; anything that read `M.version` between the two tags saw
+`0.2.19`.
+
+`api_version` is unchanged at `0.1` — no public Lua surface moved.
+
 ## [v0.2.20] — 2026-09-07 — a label that reported a success nothing had observed
 
 Strictly additive patch. No existing function, key, event topic or schema
