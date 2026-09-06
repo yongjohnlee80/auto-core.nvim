@@ -394,6 +394,16 @@ end
 
 ---_topic is the filename's human half — short, safe, and derived from the
 ---commit so two reviews of different commits cannot collide on it.
+---kb_root resolves the knowledge-base root the review documents live under.
+---
+---PUBLIC because `submit` needs it and `submit` could not move down here: it
+---requires `worktree.review` to write the pair, and auto-core depends on
+---neither of its consumers. A private copy on the consumer side would be a
+---second thing to keep correct, so the resolution has one home and the
+---consumer asks for it.
+---@return string?
+function M.kb_root() return _kb_root() end
+
 local function _topic(repo, sha)
   local name = (repo and (repo.label or repo.slug)) or "review"
   return (M.slugify(name) or "review") .. "-" .. tostring(sha):sub(1, 7)

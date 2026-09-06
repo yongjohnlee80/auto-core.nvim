@@ -113,6 +113,19 @@ ok("worktree_id returns nil rather than throwing when the surface is missing",
   A.worktree_id(here) == nil)
 package.loaded["auto-core.git.worktree"] = saved
 
+-- §5b kb_root is PUBLIC, and the reason is a boundary defect this suite missed
+-- on its first pass. `submit` stayed in auto-finder and called `_kb_root()` —
+-- a file-local that moved down here with everything else. Locals do not read
+-- through the facade's metatable, so the remainder broke while the moved half
+-- was, correctly, "complete and self-contained". Auditing one side of a cut
+-- does not establish the other side still resolves.
+ok("kb_root is public", type(A.kb_root) == "function")
+ok("kb_root actually resolves (not a nil upvalue)",
+  type(A.kb_root()) == "string" and A.kb_root() ~= "", tostring(A.kb_root()))
+-- The first attempt at this wrapper was defined ABOVE `local function
+-- _kb_root`, so it closed over a global lookup and returned nil at call time.
+-- Asserting the type alone would have passed that.
+
 -- §6 auto-core must NOT have grown a dependency on its own consumers
 local before = { worktree = package.loaded["worktree.review"],
                  finder = package.loaded["auto-finder.views.repos.authoring"] }
