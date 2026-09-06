@@ -157,6 +157,25 @@ vim.env.AUTO_AGENTS_KB_READ = saved_r
 vim.env.AUTO_AGENTS_KB_WRITE = saved_w
 vim.env.AUTO_AGENTS_KB_ROOT = saved_kb
 
+-- §5c a nil scope must name itself, not crash three frames later
+-- `scope` refuses by returning nil; feeding that to the store returned nil and
+-- the next line indexed it — "attempt to index local 'd' (a nil value)", which
+-- names neither the caller's mistake nor this function. It reached a user
+-- through worktree.nvim's graph, where gitgraph supplies a 9-character hash.
+local ok_abbr, err_abbr = pcall(A.draft, SLUG, SHA:sub(1, 9))
+ok("draft() with an abbreviated sha errors rather than indexing nil",
+  ok_abbr == false, "it returned instead of erroring")
+ok("...and the message names the sha requirement",
+  type(err_abbr) == "string" and err_abbr:find("40", 1, true) ~= nil, tostring(err_abbr))
+ok("...and does not leak the opaque index error",
+  type(err_abbr) == "string" and err_abbr:find("index local", 1, true) == nil,
+  tostring(err_abbr))
+local ok_at = pcall(A.draft, "lab@proj", SHA)
+ok("draft() with an '@' in the slug errors too", ok_at == false)
+-- The happy path must be untouched: a guard that rejects everything would pass
+-- all three cells above while breaking the function.
+ok("a well-formed draft still binds", type(A.draft(SLUG, SHA)) == "table")
+
 -- §6 auto-core must NOT have grown a dependency on its own consumers
 local before = { worktree = package.loaded["worktree.review"],
                  finder = package.loaded["auto-finder.views.repos.authoring"] }
