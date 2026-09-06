@@ -10,6 +10,29 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.2.23] — 2026-09-07 — a nil scope named neither the caller nor itself
+
+Patch. One guard. `api_version` unchanged at `0.1`.
+
+`review.draft.draft()` passed `scope`'s nil straight into the store, got nil
+back, and indexed it:
+
+```
+draft.lua:202: attempt to index local 'd' (a nil value)
+```
+
+That message names neither what the caller did wrong nor this function. It
+reached a user through worktree.nvim's graph, where gitgraph supplies a
+nine-character hash and `o` simply died on every commit (fixed on that side in
+worktree **v0.5.12**).
+
+`draft_working` already guarded its own scope and is typed `@return table?`.
+`draft()` is typed `@return table` — a harder promise — so returning nil here
+would only push the same crash one frame out, into every caller. It errors
+instead, naming what was wrong with what it was given and why an abbreviation
+cannot key a draft: two commits can share a prefix, and the scopes would
+silently merge.
+
 ## [v0.2.22] — 2026-09-07 — the review draft's domain layer comes down a level
 
 Additive. A new module; nothing existing changed shape, so `api_version` stays
