@@ -51,6 +51,7 @@
 
 local events    = require("auto-core.events")
 local path_mod  = require("auto-core.fs.path")
+local git_read  = require("auto-core.git._read")
 
 local M = {}
 
@@ -250,6 +251,39 @@ function M.list_remote_branches(repo_path)
     end
   end
   return lines
+end
+
+---List completion-compatible names from every alphabetic ref namespace.
+---Ordering follows the full refname sort performed by Git; duplicates remain.
+---@param repo_path string?
+---@return string[]? refs
+---@return string? error
+function M.list_refs(repo_path)
+  local cwd = repo_path or vim.fn.getcwd()
+  local argv, build_error = git_read.argv(cwd, {
+    "for-each-ref", "--sort=refname", "--format=%(refname)", "refs",
+  })
+  if not argv then return nil, build_error end
+
+  local spawned, process = pcall(vim.system, argv, { text = true })
+  if not spawned or not process then
+    return nil, "git for-each-ref failed: " .. tostring(process)
+  end
+  local waited, result = pcall(function() return process:wait() end)
+  if not waited or not result then
+    return nil, "git for-each-ref failed: " .. tostring(result)
+  end
+  if result.code ~= 0 then
+    local detail = vim.trim(tostring(result.stderr or result.stdout or ""))
+    return nil, "git for-each-ref failed" .. (detail ~= "" and (": " .. detail) or "")
+  end
+
+  local refs = {}
+  for line in tostring(result.stdout or ""):gmatch("[^\r\n]+") do
+    local name = line:match("^refs/[A-Za-z]+/(.+)$")
+    if name then refs[#refs + 1] = name end
+  end
+  return refs, nil
 end
 
 ---Returns true if `repo_path` has a local branch named `name`.

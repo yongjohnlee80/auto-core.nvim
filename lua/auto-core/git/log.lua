@@ -20,6 +20,7 @@
 ---@module 'auto-core.git.log'
 
 local M = {}
+local git_read = require("auto-core.git._read")
 
 -- Field/record separators. `--format` interpolates commit metadata that can
 -- contain anything a human typed, including tabs, pipes and newlines, so the
@@ -183,6 +184,33 @@ function M.rev_exists(common_dir, rev)
   if not (common_dir and rev) or rev == "" then return false end
   local code = _run(_git(common_dir, { "rev-parse", "--verify", "--quiet", rev .. "^{commit}" }))
   return code == 0
+end
+
+---Report whether a commit-ish revision resolves in the repository at `path`.
+---The ref is always a separate argv element and option-shaped refs are refused.
+---@param path string
+---@param rev string
+---@return boolean exists
+---@return string? error
+function M.rev_exists_at(path, rev)
+  if type(path) ~= "string" or path == "" then return false, "path required" end
+  if type(rev) ~= "string" or rev == "" then return false, "ref required" end
+  if rev:find("\0", 1, true) then return false, "ref must not contain NUL" end
+  if rev:sub(1, 1) == "-" then return false, "option-shaped ref refused" end
+
+  local argv, build_error = git_read.argv(path, {
+    "rev-parse", "--verify", "--quiet", rev .. "^{commit}",
+  })
+  if not argv then return false, build_error end
+  local spawned, process = pcall(vim.system, argv, {})
+  if not spawned or not process then
+    return false, "git rev-parse failed: " .. tostring(process)
+  end
+  local waited, result = pcall(function() return process:wait() end)
+  if not waited or not result then
+    return false, "git rev-parse failed: " .. tostring(result)
+  end
+  return result.code == 0, nil
 end
 
 ---range applies ADR-0060 §2.4's commit-range policy.

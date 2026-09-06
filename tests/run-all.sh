@@ -144,6 +144,7 @@ run_smoke
 run_standalone "diff-align (r1 MF4)" tests/adr0060-r1-diff-align.lua
 run_standalone "grid selection + viewer (ADR-0066)" tests/grid_selection.lua
 run_standalone "git write (ADR-0060)" tests/git_write.lua
+run_standalone "git reads (ADR-0069)" tests/git_read.lua
 # ADR-0065 P0 — the multi-float close contract. Registered here rather than
 # left to a glob because this runner names its suites explicitly: an
 # unregistered file under tests/ is simply never run.

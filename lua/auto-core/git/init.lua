@@ -10,6 +10,11 @@
 
 local M = {}
 
+local git_version = require("auto-core.git.version")
+
+M.version          = git_version.version
+M.version_at_least = git_version.version_at_least
+
 M.repo     = require("auto-core.git.repo")
 M.status   = require("auto-core.git.status")
 M.worktree = require("auto-core.git.worktree")
@@ -19,8 +24,8 @@ M.diff     = require("auto-core.git.diff")
 M.fetch    = require("auto-core.git.fetch")
 M.pull     = require("auto-core.git.pull")
 M.watch    = require("auto-core.git.watch")
--- The single owner for git WRITES (ADR-0060). Reads live in the modules
--- above and are hardened with --no-optional-locks; writes must not be.
+-- The single owner for git WRITES (ADR-0060). The new ADR-0069 repository
+-- reads are hardened with --no-optional-locks; older read modules vary.
 M.write    = require("auto-core.git.write")
 
 return M

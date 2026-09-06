@@ -23,8 +23,166 @@
 ---@module 'auto-core.git.repo'
 
 local fs_path = require("auto-core.fs.path")
+local git_read = require("auto-core.git._read")
 
 local M = {}
+
+---@class AutoCoreGitDiscovery
+---@field ok boolean
+---@field worktree_root string?
+---@field git_dir string?
+---@field superproject_worktree_root string?
+---@field kind "unsupported"|"not_repo"|"spawn"|"git"|"malformed"|nil
+---@field error string?
+---@field code integer?
+
+local discovery_queries = {
+  git_dir = "--absolute-git-dir",
+  worktree_root = "--show-toplevel",
+  superproject_worktree_root = "--show-superproject-working-tree",
+}
+local discovery_query_count = 0
+for _ in pairs(discovery_queries) do discovery_query_count = discovery_query_count + 1 end
+
+local function outcome_error(label, outcome)
+  local detail = tostring(outcome.stderr or outcome.stdout or outcome.error or "")
+  detail = vim.trim(detail)
+  return label .. " failed" .. (detail ~= "" and (": " .. detail) or "")
+end
+
+local function discovery_failure(kind, err, code)
+  return { ok = false, kind = kind, error = err, code = code }
+end
+
+---Aggregate in query order, never completion order. Failures return no paths.
+local function aggregate_discovery(outcomes)
+  local git_dir = outcomes.git_dir
+  if git_dir.spawn then
+    return discovery_failure("spawn", outcome_error("git-dir query", git_dir), nil)
+  end
+  if git_dir.code ~= 0 then
+    return discovery_failure("not_repo", outcome_error("git-dir query", git_dir), git_dir.code)
+  end
+  local git_dir_path = git_read.strip_terminator(git_dir.stdout)
+  if git_dir_path == "" then
+    return discovery_failure("malformed", "git-dir query returned an empty path", git_dir.code)
+  end
+
+  local root = outcomes.worktree_root
+  if root.spawn then
+    return discovery_failure("spawn", outcome_error("worktree-root query", root), nil)
+  end
+  local root_path = nil
+  if root.code == 0 then
+    root_path = git_read.strip_terminator(root.stdout)
+    if root_path == "" then
+      return discovery_failure("malformed", "worktree-root query returned an empty path", root.code)
+    end
+  end
+
+  local superproject = outcomes.superproject_worktree_root
+  if superproject.spawn then
+    return discovery_failure("spawn", outcome_error("superproject query", superproject), nil)
+  end
+  if superproject.code ~= 0 then
+    return discovery_failure("git", outcome_error("superproject query", superproject), superproject.code)
+  end
+  local superproject_path = git_read.strip_terminator(superproject.stdout)
+  if superproject_path == "" then superproject_path = nil end
+
+  return {
+    ok = true,
+    git_dir = git_dir_path,
+    worktree_root = root_path,
+    superproject_worktree_root = superproject_path,
+  }
+end
+
+local function discovery_argv(path, option)
+  return git_read.argv(path, { "rev-parse", option })
+end
+
+local function run_discovery_sync(path, option)
+  local argv = assert(discovery_argv(path, option))
+  local spawned, process = pcall(vim.system, argv, {})
+  if not spawned or not process then
+    return { spawn = true, error = process }
+  end
+  local waited, result = pcall(function() return process:wait() end)
+  if not waited or not result then return { spawn = true, error = result } end
+  return {
+    code = result.code == nil and -1 or result.code,
+    stdout = result.stdout or "",
+    stderr = result.stderr or "",
+  }
+end
+
+---Discover repository paths synchronously through three separately framed reads.
+---@param path string?
+---@return AutoCoreGitDiscovery
+function M.discover(path)
+  local cwd = path or vim.fn.getcwd()
+  local _, build_error = discovery_argv(cwd, discovery_queries.git_dir)
+  if build_error then return discovery_failure("unsupported", build_error, nil) end
+
+  local outcomes = {}
+  outcomes.git_dir = run_discovery_sync(cwd, discovery_queries.git_dir)
+  if outcomes.git_dir.spawn or outcomes.git_dir.code ~= 0
+      or git_read.strip_terminator(outcomes.git_dir.stdout) == "" then
+    return aggregate_discovery(outcomes)
+  end
+  outcomes.worktree_root = run_discovery_sync(cwd, discovery_queries.worktree_root)
+  if outcomes.worktree_root.spawn
+      or (outcomes.worktree_root.code == 0
+        and git_read.strip_terminator(outcomes.worktree_root.stdout) == "") then
+    return aggregate_discovery(outcomes)
+  end
+  outcomes.superproject_worktree_root = run_discovery_sync(
+    cwd, discovery_queries.superproject_worktree_root)
+  return aggregate_discovery(outcomes)
+end
+
+---Discover repository paths concurrently and deliver exactly once when scheduled.
+---@param path string?
+---@param callback fun(result: AutoCoreGitDiscovery)
+function M.discover_async(path, callback)
+  assert(type(callback) == "function", "discover_async: callback required")
+  local cwd = path or vim.fn.getcwd()
+  local _, build_error = discovery_argv(cwd, discovery_queries.git_dir)
+  local delivered = false
+  local function deliver(result)
+    if delivered then return end
+    delivered = true
+    vim.schedule(function() callback(result) end)
+  end
+  if build_error then
+    deliver(discovery_failure("unsupported", build_error, nil))
+    return
+  end
+
+  local outcomes, completed = {}, 0
+  local function settle(name, result)
+    if outcomes[name] then return end
+    outcomes[name] = result
+    completed = completed + 1
+    if completed == discovery_query_count then deliver(aggregate_discovery(outcomes)) end
+  end
+
+  for name, option in pairs(discovery_queries) do
+    local query_name, query_option = name, option
+    local argv = assert(discovery_argv(cwd, query_option))
+    local spawned, process = pcall(vim.system, argv, {}, function(result)
+      settle(query_name, {
+        code = result.code == nil and -1 or result.code,
+        stdout = result.stdout or "",
+        stderr = result.stderr or "",
+      })
+    end)
+    if not spawned or not process then
+      settle(query_name, { spawn = true, error = process })
+    end
+  end
+end
 
 ---Run `git -C <cwd> <args...>` synchronously. Returns the trimmed
 ---first line of stdout, or nil on any non-zero exit.
