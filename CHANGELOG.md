@@ -10,6 +10,55 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.2.22] — 2026-09-07 — the review draft's domain layer comes down a level
+
+Additive. A new module; nothing existing changed shape, so `api_version` stays
+at `0.1`.
+
+**`auto-core.review.draft`** now holds the domain layer over `auto-core.drafts`:
+how a scope is built from a repo slug and a commit, what a finding is, how
+anchored and unanchored items separate, who the reviewer is, and how a draft
+renders to Markdown. 21 functions, previously
+`auto-finder.views.repos.authoring`.
+
+The store made this journey in ADR-0081 §2.2 and its comment said why: *"the
+plugin holding it was the one no other plugin may depend on."* The domain layer
+stayed behind, so the trap stayed with it — and it closed the moment a second
+consumer wanted to open a commit for review. worktree.nvim's graph had to reach
+UP into auto-finder, inverting the family's order
+(auto-core ← worktree ← auto-finder).
+
+What moved is exactly what needed nothing from the consumers: every function
+here requires only `auto-core.drafts`, `auto-core.git.worktree` and
+`auto-core.todo.vars`. **`submit` deliberately did not move** — it needs
+`worktree.review` to write the pair, and auto-core depends on neither of its
+consumers, so it stays with the consumer that owns the write.
+
+`kb_root` is public for that reason. `submit` called it as a file-local, and a
+local does not read through a facade — so the half left behind broke while the
+moved half was correctly self-contained. **Auditing one side of a cut does not
+establish that the other side still resolves**; only the consumer's suite
+aborting surfaced it. Its wrapper sits below the local it closes over, because
+above it the wrapper captures a global lookup and returns nil.
+
+Two test defects are worth recording, both the same shape as the bug this
+series began with — an assertion reporting success without observing what it
+names:
+
+- `kb_root actually resolves` asserted "a non-empty string" and passed only
+  because an agent session exports `AUTO_AGENTS_KB_ROOT`. On a clean runner it
+  returned nil and reddened `run-all`. The value is fixtured and asserted
+  exactly now, which also still catches the nil-upvalue case a type check
+  would pass.
+- A companion cell asserting "nil when nothing is configured" inverted the
+  problem — green clean, red in an agent session — because clearing `KB_ROOT`
+  falls back to `KB_WRITE`. The portable properties are the precedence
+  (`KB_ROOT` over `KB_WRITE`, both fixtured) and, with every source cleared,
+  that it does not throw.
+
+Verified in both shapes: 34/34 with the agent environment and 34/34 with
+`AUTO_AGENTS_KB_ROOT` / `_READ` / `_WRITE` / `_MAILBOX_DIR` unset.
+
 ## [v0.2.21] — 2026-09-07 — version.lua lagged the CHANGELOG at v0.2.20
 
 Patch. One string.
