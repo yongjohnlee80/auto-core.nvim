@@ -204,12 +204,18 @@ if float then
   ok("default footer contains [context: 3L]",
     foot_text():find("[context: 3L]", 1, true) ~= nil, foot_text())
 
-  -- Trigger X toggle
+  -- Trigger the toggle. This view was opened with NO worktree, sha or
+  -- read_file, so `sides()` cannot read either file and full context is
+  -- genuinely unavailable — the footer must SAY so. It used to print
+  -- "[context: full]" over an unchanged hunk render, which is precisely how
+  -- the defect survived: the label reported a success nothing had observed.
   km_map["X"].callback()
-  ok("after X toggle, footer shows [context: full]",
-    foot_text():find("[context: full]", 1, true) ~= nil, foot_text())
+  ok("without a readable source, footer marks full context UNAVAILABLE",
+    foot_text():find("[context: full UNAVAILABLE]", 1, true) ~= nil, foot_text())
+  ok("...and never claims plain [context: full]",
+    foot_text():find("[context: full]", 1, true) == nil, foot_text())
 
-  -- Trigger X toggle back
+  -- Trigger the toggle back
   km_map["X"].callback()
   ok("after second X toggle, footer returns to [context: 3L]",
     foot_text():find("[context: 3L]", 1, true) ~= nil, foot_text())

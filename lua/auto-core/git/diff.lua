@@ -281,8 +281,21 @@ function M._sides_full(file, opts)
     end
   end
 
+  -- Neither side could be read, so there is no full context to render and the
+  -- hunk render is the only honest answer. It is NOT a silent one: this
+  -- fallback existed unannounced, so a view that asked for "full" got hunks
+  -- back and had no way to know — auto-finder's `X` toggle flipped its footer
+  -- to `[context: full]` and redrew the same rows for as long as the caller
+  -- forgot to pass a worktree (2026-09-06, Johno). `degraded` is what lets the
+  -- caller say so. Additive: every existing reader of `.before` / `.after` is
+  -- untouched, and a caller that ignores the field behaves exactly as before.
   if not blines and not alines then
-    return M.sides(file, { context = "hunk" })
+    local degraded = M.sides(file, { context = "hunk" })
+    degraded.degraded = string.format(
+      "cannot read whole-file context: need a checkout and a revision, got dir=%s rev=%s",
+      tostring(opts.worktree or opts.cwd or "nil"),
+      tostring(opts.base or opts.sha or (opts.uncommitted and "HEAD") or "nil"))
+    return degraded
   end
 
   blines = blines or {}
