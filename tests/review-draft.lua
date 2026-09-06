@@ -120,11 +120,42 @@ package.loaded["auto-core.git.worktree"] = saved
 -- was, correctly, "complete and self-contained". Auditing one side of a cut
 -- does not establish the other side still resolves.
 ok("kb_root is public", type(A.kb_root) == "function")
-ok("kb_root actually resolves (not a nil upvalue)",
-  type(A.kb_root()) == "string" and A.kb_root() ~= "", tostring(A.kb_root()))
--- The first attempt at this wrapper was defined ABOVE `local function
--- _kb_root`, so it closed over a global lookup and returned nil at call time.
--- Asserting the type alone would have passed that.
+
+-- The value is FIXTURED, not read from the ambient shell. The first version of
+-- this cell asserted "a non-empty string" and passed only because an agent
+-- session exports AUTO_AGENTS_KB_ROOT; on a clean runner `kb_root()` returns
+-- nil and it reddened run-all (juliet, VM43, r1). A test that needs the
+-- developer's environment is not a test of the code.
+local saved_kb = vim.env.AUTO_AGENTS_KB_ROOT
+vim.env.AUTO_AGENTS_KB_ROOT = "/tmp/af-test-kb-root"
+-- Asserting the EXACT fixture, not merely non-empty: it proves the fixture is
+-- what answered, so the cell cannot pass on some other resolution source.
+-- It is also what still catches the original defect — the first wrapper was
+-- defined ABOVE `local function _kb_root`, closed over a global lookup, and
+-- returned nil. `type(kb_root) == "function"` passes that; this does not.
+ok("kb_root resolves the configured root (not a nil upvalue)",
+  A.kb_root() == "/tmp/af-test-kb-root", tostring(A.kb_root()))
+
+-- KB_ROOT is not the only source — clearing it falls back to KB_WRITE, which is
+-- how an earlier version of this cell passed on a clean runner and failed in an
+-- agent session. So pin the PRECEDENCE, which is the portable property: with
+-- both set to different values, KB_ROOT wins.
+local saved_w = vim.env.AUTO_AGENTS_KB_WRITE
+vim.env.AUTO_AGENTS_KB_WRITE = "/tmp/af-test-kb-write"
+ok("KB_ROOT takes precedence over KB_WRITE",
+  A.kb_root() == "/tmp/af-test-kb-root", tostring(A.kb_root()))
+
+-- With every source cleared the only portable claim is that it does not THROW.
+-- Whether it then answers nil or something from auto-agents depends on what is
+-- loaded, and that is not this suite's to pin.
+vim.env.AUTO_AGENTS_KB_ROOT = nil
+vim.env.AUTO_AGENTS_KB_WRITE = nil
+local saved_r = vim.env.AUTO_AGENTS_KB_READ
+vim.env.AUTO_AGENTS_KB_READ = nil
+ok("kb_root does not throw with nothing configured", (pcall(A.kb_root)) == true)
+vim.env.AUTO_AGENTS_KB_READ = saved_r
+vim.env.AUTO_AGENTS_KB_WRITE = saved_w
+vim.env.AUTO_AGENTS_KB_ROOT = saved_kb
 
 -- §6 auto-core must NOT have grown a dependency on its own consumers
 local before = { worktree = package.loaded["worktree.review"],
