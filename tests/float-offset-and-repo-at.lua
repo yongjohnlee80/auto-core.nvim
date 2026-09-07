@@ -111,6 +111,66 @@ do
     vim.inspect(frac.bg))
 end
 
+-- ── [1b] diffview forwards the offsets ──────────────────────────────────
+--
+-- The option is only useful if the surface consumers actually call reaches it.
+-- `float.multi` honouring `outer.row_offset` while `diffview.open` drops it on
+-- the floor would leave every cell in [1] green and the feature dead.
+
+print("\n[1b] diffview.open forwards row_offset / col_offset to the float")
+do
+  local dv = require("auto-core.ui.diffview")
+  local multi = require("auto-core.ui.float.multi")
+
+  -- Capture what diffview hands the float, rather than measuring the window:
+  -- this asserts the WIRING, and [1] already asserts the arithmetic.
+  local captured = nil
+  local real_new = multi.new
+  multi.new = function(o)
+    captured = o
+    return real_new(o)
+  end
+
+  local tmp = vim.fn.tempname() .. ".txt"
+  vim.fn.writefile({ "a", "b" }, tmp)
+  pcall(dv.open, {
+    files = { { path = vim.fn.fnamemodify(tmp, ":t"), status = "M", new_path = vim.fn.fnamemodify(tmp, ":t") } },
+    title = " probe ",
+    row_offset = 2,
+    col_offset = 6,
+  })
+  pcall(dv.close, "programmatic")
+  multi.new = real_new
+  vim.fn.delete(tmp)
+
+  ok("[1b] diffview built a float at all (guard: the probe ran)", captured ~= nil)
+  ok("[1b] *** row_offset reaches the float's outer geometry ***",
+    captured ~= nil and captured.outer ~= nil and captured.outer.row_offset == 2,
+    captured and vim.inspect(captured.outer) or "nil")
+  ok("[1b] *** col_offset reaches the float's outer geometry ***",
+    captured ~= nil and captured.outer ~= nil and captured.outer.col_offset == 6,
+    captured and vim.inspect(captured.outer) or "nil")
+
+  -- And a caller that passes neither leaves the float centred, so every
+  -- existing consumer of diffview.open is untouched.
+  captured = nil
+  local real_new2 = multi.new
+  multi.new = function(o) captured = o; return real_new2(o) end
+  local tmp2 = vim.fn.tempname() .. ".txt"
+  vim.fn.writefile({ "a" }, tmp2)
+  pcall(dv.open, {
+    files = { { path = vim.fn.fnamemodify(tmp2, ":t"), status = "M", new_path = vim.fn.fnamemodify(tmp2, ":t") } },
+    title = " probe2 ",
+  })
+  pcall(dv.close, "programmatic")
+  multi.new = real_new2
+  vim.fn.delete(tmp2)
+  ok("[1b] *** omitting them leaves the float centred (existing callers unaffected) ***",
+    captured ~= nil and captured.outer ~= nil
+      and captured.outer.row_offset == nil and captured.outer.col_offset == nil,
+    captured and vim.inspect(captured.outer) or "nil")
+end
+
 -- ── [2] git.graph.repo_at / repo_label ──────────────────────────────────
 
 print("\n[2] git.graph.repo_at — repo identity without a workspace walk")

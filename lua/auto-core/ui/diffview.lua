@@ -618,7 +618,7 @@ local function _compose(anchor, on_done)
 end
 
 ---open renders `files` with optional `annotations`.
----@param opts { files: table[], annotations: table<string, table[]>?, title: string?, on_close: function?, annotate: table?, keymaps: table[]? }
+---@param opts { files: table[], annotations: table<string, table[]>?, title: string?, on_close: function?, annotate: table?, keymaps: table[]?, row_offset: integer?, col_offset: integer? }
 ---
 ---`opts.annotate` has THREE states, and which keys exist is how they differ:
 ---  * absent            — no authoring surface at all; nothing is bound, and
@@ -653,6 +653,13 @@ function M.open(opts)
     outer = {
       width_pct = 0.94, height_pct = 0.88,
       title = opts.title or " diff ",
+      -- Forwarded, not decided here. WHICH panel this is — and therefore
+      -- which way it should sit off centre so it is tellable apart from a
+      -- sibling float of nearly the same size — is the consumer's knowledge.
+      -- auto-core owns the diff renderer, not the panel taxonomy. Absent,
+      -- the float centres exactly as before.
+      row_offset = opts.row_offset,
+      col_offset = opts.col_offset,
     },
     panes = {
       left = { width = 34, title = " Files ", cursorline = true },
