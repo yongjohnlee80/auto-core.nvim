@@ -155,6 +155,7 @@ run_standalone "git.worktree identity (ADR-0081 §2.5)" tests/git-worktree-id.lu
 run_standalone "diffview-nav (ADR-0083 Phase 2)" tests/adr0083-diffview-nav.lua
 run_standalone "diffview-keys (f/F/T, every pane, real dispatch)" tests/adr0083-diffview-keys.lua
 run_standalone "review draft domain (auto-core.review.draft)" tests/review-draft.lua
+run_standalone "float offsets + repo_at" tests/float-offset-and-repo-at.lua
 run_pty
 run_bench
 

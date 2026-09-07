@@ -8720,11 +8720,44 @@ print("\n[67] todo.assign — sets assignee + fires core.todo.assignee:changed")
   ok("event carries title",     captured and captured.title == "to assign")
   ok("event carries timestamp", captured and type(captured.at) == "string" and captured.at ~= "")
 
-  -- Idempotent: same assignee again → no rewrite, no event
+  -- RE-ASSIGNMENT re-notifies (Johno, 2026-09-08). Assignment records
+  -- ownership AND delivers an instruction; only the first half is
+  -- idempotent, so a re-assign to the SAME agent must still reach the
+  -- recipient carrying the NEW reason. The old contract swallowed it: no
+  -- event, no error, and an operator whose directive went nowhere.
+  local t_before = todo.get(id)
   captured = nil
-  todo.assign(id, "agent:lector", "duplicate request")
-  vim.wait(30, function() return false end)
-  ok("idempotent: re-assign to same agent does NOT fire event", captured == nil)
+  todo.assign(id, "agent:lector", "actually, start with the tests")
+  vim.wait(50, function() return false end)
+  ok("*** re-assign to the SAME agent FIRES the event again ***",
+    captured ~= nil, "no event")
+  ok("*** and it carries the NEW reason, not the first one ***",
+    captured and captured.reason == "actually, start with the tests",
+    "got: " .. tostring(captured and captured.reason))
+  ok("re-assign event reports from == to (ownership unchanged)",
+    captured and captured.from == "agent:lector" and captured.to == "agent:lector",
+    ("from=%s to=%s"):format(tostring(captured and captured.from),
+      tostring(captured and captured.to)))
+  ok("re-assign event is marked reassigned",
+    captured and captured.reassigned == true)
+  -- The no-rewrite half of the old contract SURVIVES: nothing about the
+  -- task changed, so `updated` must not move. Without this the re-notify
+  -- could be implemented as a full rewrite and nothing would notice.
+  local t_after = todo.get(id)
+  ok("*** re-assign does NOT rewrite the task (updated stamp unchanged) ***",
+    t_before and t_after and t_before.updated == t_after.updated,
+    ("before=%s after=%s"):format(tostring(t_before and t_before.updated),
+      tostring(t_after and t_after.updated)))
+
+  -- The NEGATIVE control for the above: clearing an already-unassigned
+  -- task has no recipient, so it must stay a true silent no-op. Without
+  -- this cell, "always publish" would pass every assertion above.
+  local id_free = todo.add({ title = "never assigned" })
+  captured = nil
+  todo.assign(id_free, nil, "nobody to tell")
+  vim.wait(50, function() return false end)
+  ok("*** clearing an already-unassigned task fires NOTHING ***",
+    captured == nil, "got: " .. vim.inspect(captured))
 
   -- Clear assignee
   todo.assign(id, nil)
@@ -9195,9 +9228,10 @@ print("\n[70] ADR-0035 Phase 2 — automation engine (registry, validate, fire)"
   automation.unregister_hook("assign slot:")
 
   -- 70e. fire — happy path with a templated task whose execute step
-  -- assigns an agent. The clone is born as open; the assign step
-  -- runs through todo.assign which triggers the auto-transition
-  -- to in-progress.
+  -- assigns an agent. The clone is born as open and STAYS open: the
+  -- assign step runs through todo.assign, which records ownership and
+  -- notifies but does not move the task (ADR-0035 r5 removed the
+  -- open → in-progress auto-transition; this comment still described it).
   local tpl_id = todo.add({
     id          = "2026-05-30-p70-fire-template",
     title       = "fire test template",

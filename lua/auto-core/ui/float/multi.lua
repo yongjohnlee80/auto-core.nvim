@@ -70,6 +70,8 @@ local _registry = {}
 ---@field height_pct number?     default 0.85
 ---@field max_width integer?     optional cap
 ---@field max_height integer?    optional cap
+---@field row_offset integer?    signed rows to shift off centre; default 0
+---@field col_offset integer?    signed columns to shift off centre; default 0
 ---@field border any?            see :h nvim_open_win — default "rounded"
 ---@field title string?          rendered on the bg float; nil = no title
 ---@field title_pos string?      "left"|"center"|"right"; default "center"
@@ -142,6 +144,23 @@ function Float:_compute_layout()
   if outer.max_height then outer_h = math.min(outer_h, outer.max_height) end
   local row = math.floor((lines - outer_h) / 2)
   local col = math.floor((cols  - outer_w) / 2)
+
+  -- Deliberate offset off centre, so two same-sized floats are
+  -- distinguishable when one is opened over the other. Every multi-float
+  -- centred itself at the same percentages, which made the agent edits queue
+  -- and the git diff view land on nearly the same rectangle — the second one
+  -- read as a redraw of the first rather than a different panel (Johno,
+  -- 2026-09-08).
+  --
+  -- CLAMPED, not just added: the offset is a preference about where the float
+  -- sits, never a licence to push it off screen. A caller asking for a shift
+  -- larger than the surrounding margin gets the margin.
+  local row_slack = math.max(0, lines - outer_h)
+  local col_slack = math.max(0, cols  - outer_w)
+  local row_off = math.floor(tonumber(outer.row_offset) or 0)
+  local col_off = math.floor(tonumber(outer.col_offset) or 0)
+  row = math.max(0, math.min(row_slack, row + row_off))
+  col = math.max(0, math.min(col_slack, col + col_off))
 
   -- Inner rect (border eats 2 cols + 2 rows).
   local inner_w = outer_w - 2

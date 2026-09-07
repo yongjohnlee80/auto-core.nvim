@@ -1390,6 +1390,23 @@ end
 
 -- ─── public: assign (ADR-0031 §5) ─────────────────────────────
 
+---Best-effort publish of `core.todo.assignee:changed` so consumers (the
+---mailbox router, the panel) can react. The payload carries enough context
+---for a one-shot notification without forcing the consumer to re-read the
+---file.
+---
+---One helper rather than a copy per call site: a fresh assignment and a
+---re-assignment must be indistinguishable to the router, or the recipient's
+---inbox message would differ depending on which branch produced it.
+---`reassigned` is additive context, not a different event.
+---@param payload table
+local function _publish_assignee_changed(payload)
+  local ok_ev, events = pcall(require, "auto-core.events")
+  if ok_ev and events and type(events.publish) == "function" then
+    pcall(events.publish, "core.todo.assignee:changed", payload)
+  end
+end
+
 ---Assign a task to a peer agent / user. Updates the `assignee:`
 ---field on the task file AND emits
 ---`core.todo.assignee:changed` so subscribers (e.g. auto-agents'
@@ -1406,9 +1423,20 @@ end
 ---explicit `todos.status` call (starting work should not be claimed
 ---purely because ownership changed; ADR-0035 r5).
 ---
----Idempotent: assigning a task to its current assignee is a
----no-op (no rewrite, no event). Pass `nil`, `""`, or `vim.NIL`
----to unassign/clear.
+---RE-ASSIGNING to the current assignee re-notifies. The file is not
+---rewritten — nothing about it changed — but the event still fires, so
+---the recipient gets `reason` again. Assignment is a two-part act: it
+---records ownership AND hands over an instruction, and only the first
+---half is idempotent. Johno, 2026-09-08: an operator re-assigning a task
+---to the agent that already holds it is sending a NEW directive
+---("actually, start with the tests"), and the old same-assignee early
+---return swallowed it silently — no inbox message, no error, nothing to
+---tell the operator their instruction went nowhere.
+---
+---Clearing an already-unassigned task stays a true no-op: there is no
+---recipient to notify.
+---
+---Pass `nil`, `""`, or `vim.NIL` to unassign/clear.
 ---
 ---@param id string              task id
 ---@param assignee string?       agent name, or `nil`/`""`/`vim.NIL` to clear
@@ -1444,12 +1472,31 @@ function M.assign(id, assignee, reason)
   local old           = task.assignee
   local old_file_path = file
 
-  -- Idempotent no-op when the assignee is already what's requested.
-  -- nil-vs-"" both count as "unassigned" for this comparison.
+  -- Is the assignee already what was requested? nil-vs-"" both count as
+  -- "unassigned" for this comparison.
   local same =
         (old == assignee)
      or ((old == nil or old == "") and assignee == nil)
-  if same then return task end
+
+  if same then
+    -- No field changed, so no rewrite and no new `updated` stamp. But a
+    -- re-assignment is still a delivery: fire the event so `reason` reaches
+    -- the recipient's inbox a second time. Nothing to deliver when the task
+    -- is being cleared and was already unassigned.
+    if assignee ~= nil then
+      _publish_assignee_changed({
+        id        = id,
+        title     = task.title,
+        file_path = old_file_path,
+        from      = old,
+        to        = assignee,
+        reason    = reason,
+        at        = M._now_iso(),
+        reassigned = true,
+      })
+    end
+    return task
+  end
 
   local now = M._now_iso()
   task.assignee = assignee  -- nil clears the field
@@ -1471,21 +1518,15 @@ function M.assign(id, assignee, reason)
     string.format("assign(%s, %s)", id, tostring(assignee)))
   if not ok then return nil, "write: " .. tostring(err) end
 
-  -- Best-effort event publish so consumers (mailbox router, panel)
-  -- can react. Carry enough context for a one-shot notification
-  -- without forcing the consumer to re-read the file.
-  local ok_ev, events = pcall(require, "auto-core.events")
-  if ok_ev and events and type(events.publish) == "function" then
-    pcall(events.publish, "core.todo.assignee:changed", {
-      id        = id,
-      title     = task.title,
-      file_path = old_file_path,
-      from      = old,
-      to        = assignee,
-      reason    = reason,
-      at        = now,
-    })
-  end
+  _publish_assignee_changed({
+    id        = id,
+    title     = task.title,
+    file_path = old_file_path,
+    from      = old,
+    to        = assignee,
+    reason    = reason,
+    at        = now,
+  })
 
   return task
 end
