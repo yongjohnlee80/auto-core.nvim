@@ -9,6 +9,8 @@
 ---into auto-core. Three things DO move:
 ---
 ---  fan_out(workspace_root, opts?)  → repos[]   multi-repo discovery
+---  repo_at(dir?, root?)            → repo?     single-repo identity ("where am I")
+---  repo_label(common_dir, root, is_bare, worktree_dir?) → string
 ---  show_stat(common_dir, hash)     → string[]  cursor-preview cache
 ---  show_diff(common_dir, hash)     → string[]  full-diff cache (a merge diffs
 ---                                              against its FIRST parent)
@@ -126,12 +128,18 @@ end
 ---    common-dir is an arbitrary EXTERNAL metadata dir): the project is the
 ---    discovered worktree, NOT the metadata dir. Basename alone cannot tell
 ---    this apart from bare-at-root — `is_bare` is what distinguishes them.
+---Public because two consumers outside this module need the SAME answer
+---`fan_out` gives: auto-finder's panel heading and AutoVim's bufferline
+---offset both name "the repo I am in", and a second derivation would
+---disagree with the repos panel the moment a layout is unusual (Johno,
+---2026-09-08).
 ---@param common_dir string
----@param root string
+---@param root string?          workspace root; "" when unknown
 ---@param is_bare boolean
 ---@param worktree_dir string?   the working tree the repo was discovered through
 ---@return string
-local function _derive_label(common_dir, root, is_bare, worktree_dir)
+function M.repo_label(common_dir, root, is_bare, worktree_dir)
+  root = (type(root) == "string" and root ~= "") and root:gsub("/+$", "") or ""
   local container = vim.fn.fnamemodify(common_dir, ":t")
   local project
   if container == ".git" or container == ".bare" then
@@ -148,6 +156,45 @@ local function _derive_label(common_dir, root, is_bare, worktree_dir)
     return project:sub(#root + 2)
   end
   return vim.fn.fnamemodify(project, ":~")
+end
+
+---Identify the repository containing `dir`, WITHOUT walking a workspace.
+---
+---`fan_out` answers "which repos are under this root"; this answers "which
+---repo am I in", which is a different question with a much cheaper answer —
+---two `git rev-parse` reads instead of a bounded directory walk. Callers that
+---used `fan_out` for this had to scan a whole workspace and then match
+---common-dirs by hand.
+---
+---`branch` is the CURRENT branch of `dir`, not the repo's default: the caller
+---asking "where am I" wants the checkout it is standing in. `nil` when HEAD is
+---detached — a detached HEAD has no branch, and inventing one ("HEAD") reads
+---like a branch actually called that.
+---@param dir string?            defaults to cwd
+---@param root string?           workspace root, for label relativisation
+---@return { common_dir: string, label: string, branch: string?, is_bare: boolean, worktree: string }?
+function M.repo_at(dir, root)
+  dir = (type(dir) == "string" and dir ~= "") and dir or vim.fn.getcwd()
+  if vim.fn.isdirectory(dir) ~= 1 then return nil end
+
+  local top = vim.fn.systemlist({ "git", "-C", dir, "rev-parse", "--show-toplevel" })
+  if vim.v.shell_error ~= 0 then return nil end
+  local worktree = (top[1] or ""):gsub("/+$", "")
+  if worktree == "" then return nil end
+
+  local info = _probe(worktree)
+  if not info then return nil end
+
+  local head = vim.fn.systemlist({ "git", "-C", worktree, "symbolic-ref", "--short", "HEAD" })
+  local branch = (vim.v.shell_error == 0) and (head[1] or ""):gsub("%s+$", "") or ""
+
+  return {
+    common_dir = info.common_dir,
+    label      = M.repo_label(info.common_dir, root, info.is_bare, worktree),
+    branch     = branch ~= "" and branch or nil,
+    is_bare    = info.is_bare,
+    worktree   = worktree,
+  }
 end
 
 ---Default skip set: dirs that should never be probed for git metadata.
@@ -195,7 +242,7 @@ function M.fan_out(workspace_root, opts)
     end
     results[#results + 1] = {
       common_dir      = info.common_dir,
-      label           = _derive_label(info.common_dir, workspace_root, info.is_bare, parent_dir),
+      label           = M.repo_label(info.common_dir, workspace_root, info.is_bare, parent_dir),
       sample_worktree = info.is_working_tree and parent_dir or nil,
       is_bare         = info.is_bare,
     }
