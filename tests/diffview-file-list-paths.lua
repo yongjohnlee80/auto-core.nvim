@@ -146,6 +146,10 @@ do
     E(P, 20) == "…artist-positions.go" and W(E(P, 20)) == 20, E(P, 20))
   ok("[3] a filename cut still shows the extension",
     E(P, 12):sub(-3) == ".go", E(P, 12))
+  -- The fit contract is total: no budget, no columns. Unreachable from the two
+  -- production callers, pinned so it stays true for the third (lector r0).
+  ok("[3] a zero or negative budget yields nothing, not an ellipsis",
+    E(P, 0) == "" and E(P, -5) == "", ("%q %q"):format(E(P, 0), E(P, -5)))
 
   -- Property, over every fixture path at every budget the UI can produce: the
   -- result fits, and it is a real suffix of the real path. A renderer that
@@ -245,6 +249,24 @@ do
   vim.o.columns = 200
   local float = DV.open({ files = files, context = "hunk" })
   ok("[5] diffview opened on a wide editor", float ~= nil)
+
+  -- The LIVE pane, not just the number: `_file_rows` cuts to
+  -- `_files_pane_width()`, and this is the one assertion that says the float
+  -- actually gave the pane that many columns. Both consumers read the same
+  -- integer today, so this cannot fail by drift alone — it fails if
+  -- `float.multi` ever stops honouring a fixed `left.width` (lector r0).
+  do
+    local lw = float:winid("left")
+    local live = lw and vim.api.nvim_win_is_valid(lw) and vim.api.nvim_win_get_width(lw)
+    local want = DV._files_pane_width_for_tests(vim.o.columns)
+    ok("[5] *** the real Files window is exactly the width the rows were cut to ***",
+      live == want, ("live=%s want=%s"):format(tostring(live), tostring(want)))
+    local rows = vim.api.nvim_buf_get_lines(float:bufnr("left"), 0, -1, false)
+    local worst = 0
+    for _, l in ipairs(rows) do worst = math.max(worst, W(l)) end
+    ok("[5] and nothing in that window overflows it", worst <= (live or 0),
+      ("widest %d of %s"):format(worst, tostring(live)))
+  end
   local line, fw = footer_line(), footer_width()
   ok("[5] *** the footer ends with the current file's full path ***",
     line ~= nil and line:sub(- #LONG) == LONG, tostring(line))
@@ -284,6 +306,59 @@ do
     narrow:find("guard%.md") == nil, narrow)
   DV.close()
   vim.o.columns = 200
+end
+
+-- ── §6 exactly one footer render per open and per transition ───────
+io.stdout:write("\n[6] the footer is drawn once per open and once per transition\n")
+do
+  -- WHY THIS EXISTS. Moving the redraw into `_show` while leaving the six
+  -- post-`_show` calls in place made every open and every keypress render
+  -- TWICE — two buffer writes and two `annotate.pending()` callbacks each
+  -- (lector, PR #47 r0). §5 could not see it: the final footer text is
+  -- identical whether it was written once or twice. So this counts the WORK,
+  -- not the text.
+  --
+  -- The counter wraps `DV._render_footer`, which is what `_show` calls by
+  -- table lookup, so it intercepts the internal redraw and the call-site ones
+  -- alike. NOTE: a future render reached through a captured local reference
+  -- would be invisible here — this pins the call, not the buffer write.
+  local files = parse_all({ PATHS[1], PATHS[3] })
+  local renders, pendings = 0, 0
+  local real = DV._render_footer
+  DV._render_footer = function(...) renders = renders + 1; return real(...) end
+
+  local float = DV.open({
+    files = files,
+    context = "hunk",
+    annotate = {
+      on_add = function() end,
+      on_remove = function() end,
+      pending = function() pendings = pendings + 1; return {} end,
+    },
+  })
+  ok("[6] opened with an annotate surface", float ~= nil)
+  -- POSITIVE CONTROL: a counter that never increments would satisfy every
+  -- "not more than one" assertion below while observing nothing.
+  ok("[6] the counter observes renders at all", renders > 0, tostring(renders))
+  ok("[6] *** open draws the footer exactly once ***", renders == 1, tostring(renders))
+  -- Two pending() calls per transition, from two DIFFERENT readers: the footer
+  -- (the ● N count) and `_show`'s annotation paint. A third would mean a
+  -- duplicated render or paint has crept back in.
+  ok("[6] *** and asks the consumer for its pending set exactly twice ***",
+    pendings == 2, tostring(pendings))
+
+  for _, key in ipairs({ "f", "F", "T" }) do
+    renders, pendings = 0, 0
+    vim.api.nvim_set_current_win(float:winid("left"))
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(key, true, false, true), "x", false)
+    ok(("[6] *** `%s` draws the footer exactly once ***"):format(key),
+      renders == 1, tostring(renders))
+    ok(("[6] *** and asks for pending exactly twice ***"):format(key),
+      pendings == 2, tostring(pendings))
+  end
+
+  DV._render_footer = real
+  DV.close()
 end
 
 io.stdout:write(string.format("\n%d passed, %d failed\n", pass, fail))
