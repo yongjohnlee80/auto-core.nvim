@@ -33,6 +33,39 @@ cd "$(dirname "$0")/.." || exit 1
 
 overall=0
 
+# ── SELF-STAGE GUARD (KB todo 2026-09-02) ──────────────────────────
+# No suite may touch THIS worktree's git state. A suite that runs a git
+# WRITE (`git add`, commit, …) against the process cwd instead of a
+# fixture stages the plugin's own files — and a later bare `git commit`
+# then writes them into a release. That bit the family once (a PRs/ body
+# into a tagged auto-finder release); auto-finder v0.4.26 added this same
+# gate. auto-core is the foundation every sibling depends on, so it earns
+# the guard even though no suite currently trips it: this keeps it that way.
+#
+# The snapshot is COMPOSITE, not porcelain alone, because porcelain is blind
+# to two mutations a rogue suite can make and still end "clean" (both proven
+# with a temp-repo probe, lector PR #45 MF1):
+#   • a stage-PLUS-commit against the plugin worktree — the working tree ends
+#     clean, so porcelain is unchanged, but HEAD moved;
+#   • re-staging DIFFERENT content for an already-staged path — the status
+#     glyph (`M `/`A `) is unchanged, but the staged blob changed.
+# So it fingerprints HEAD + porcelain status + the staged blob set, all of
+# which are read-only.
+#
+# A before/after INVARIANT, not a clean-tree check — a dev on a dirty branch
+# is fine as long as the run leaves that state untouched. Skipped when this is
+# not a git checkout (a CI tarball) so the runner stays usable.
+git_state_snapshot() {
+  echo "# HEAD";   git rev-parse --verify -q HEAD 2>/dev/null || echo "(none)"
+  echo "# STATUS"; git status --porcelain 2>/dev/null
+  echo "# INDEX";  git ls-files -s 2>/dev/null
+}
+GIT_GUARD_ACTIVE=0
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  GIT_GUARD_ACTIVE=1
+  GIT_STATE_BEFORE="$(git_state_snapshot)"
+fi
+
 run_smoke() {
   echo "── smoke ─────────────────────────────────────"
   local out rc summary fail_n
@@ -158,6 +191,20 @@ run_standalone "review draft domain (auto-core.review.draft)" tests/review-draft
 run_standalone "float offsets + repo_at" tests/float-offset-and-repo-at.lua
 run_pty
 run_bench
+
+# ── SELF-STAGE GUARD: verdict ──────────────────────────────────────
+if [ "$GIT_GUARD_ACTIVE" -eq 1 ]; then
+  GIT_STATE_AFTER="$(git_state_snapshot)"
+  if [ "$GIT_STATE_BEFORE" != "$GIT_STATE_AFTER" ]; then
+    echo "── self-stage guard ──────────────────────────"
+    echo "   ✗ a suite changed THIS worktree's git state — a git write"
+    echo "     (stage, and/or commit) reached the plugin worktree instead of"
+    echo "     a fixture (KB todo 2026-09-02). Before → after (HEAD/STATUS/INDEX):"
+    diff <(printf '%s\n' "$GIT_STATE_BEFORE") \
+         <(printf '%s\n' "$GIT_STATE_AFTER") | sed 's/^/     /'
+    overall=1
+  fi
+fi
 
 echo "──────────────────────────────────────────────"
 if [ "$overall" -eq 0 ]; then
