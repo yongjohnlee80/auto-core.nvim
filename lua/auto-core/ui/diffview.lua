@@ -312,10 +312,16 @@ end
 ---the distinction the reader came for. Cutting from the right would keep the
 ---prefix every generated filename shares (`2026-09-05-…`) and drop the part
 ---that identifies the file.
+---The fit contract is TOTAL: the result never exceeds `budget`, including at
+---`budget <= 0`, where the honest answer is nothing at all. No production
+---caller can reach that (file rows have a 32-column floor and the footer gates
+---at ten), but a fit function that could return a column it was not given is
+---one a future caller has to remember to guard (lector, PR #47 r0).
 ---@param path string
 ---@param budget integer  display columns available for the path
 ---@return string
 local function _elide_path(path, budget)
+  if budget <= 0 then return "" end
   if vim.fn.strdisplaywidth(path) <= budget then return path end
 
   local from = 1
@@ -534,11 +540,18 @@ local function _show(idx)
     marks.line(left, ns, sel_line - 1, "AutoCoreSectionActive")
   end
 
-  -- The footer names the file the panes are showing, so it is redrawn HERE and
-  -- not only at the call sites that remembered to. `_show` has five of them —
-  -- f/F, the file-list cursor, the context toggle, open, and the annotate
-  -- paths — and a footer wired per call site is a footer that eventually names
-  -- the previous file on whichever one is added next.
+  -- `_show` is the SOLE owner of the footer redraw. The footer names the file
+  -- the panes are showing and counts the pending annotations, so every one of
+  -- its inputs changes here and nowhere else — a footer wired per call site is
+  -- a footer that eventually names the previous file on whichever call site is
+  -- added next (the file-list cursor autocmd already had no render of its own).
+  --
+  -- NOTE: adding this while LEAVING the six post-`_show` calls in place made
+  -- every open and every transition render TWICE — two buffer writes and two
+  -- `annotate.pending()` callbacks per keypress, measured 2/2/2 for open, `f`
+  -- and `T` (lector, PR #47 r0; the suite asserted final text, which is
+  -- identical either way, so it observed nothing). Do not re-add one: if a new
+  -- path needs the footer refreshed, it either already calls `_show` or should.
   M._render_footer()
 end
 
@@ -917,7 +930,9 @@ function M.open(opts)
     end
   end
 
-  M._render_footer()
+  -- No footer render here: the `_show(start_idx)` at the end of this function
+  -- draws it, and `#files == 0` was already refused above, so that `_show`
+  -- always finds a file and always reaches the render.
 
   -- Follow the cursor in the file list, the same wiring autodb's history modal
   -- uses. One autocmd on the left buffer, disposed with the float.
@@ -1039,7 +1054,6 @@ function M.open(opts)
             local target_line = (saved and saved.lnum) or 1
             pcall(vim.api.nvim_win_set_cursor, tw, { math.min(math.max(1, target_line), last), 0 })
           end
-          M._render_footer()
         end
       end
 
@@ -1081,7 +1095,6 @@ function M.open(opts)
             local target_line = (saved and saved.lnum) or 1
             pcall(vim.api.nvim_win_set_cursor, tw, { math.min(math.max(1, target_line), last), 0 })
           end
-          M._render_footer()
         end
       end
 
@@ -1090,8 +1103,9 @@ function M.open(opts)
         _state.context = (_state.context == "full") and "hunk" or "full"
         local cur_w = vim.api.nvim_get_current_win()
         local cur_c = (cur_w and vim.api.nvim_win_is_valid(cur_w)) and vim.api.nvim_win_get_cursor(cur_w) or { 1, 0 }
+        -- `_show` redraws the footer, which is what carries the new context
+        -- label. No second call here: see the note on `_show`.
         _show(_state.idx)
-        M._render_footer()
         if cur_w and vim.api.nvim_win_is_valid(cur_w) then
           local b_cur = vim.api.nvim_win_get_buf(cur_w)
           local last = vim.api.nvim_buf_line_count(b_cur)
@@ -1140,8 +1154,9 @@ function M.open(opts)
               vim.notify("diffview: the consumer refused the annotation", vim.log.levels.ERROR)
               return
             end
+            -- `_show` repaints the annotation AND redraws the footer, whose
+            -- pending count is what just changed.
             _show(_state.idx)
-            M._render_footer()
           end)
         end
         -- TWO mappings, not one shared across modes: the mode is the intent.
@@ -1160,8 +1175,9 @@ function M.open(opts)
               return
             end
             pcall(ann.on_remove, anchor)
+            -- As with `c`: the repaint and the footer's pending count both come
+            -- from the one `_show`.
             _show(_state.idx)
-            M._render_footer()
           end, { buffer = b, silent = true, nowait = true, desc = "auto-core.diffview: drop pending annotation" })
         end
       end
@@ -1186,10 +1202,7 @@ function M.open(opts)
             -- at press time and the file changes under j/k: an open-time capture
             -- would be stale. `o open this file` is the motivating case.
             km.fn(M.current_file())
-            if M.is_open() then
-              _show(_state.idx)
-              M._render_footer()
-            end
+            if M.is_open() then _show(_state.idx) end
           end, { buffer = b, silent = true, nowait = true,
                  desc = "auto-core.diffview: " .. (km.desc or km.key) })
         end
