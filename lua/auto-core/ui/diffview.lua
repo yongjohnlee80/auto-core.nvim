@@ -45,6 +45,45 @@ local M = {}
 ---§4's stated risk).
 M.MIN_COLUMNS = 100
 
+---FILES_PANE is how wide the left file list opens: `pct` of the float's inner
+---width, clamped to [`min`, `max`].
+---
+---A RANGE rather than the single fixed 34 it was, because the list's job is to
+---answer "what KIND of file am I looking at — docs, test, or implementation?"
+---and that answer lives in the path, which is the one thing a fixed narrow
+---column cannot show (Johno, 2026-09-10). 32 is the floor a small terminal
+---still gets; a wide one spends up to 38 on the list, which is where
+---`…/dao/name.go` starts fitting instead of `…name.go`. The ceiling is low on
+---purpose: every column here is one the two diff panes do not get.
+---
+---NOTE: resolved ONCE per open, from `vim.o.columns`, and handed to both the
+---pane spec and `_file_rows`. That is what keeps the elision honest — the
+---budget the rows are cut to and the pane they are cut for are the same number,
+---by construction, not by two agreeing guesses. `float.multi` takes a fixed
+---pane width, so a VimResized re-lays the float out at the width it opened
+---with; the rows stay exactly as wide as their pane either way.
+local FILES_PANE = { min = 32, max = 38, pct = 0.20 }
+
+---OUTER_WIDTH_PCT is the share of the editor this float occupies. Declared once
+---because two things read it: the `outer` spec `M.open` hands to `float.multi`,
+---and `_files_pane_width`, which has to take its percentage of the width the
+---panes really divide up. Two literals would let the pane budget drift away
+---from the float it is budgeting for.
+local OUTER_WIDTH_PCT = 0.94
+
+---ELLIPSIS marks an elision, in both the file list and the footer's path. One
+---character wide, so it costs a column and buys arbitrarily many.
+local ELLIPSIS = "…"
+
+---FOOTER_PATH_MIN_COLUMNS is the narrowest right-hand gutter the footer will
+---put a path into.
+---
+---Below it the path is DROPPED, not squeezed: the hints are the footer's
+---contract and the path is an extra, so a path that would have to shorten to
+---`…o` (which names nothing) yields its columns back to the hints rather than
+---occupying them uselessly. 10 columns hold `…/name.go`.
+local FOOTER_PATH_MIN_COLUMNS = 10
+
 local NAME = "auto-core-diffview"
 
 ---SEVERITIES is the normative order for the composer's picker.
@@ -241,6 +280,78 @@ local FILE_KIND_MARK = {
   copied    = "R",
 }
 
+---_files_pane_width resolves the Files pane width for an editor of `cols`
+---columns, per `FILES_PANE`.
+---
+---Mirrors `float.multi`'s own arithmetic (`outer = floor(cols * width_pct)`,
+---`inner = outer - 2`, the 2 being the border), so the percentage is taken of
+---the width the panes actually divide up rather than of the whole screen.
+---@param cols integer?  defaults to `vim.o.columns`
+---@return integer
+local function _files_pane_width(cols)
+  local inner = math.floor((cols or vim.o.columns) * OUTER_WIDTH_PCT) - 2
+  return math.max(FILES_PANE.min,
+    math.min(FILES_PANE.max, math.floor(inner * FILES_PANE.pct)))
+end
+
+---_elide_path fits `path` into `budget` display columns, keeping its END.
+---
+---A path in a file list is read from the right: the basename says WHAT the file
+---is, and the directories just above it say which LAYER it belongs to —
+---`docs/`, `tests/`, `internal/dao/` — which is the question the reader is
+---actually asking the list (Johno, 2026-09-10). The leading segments are the
+---least informative columns on the row: in a single-repo diff most rows share
+---them. So they are what goes.
+---
+---The cut lands on a `/` boundary whenever one fits, which leaves a real path
+---suffix (`…/dao/artist.go`) instead of a segment sliced mid-word. Boundaries
+---are tried left to right, so the result is the LONGEST fitting suffix.
+---
+---When not even `…/<basename>` fits, the basename itself is cut from the left,
+---keeping its tail: a truncated tail still tells a `.go` from a `.md`, which is
+---the distinction the reader came for. Cutting from the right would keep the
+---prefix every generated filename shares (`2026-09-05-…`) and drop the part
+---that identifies the file.
+---@param path string
+---@param budget integer  display columns available for the path
+---@return string
+local function _elide_path(path, budget)
+  if vim.fn.strdisplaywidth(path) <= budget then return path end
+
+  local from = 1
+  while true do
+    local slash = path:find("/", from, true)
+    if not slash then break end
+    -- `path:sub(slash)` keeps the separator, so the ellipsis reads as a
+    -- swallowed directory prefix and not as part of the next segment.
+    local candidate = ELLIPSIS .. path:sub(slash)
+    if vim.fn.strdisplaywidth(candidate) <= budget then return candidate end
+    from = slash + 1
+  end
+
+  -- Character-wise, not byte-wise: a path can hold multibyte characters, and
+  -- `sub(2)` on one would leave a partial sequence the pane draws as garbage.
+  local tail = path
+  while tail ~= "" and vim.fn.strdisplaywidth(ELLIPSIS .. tail) > budget do
+    tail = vim.fn.strcharpart(tail, 1)
+  end
+  return ELLIPSIS .. tail
+end
+
+---_truncate fits prose into `budget` columns by cutting the END, marking the
+---cut. Prose reads left to right, so the opposite of `_elide_path`.
+---@param text string
+---@param budget integer
+---@return string
+local function _truncate(text, budget)
+  if vim.fn.strdisplaywidth(text) <= budget then return text end
+  local head = text
+  while head ~= "" and vim.fn.strdisplaywidth(head .. ELLIPSIS) > budget do
+    head = vim.fn.strcharpart(head, 0, vim.fn.strchars(head) - 1)
+  end
+  return head .. ELLIPSIS
+end
+
 ---_file_rows renders the left column: `<mark> <path>  +N -N`, matching the
 ---repos panel's file rows (Johno, 2026-09-03).
 ---
@@ -250,9 +361,27 @@ local FILE_KIND_MARK = {
 ---status colour, while the `+N -N` counts are left unpainted so they render in
 ---the pane's default (white) foreground and read the same whatever the change
 ---kind. So each hl entry carries `col`/`end_col` for the painter to honour.
+---
+---EVERY ROW FITS `width`. It did not before: the full path was written out and
+---the pane clipped whatever overflowed, which cost the reader the end of the
+---path — the filename — on exactly the rows where the path was interesting
+---(`M internal/dao/gold-artist-pos` and nothing more). Clipping takes from the
+---right; this takes from the left, where the redundant columns are.
+---
+---The `+N -N` counts are appended ONLY when the whole row still fits with them.
+---They lose the contest with the path, deliberately: a long path needs those
+---columns to show a directory at all, and the churn is legible in the diff
+---panes themselves. Appending them unconditionally would have put them half
+---off the edge (`+12 -`), which reads as a wrong number rather than a missing
+---one — so a row either carries its counts whole or carries none.
 ---@param files table[]
----@return string[] lines, { lnum: integer, hl: string, col: integer, end_col: integer }[] hls
-local function _file_rows(files)
+---@param width integer?  Files pane width; defaults to `_files_pane_width()`
+---@return string[] lines
+---@return { lnum: integer, hl: string, col: integer?, end_col: integer? }[] hls
+---@return table<integer, integer> line_to_idx  1-based buffer line → file index
+---@return table<integer, integer> idx_to_line  file index → 1-based buffer line
+local function _file_rows(files, width)
+  width = width or _files_pane_width()
   local lines, hls = {}, {}
   local line_to_idx = {}
   local idx_to_line = {}
@@ -261,7 +390,12 @@ local function _file_rows(files)
   for idx, f in ipairs(files) do
     if f.commit_short and f.commit_short ~= last_commit then
       last_commit = f.commit_short
-      local hdr = string.format("▼ Commit %s %s", f.commit_short, f.commit_subject or "")
+      -- The `▼ Commit <short>` stem is never cut — it is what identifies the
+      -- group — so only the subject yields, and it says so with an ellipsis
+      -- rather than stopping mid-word and looking like the whole subject.
+      local stem = string.format("▼ Commit %s ", f.commit_short)
+      local hdr = stem .. _truncate(f.commit_subject or "",
+        width - vim.fn.strdisplaywidth(stem))
       lines[#lines + 1] = hdr
       local lnum = #lines - 1
       hls[#hls + 1] = { lnum = lnum, hl = "AutoCoreSectionActive" }
@@ -270,8 +404,11 @@ local function _file_rows(files)
 
     local st = gitdiff.stats(f)
     local indent = f.commit_short and "    " or ""
-    local head = indent .. (FILE_KIND_MARK[f.kind] or "?") .. " " .. f.path
-    lines[#lines + 1] = string.format("%s  +%d -%d", head, st.added, st.removed)
+    local stem = indent .. (FILE_KIND_MARK[f.kind] or "?") .. " "
+    local head = stem .. _elide_path(f.path, width - vim.fn.strdisplaywidth(stem))
+    local counts = string.format("  +%d -%d", st.added, st.removed)
+    lines[#lines + 1] = (vim.fn.strdisplaywidth(head .. counts) <= width)
+      and (head .. counts) or head
     local hl = FILE_KIND_HL[f.kind]
     if hl then
       hls[#hls + 1] = { lnum = #lines - 1, hl = hl, col = #indent, end_col = #head }
@@ -396,6 +533,13 @@ local function _show(idx)
     local sel_line = (_state.idx_to_line and _state.idx_to_line[idx]) or idx
     marks.line(left, ns, sel_line - 1, "AutoCoreSectionActive")
   end
+
+  -- The footer names the file the panes are showing, so it is redrawn HERE and
+  -- not only at the call sites that remembered to. `_show` has five of them —
+  -- f/F, the file-list cursor, the context toggle, open, and the annotate
+  -- paths — and a footer wired per call site is a footer that eventually names
+  -- the previous file on whichever one is added next.
+  M._render_footer()
 end
 
 ---_pending_for returns the consumer's unsaved annotations for one file,
@@ -648,10 +792,15 @@ function M.open(opts)
   -- leaking. The handles have to be held independently of the float.
   local content_bufs = {}
 
+  -- ONE resolution, two consumers: the pane spec below and `_file_rows` further
+  -- down. See `FILES_PANE` — the rows are only guaranteed to fit because both
+  -- read the same number.
+  local files_width = _files_pane_width()
+
   local float = multi.new({
     name = NAME,
     outer = {
-      width_pct = 0.94, height_pct = 0.88,
+      width_pct = OUTER_WIDTH_PCT, height_pct = 0.88,
       title = opts.title or " diff ",
       -- Forwarded, not decided here. WHICH panel this is — and therefore
       -- which way it should sit off centre so it is tellable apart from a
@@ -662,7 +811,7 @@ function M.open(opts)
       col_offset = opts.col_offset,
     },
     panes = {
-      left = { width = 34, title = " Files ", cursorline = true },
+      left = { width = files_width, title = " Files ", cursorline = true },
       middle = { title = " a/ " },
       preview = { width = 0.5, min_width = 30, min_middle = 30, title = " b/ " },
       footer = { height = 1 },
@@ -708,7 +857,7 @@ function M.open(opts)
     end,
   })
 
-  local flines, fhls, line_to_idx, idx_to_line = _file_rows(files)
+  local flines, fhls, line_to_idx, idx_to_line = _file_rows(files, files_width)
   local initial_positions = (opts.initial and opts.initial.file_positions) or {}
   local initial_pane = (opts.initial and (opts.initial.pane or opts.initial.focused_pane)) or "preview"
   local initial_lnum = (opts.initial and (opts.initial.lnum or (opts.initial.file_positions and (opts.initial.active_file or opts.initial.path) and opts.initial.file_positions[opts.initial.active_file or opts.initial.path] and opts.initial.file_positions[opts.initial.active_file or opts.initial.path].lnum))) or 1
@@ -1088,10 +1237,23 @@ function M.open(opts)
   return float, nil
 end
 
----_render_footer redraws the hint line, including the pending count.
+---_render_footer redraws the hint line, including the pending count and the
+---current file's path.
 ---
 ---An unwritten draft that is invisible is one the reader can lose without ever
 ---being told, so the count lives on the surface that is always on screen.
+---
+---The PATH is right-aligned in the same line (Johno, 2026-09-10). It is the
+---full worktree-relative path — the Files pane can only afford a suffix, and a
+---reader who needs to know which of two same-named files this is has to be able
+---to read the whole thing somewhere. The footer is where the room is: the hints
+---occupy a fixed left run and the rest of a near-full-width line is empty.
+---
+---It is a TENANT of that empty space, never a claimant on the hints: the hints
+---are composed and shed exactly as they were, and the path is fitted into
+---whatever is left over — elided from the left, or dropped entirely below
+---`FOOTER_PATH_MIN_COLUMNS`. So no key hint can be pushed off the line by a
+---long path, which is the one thing this must not do.
 function M._render_footer()
   if not _state then return end
   local foot = _state.float:bufnr("footer")
@@ -1173,6 +1335,23 @@ function M._render_footer()
     line = body .. "…" .. tail
   end
 
+  -- The path goes in LAST, into what the hints did not use. `width` can be
+  -- `math.huge` when the pane is gone (nothing to draw into), so the leftover
+  -- is only a real column count while the window is valid.
+  local f = _state.files[_state.idx]
+  local path = f and (f.new_path or f.path or f.old_path)
+  if path and width ~= math.huge then
+    -- Two columns of gap so the path cannot abut the last hint and read as
+    -- part of it, and one at the right so it is not flush against the frame.
+    local leftover = width - vim.fn.strdisplaywidth(line) - 3
+    if leftover >= FOOTER_PATH_MIN_COLUMNS then
+      local shown = _elide_path(path, leftover)
+      local pad = width - vim.fn.strdisplaywidth(line)
+        - vim.fn.strdisplaywidth(shown) - 1
+      line = line .. string.rep(" ", math.max(2, pad)) .. shown
+    end
+  end
+
   vim.bo[foot].modifiable = true
   vim.api.nvim_buf_set_lines(foot, 0, -1, false, { line })
   vim.bo[foot].modifiable = false
@@ -1248,8 +1427,19 @@ function M.last_position()
 end
 
 ---_file_rows_for_tests exposes the left-pane renderer so a suite can assert the
----per-file status colour without a window.
-function M._file_rows_for_tests(files) return _file_rows(files) end
+---per-file status colour, and the row/pane width contract, without a window.
+---@param files table[]
+---@param width integer?  pane width to render for; defaults to the live one
+function M._file_rows_for_tests(files, width) return _file_rows(files, width) end
+
+---_files_pane_width_for_tests resolves the Files pane width for an editor of
+---`cols` columns, so a suite can pin the 32→38 ramp without resizing anything.
+function M._files_pane_width_for_tests(cols) return _files_pane_width(cols) end
+
+---_elide_path_for_tests exposes the path fitter. A seam because the interesting
+---cases — the `/` boundary, the basename that does not fit, the multibyte cut —
+---are properties of the string, not of any window.
+function M._elide_path_for_tests(path, budget) return _elide_path(path, budget) end
 
 ---_anchor_for_tests resolves an anchor exactly as a keypress would.
 ---

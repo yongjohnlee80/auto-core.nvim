@@ -249,9 +249,17 @@ do
   ok("multi-commit diffview opened", float ~= nil, err)
   local left_buf = float:bufnr("left")
   local lines = vim.api.nvim_buf_get_lines(left_buf, 0, -1, false)
-  ok("left pane has commit 1 header", lines[1]:find("▼ Commit 931d6c5 first commit subject", 1, true) ~= nil, lines[1])
+  -- The header now FITS the pane (32 columns at this editor width), so a
+  -- subject longer than the room left after `▼ Commit <sha> ` is cut with an
+  -- ellipsis instead of being clipped by the window. What this section is about
+  -- is the GROUPING — a header per commit, files indented under it — so it
+  -- asserts the stem and the subject's opening words, and
+  -- tests/diffview-file-list-paths.lua §4b owns the fitting contract.
+  ok("left pane has commit 1 header",
+    lines[1]:find("▼ Commit 931d6c5 first commit", 1, true) ~= nil, lines[1])
   ok("left pane indents c1_file", lines[2]:find("c1_file.lua", 1, true) ~= nil, lines[2])
-  ok("left pane has commit 2 header", lines[3]:find("▼ Commit 8a02cc8 second commit subject", 1, true) ~= nil, lines[3])
+  ok("left pane has commit 2 header",
+    lines[3]:find("▼ Commit 8a02cc8 second commit", 1, true) ~= nil, lines[3])
   ok("left pane indents c2_file", lines[4]:find("c2_file.lua", 1, true) ~= nil, lines[4])
   DV.close()
 end
