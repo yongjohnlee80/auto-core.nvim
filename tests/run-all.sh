@@ -42,14 +42,28 @@ overall=0
 # gate. auto-core is the foundation every sibling depends on, so it earns
 # the guard even though no suite currently trips it: this keeps it that way.
 #
-# A before/after INVARIANT, not a clean-tree check — a dev on a dirty
-# branch is fine as long as the run leaves that status untouched. Skipped
-# when this is not a git checkout (a CI tarball) so the runner stays usable.
-git_status_snapshot() { git status --porcelain 2>/dev/null; }
+# The snapshot is COMPOSITE, not porcelain alone, because porcelain is blind
+# to two mutations a rogue suite can make and still end "clean" (both proven
+# with a temp-repo probe, lector PR #45 MF1):
+#   • a stage-PLUS-commit against the plugin worktree — the working tree ends
+#     clean, so porcelain is unchanged, but HEAD moved;
+#   • re-staging DIFFERENT content for an already-staged path — the status
+#     glyph (`M `/`A `) is unchanged, but the staged blob changed.
+# So it fingerprints HEAD + porcelain status + the staged blob set, all of
+# which are read-only.
+#
+# A before/after INVARIANT, not a clean-tree check — a dev on a dirty branch
+# is fine as long as the run leaves that state untouched. Skipped when this is
+# not a git checkout (a CI tarball) so the runner stays usable.
+git_state_snapshot() {
+  echo "# HEAD";   git rev-parse --verify -q HEAD 2>/dev/null || echo "(none)"
+  echo "# STATUS"; git status --porcelain 2>/dev/null
+  echo "# INDEX";  git ls-files -s 2>/dev/null
+}
 GIT_GUARD_ACTIVE=0
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   GIT_GUARD_ACTIVE=1
-  GIT_STATUS_BEFORE="$(git_status_snapshot)"
+  GIT_STATE_BEFORE="$(git_state_snapshot)"
 fi
 
 run_smoke() {
@@ -180,14 +194,14 @@ run_bench
 
 # ── SELF-STAGE GUARD: verdict ──────────────────────────────────────
 if [ "$GIT_GUARD_ACTIVE" -eq 1 ]; then
-  GIT_STATUS_AFTER="$(git_status_snapshot)"
-  if [ "$GIT_STATUS_BEFORE" != "$GIT_STATUS_AFTER" ]; then
+  GIT_STATE_AFTER="$(git_state_snapshot)"
+  if [ "$GIT_STATE_BEFORE" != "$GIT_STATE_AFTER" ]; then
     echo "── self-stage guard ──────────────────────────"
-    echo "   ✗ a suite changed THIS worktree's git status — a git write"
-    echo "     reached the plugin worktree instead of a fixture (KB todo"
-    echo "     2026-09-02). Before → after:"
-    diff <(printf '%s\n' "$GIT_STATUS_BEFORE") \
-         <(printf '%s\n' "$GIT_STATUS_AFTER") | sed 's/^/     /'
+    echo "   ✗ a suite changed THIS worktree's git state — a git write"
+    echo "     (stage, and/or commit) reached the plugin worktree instead of"
+    echo "     a fixture (KB todo 2026-09-02). Before → after (HEAD/STATUS/INDEX):"
+    diff <(printf '%s\n' "$GIT_STATE_BEFORE") \
+         <(printf '%s\n' "$GIT_STATE_AFTER") | sed 's/^/     /'
     overall=1
   fi
 fi
