@@ -33,6 +33,25 @@ cd "$(dirname "$0")/.." || exit 1
 
 overall=0
 
+# ── SELF-STAGE GUARD (KB todo 2026-09-02) ──────────────────────────
+# No suite may touch THIS worktree's git state. A suite that runs a git
+# WRITE (`git add`, commit, …) against the process cwd instead of a
+# fixture stages the plugin's own files — and a later bare `git commit`
+# then writes them into a release. That bit the family once (a PRs/ body
+# into a tagged auto-finder release); auto-finder v0.4.26 added this same
+# gate. auto-core is the foundation every sibling depends on, so it earns
+# the guard even though no suite currently trips it: this keeps it that way.
+#
+# A before/after INVARIANT, not a clean-tree check — a dev on a dirty
+# branch is fine as long as the run leaves that status untouched. Skipped
+# when this is not a git checkout (a CI tarball) so the runner stays usable.
+git_status_snapshot() { git status --porcelain 2>/dev/null; }
+GIT_GUARD_ACTIVE=0
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  GIT_GUARD_ACTIVE=1
+  GIT_STATUS_BEFORE="$(git_status_snapshot)"
+fi
+
 run_smoke() {
   echo "── smoke ─────────────────────────────────────"
   local out rc summary fail_n
@@ -158,6 +177,20 @@ run_standalone "review draft domain (auto-core.review.draft)" tests/review-draft
 run_standalone "float offsets + repo_at" tests/float-offset-and-repo-at.lua
 run_pty
 run_bench
+
+# ── SELF-STAGE GUARD: verdict ──────────────────────────────────────
+if [ "$GIT_GUARD_ACTIVE" -eq 1 ]; then
+  GIT_STATUS_AFTER="$(git_status_snapshot)"
+  if [ "$GIT_STATUS_BEFORE" != "$GIT_STATUS_AFTER" ]; then
+    echo "── self-stage guard ──────────────────────────"
+    echo "   ✗ a suite changed THIS worktree's git status — a git write"
+    echo "     reached the plugin worktree instead of a fixture (KB todo"
+    echo "     2026-09-02). Before → after:"
+    diff <(printf '%s\n' "$GIT_STATUS_BEFORE") \
+         <(printf '%s\n' "$GIT_STATUS_AFTER") | sed 's/^/     /'
+    overall=1
+  fi
+fi
 
 echo "──────────────────────────────────────────────"
 if [ "$overall" -eq 0 ]; then
