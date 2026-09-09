@@ -42,21 +42,25 @@ overall=0
 # gate. auto-core is the foundation every sibling depends on, so it earns
 # the guard even though no suite currently trips it: this keeps it that way.
 #
-# The snapshot is COMPOSITE, not porcelain alone, because porcelain is blind
-# to two mutations a rogue suite can make and still end "clean" (both proven
-# with a temp-repo probe, lector PR #45 MF1):
+# The snapshot is COMPOSITE, not porcelain alone, because porcelain is blind to
+# three mutations a rogue suite can make and still leave porcelain unchanged
+# (the first two proven with a temp-repo probe, lector PR #45 MF1; the third is
+# lector's PR #45 non-blocking note, folded here):
 #   • a stage-PLUS-commit against the plugin worktree — the working tree ends
-#     clean, so porcelain is unchanged, but HEAD moved;
+#     clean, so porcelain is unchanged, but the HEAD commit moved;
 #   • re-staging DIFFERENT content for an already-staged path — the status
-#     glyph (`M `/`A `) is unchanged, but the staged blob changed.
-# So it fingerprints HEAD + porcelain status + the staged blob set, all of
-# which are read-only.
+#     glyph (`M `/`A `) is unchanged, but the staged blob changed;
+#   • switching the checked-out BRANCH to another ref at the same commit — the
+#     commit and tree are identical, but the symbolic HEAD ref changed.
+# So it fingerprints the HEAD commit + the symbolic branch + porcelain status +
+# the staged blob set, all of which are read-only.
 #
 # A before/after INVARIANT, not a clean-tree check — a dev on a dirty branch
 # is fine as long as the run leaves that state untouched. Skipped when this is
 # not a git checkout (a CI tarball) so the runner stays usable.
 git_state_snapshot() {
-  echo "# HEAD";   git rev-parse --verify -q HEAD 2>/dev/null || echo "(none)"
+  echo "# HEAD";   git rev-parse --verify -q HEAD 2>/dev/null    || echo "(none)"
+  echo "# BRANCH"; git symbolic-ref -q HEAD 2>/dev/null          || echo "(detached)"
   echo "# STATUS"; git status --porcelain 2>/dev/null
   echo "# INDEX";  git ls-files -s 2>/dev/null
 }
