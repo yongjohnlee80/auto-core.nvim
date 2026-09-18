@@ -523,6 +523,28 @@ local function _show(idx)
     end
   end
 
+  -- Hunk boundary rows for `]h` / `[h`, recorded per render because a context
+  -- toggle moves every row: `sides()` is what knows where a file line landed
+  -- once padding is applied, so the rows are derived from it rather than from
+  -- the hunk's file offsets directly.
+  --
+  -- Resolving through `row_for` rather than scanning for `gap` markers is what
+  -- makes this work in BOTH context modes: `gap` rows exist only in "hunk"
+  -- context, so a gap scan silently does nothing in "full" — which is exactly
+  -- the mode `X` reaches.
+  local hunk_rows = {}
+  for _, h in ipairs(f.hunks or {}) do
+    local r = h.new_start and gitdiff.row_for(sides.after, h.new_start)
+    if r == nil and h.old_start then
+      -- A pure deletion has no line on the b/ side. The columns are
+      -- row-aligned by construction, so the a/ side answers for both.
+      r = gitdiff.row_for(sides.before, h.old_start)
+    end
+    if r then hunk_rows[#hunk_rows + 1] = r + 1 end -- 0-based row -> cursor row
+  end
+  table.sort(hunk_rows)
+  _state.hunk_rows = hunk_rows
+
   -- Binary files have no sides; say so rather than showing two empty panes.
   if f.binary and before_buf and vim.api.nvim_buf_is_valid(before_buf) then
     vim.bo[before_buf].modifiable = true
@@ -573,6 +595,63 @@ function M._pending_for(f)
     end
   end
   return out
+end
+
+---_sync_scroll mirrors one content pane's topline onto the other.
+---
+---NOT `scrollbind`. That option is not a two-window relation: Neovim
+---synchronises every scroll-bound window in the TAB PAGE, and native diff mode
+---sets it automatically — so binding these panes would enrol them in whatever
+---group the reader's own `:diffsplit` already formed, dragging unrelated
+---windows when the review scrolls and being dragged by them in turn. Measured
+---rather than assumed: a window bound beforehand moved from topline 1 to 120
+---when one of two freshly-bound panes was scrolled.
+---
+---Mirroring is correct here because the columns are row-aligned by
+---construction — `sides()` pads the shorter side of an unequal replacement
+---block and inserts hunk gaps at the same index in both, so `#before ==
+---`#after` for every file. Matching toplines therefore lines the code up
+---rather than approximating it.
+---@param src string the pane that moved: "middle" or "preview"
+function M._sync_scroll(src)
+  if not _state then return end
+  if _state.syncing then return end
+  if src ~= "middle" and src ~= "preview" then return end
+  local dst = (src == "middle") and "preview" or "middle"
+  local sw = _state.float:winid(src)
+  local dw = _state.float:winid(dst)
+  if not (sw and dw and vim.api.nvim_win_is_valid(sw)
+      and vim.api.nvim_win_is_valid(dw)) then
+    return
+  end
+  -- Reentrancy guard: the write below scrolls `dst`, which fires WinScrolled
+  -- again. Without the flag the panes trade events instead of settling.
+  _state.syncing = true
+  pcall(function()
+    local top = vim.api.nvim_win_call(sw, function() return vim.fn.line("w0") end)
+    vim.api.nvim_win_call(dw, function()
+      -- A topline alone is not enough. Vim keeps the cursor inside its
+      -- window, so `winrestview` with a top far from the destination's cursor
+      -- is undone the moment it is applied — the symptom being a pane that
+      -- never moves while the other scrolls freely.
+      --
+      -- The cursor is therefore dragged only as far as it must be: one already
+      -- inside the mirrored viewport is left exactly where the reader put it.
+      -- This is deliberately not cursor mirroring — the two cursors are not
+      -- kept equal, they are merely kept legal.
+      local h = vim.api.nvim_win_get_height(dw)
+      local buf = vim.api.nvim_win_get_buf(dw)
+      local last = vim.api.nvim_buf_line_count(buf)
+      local cur = vim.api.nvim_win_get_cursor(dw)[1]
+      local lo = math.max(1, math.min(top, last))
+      local hi = math.max(lo, math.min(top + h - 1, last))
+      if cur < lo or cur > hi then
+        pcall(vim.api.nvim_win_set_cursor, dw, { lo, 0 })
+      end
+      vim.fn.winrestview({ topline = top })
+    end)
+  end)
+  _state.syncing = false
 end
 
 ---_side_for maps the focused pane onto a diff column and a GitHub side.
@@ -864,6 +943,12 @@ function M.open(opts)
           context = _state.context or "hunk",
         }
       end
+      -- The scroll synchroniser is window-matched, so it does not die with the
+      -- buffers the way the CursorMoved autocmds do. An autocommand outliving
+      -- its panel would keep firing against windows this float no longer owns.
+      if _state.sync_group then
+        pcall(vim.api.nvim_del_augroup_by_id, _state.sync_group)
+      end
       local pos = M._last_position
       _state = nil
       if opts.on_close then pcall(opts.on_close, pos) end
@@ -949,6 +1034,25 @@ function M.open(opts)
       end,
     })
   end
+
+  -- Keep the two content panes on the same topline while the reader scrolls.
+  --
+  -- An augroup rather than the buffer-local autocmds above, because
+  -- `WinScrolled` is matched against a WINDOW, not a buffer — so this one has
+  -- to be disposed explicitly in `on_close` instead of dying with the buffer.
+  --
+  -- `WinScrolled` only fires when a UI is attached: with no UI there is no
+  -- redraw to trigger it, so a headless assertion on this path passes while
+  -- observing nothing. Its cell therefore lives in `tests/ui/`, under a pty.
+  _state.sync_group = vim.api.nvim_create_augroup(
+    "AutoCoreDiffviewScrollSync", { clear = true })
+  vim.api.nvim_create_autocmd("WinScrolled", {
+    group = _state.sync_group,
+    callback = function()
+      if not _state then return true end
+      M._sync_scroll(_focused_pane())
+    end,
+  })
 
   -- Remember where the reader is, so `last_position()` can hand it back after a
   -- close (requirement 6: navigate away to check a file, then recall the diff).
@@ -1113,6 +1217,58 @@ function M.open(opts)
         end
       end
 
+      -- `]h` / `[h` move between hunks WITHIN the shown file — the motion that
+      -- was missing, leaving `X` (whole-file context) as the only way to reach
+      -- a change further down.
+      --
+      -- Bound on every pane, like `f`/`F`/`T` and unlike `c`/`x`/`s`: this is
+      -- navigation, not authoring, so it means the same thing from the file
+      -- list as from a content pane. `]c`/`[c` are deliberately NOT claimed —
+      -- they are Vim's native diff-hunk motions, dormant here only because
+      -- this renderer never sets 'diff', and binding them would read as native
+      -- behaviour while being an approximation of it.
+      local function _jump_hunk(dir)
+        if not _state then return end
+        local rows = _state.hunk_rows or {}
+        if #rows == 0 then
+          vim.notify("auto-core.diffview: no hunks in this file", vim.log.levels.INFO)
+          return
+        end
+        -- From the file list there is no cursor in a content pane, so fall back
+        -- to the pane the reader last used: `]h` then means the same thing from
+        -- all three panes rather than silently doing nothing in one.
+        local pane = _focused_pane()
+        if pane ~= "middle" and pane ~= "preview" then
+          pane = (_state.cursor and _state.cursor.pane) or "preview"
+        end
+        local w = _state.float:winid(pane)
+        if not (w and vim.api.nvim_win_is_valid(w)) then return end
+        local cur = vim.api.nvim_win_get_cursor(w)[1]
+
+        local target
+        if dir > 0 then
+          for _, r in ipairs(rows) do
+            if r > cur then target = r break end
+          end
+        else
+          for i = #rows, 1, -1 do
+            if rows[i] < cur then target = rows[i] break end
+          end
+        end
+        if not target then
+          -- Defined and stated, rather than a keypress that appears to do
+          -- nothing at the ends of the file.
+          vim.notify(dir > 0 and "auto-core.diffview: last hunk"
+            or "auto-core.diffview: first hunk", vim.log.levels.INFO)
+          return
+        end
+        local last = vim.api.nvim_buf_line_count(vim.api.nvim_win_get_buf(w))
+        pcall(vim.api.nvim_win_set_cursor, w, { math.min(target, last), 0 })
+        -- The other pane follows through the scroll synchroniser rather than a
+        -- second cursor write: one mechanism keeps the panes aligned.
+        M._sync_scroll(pane)
+      end
+
       -- One handler, several lhs. `f`/`F` and `T` are what the footer
       -- advertises; `]f`/`[f` and `X` remain for muscle memory.
       for _, m in ipairs({
@@ -1122,6 +1278,8 @@ function M.open(opts)
         { "[f", _prev_file,      "prev file" },
         { "T",  _toggle_context, "toggle context" },
         { "X",  _toggle_context, "toggle context" },
+        { "]h", function() _jump_hunk(1) end,  "next hunk" },
+        { "[h", function() _jump_hunk(-1) end, "prev hunk" },
       }) do
         pcall(vim.keymap.set, "n", m[1], m[2],
           { buffer = b, silent = true, nowait = true,

@@ -56,7 +56,12 @@ for test_file in tests/ui/*.lua; do
   # startup messages (e.g. terminal DSR probes) never block on a hit-enter
   # prompt, and redirect stdin from /dev/null so background/CI runners
   # do not stall or catch SIGTTIN.
-  $TIMEOUT script -qec "nvim --clean --cmd 'set nomore shortmess+=F cmdheight=2' -u $test_file" /dev/null </dev/null >"$cap" 2>&1
+  # `stty` sizes the pty BEFORE nvim reads it. Without this the pty defaults to
+  # 80x24, and a surface with a minimum width refuses to open at all —
+  # auto-core.ui.diffview declines below MIN_COLUMNS (100), so its scroll-sync
+  # suite could not construct the thing it exists to test. Sizing here rather
+  # than per-test keeps every pty suite on one known geometry.
+  $TIMEOUT script -qec "stty cols 200 rows 50; nvim --clean --cmd 'set nomore shortmess+=F cmdheight=2' -u $test_file" /dev/null </dev/null >"$cap" 2>&1
   rc=$?
 
   if [ "$rc" -eq 124 ]; then
