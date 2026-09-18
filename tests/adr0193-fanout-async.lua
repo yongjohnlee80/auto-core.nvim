@@ -139,6 +139,94 @@ vim.wait(20000, function() return after ~= nil end, 25)
 ok("and the invalidated cache was not poisoned by it",
   after ~= nil and shape(after) == sync_shape)
 
+-- ── 6b. ALL-ROOT invalidation during a FIRST walk ───────────────────
+-- The case a per-root generation sweep misses: a root whose first walk is
+-- still running has no generation entry yet, so iterating only the generation
+-- table skips it and it caches its stale result against an unchanged
+-- generation. Found by agent:zen on PR #49 r0.
+-- MUST use a root this process has never walked or invalidated. An earlier
+-- invalidation would have created the generation entry whose ABSENCE is the
+-- defect, and the cell would pass against the broken sweep too — verified: it
+-- did, until this was split onto a fresh root.
+local root2 = vim.fn.tempname() .. "-adr0193-fresh"
+vim.fn.mkdir(root2 .. "/solo", "p")
+sh({ "git", "-C", root2 .. "/solo", "init", "-q" })
+vim.fn.writefile({ "y" }, root2 .. "/solo/f.txt")
+sh({ "git", "-C", root2 .. "/solo", "add", "-A" })
+sh({ "git", "-C", root2 .. "/solo", "-c", "user.email=t@t", "-c", "user.name=t",
+     "commit", "-qm", "init" })
+
+local first = nil
+G.fan_out_async(root2, { max_depth = 4 }, function(r) first = r end)
+G.invalidate_fan_out()            -- ALL-root, while root2's FIRST walk runs
+vim.wait(20000, function() return first ~= nil end, 25)
+ok("a first walk raced by an ALL-root invalidation still answers", first ~= nil)
+
+-- The observable: the cache must be EMPTY for root2, so the next call performs
+-- a real walk rather than being served. Whether the cache was served is
+-- otherwise invisible — both paths deliver through vim.schedule — so this
+-- counts walks. A sweep that iterates only the generation table never bumped
+-- root2 (it had no entry), leaving the stale result cached and this count flat.
+local walks_before = G._fan_out_walk_count or 0
+local cached_after = nil
+G.fan_out_async(root2, { max_depth = 4 }, function(r) cached_after = r end)
+vim.wait(20000, function() return cached_after ~= nil end, 25)
+ok("and it did not cache its stale result — the next call had to re-walk",
+  (G._fan_out_walk_count or 0) > walks_before,
+  ("walk count %d -> %d (unchanged means the cache was poisoned and served)")
+    :format(walks_before, G._fan_out_walk_count or 0))
+
+-- ── 6c. a caller arriving AFTER invalidation must not join the old flight ──
+-- Generation gating only blocks CACHING; without retiring the registration a
+-- late joiner is handed exactly the answer the invalidation discarded.
+G.invalidate_fan_out()
+local early, late = nil, nil
+G.fan_out_async(root, { max_depth = 4 }, function(r) early = r end)
+G.invalidate_fan_out(root)        -- the early flight is now distrusted
+G.fan_out_async(root, { max_depth = 4 }, function(r) late = r end)
+vim.wait(20000, function() return early ~= nil and late ~= nil end, 25)
+ok("both the early and the post-invalidation caller are answered",
+  early ~= nil and late ~= nil,
+  ("early=%s late=%s"):format(tostring(early ~= nil), tostring(late ~= nil)))
+ok("the late caller got a result from a flight started after the invalidation",
+  late ~= nil and shape(late) == sync_shape)
+
+-- ── 6d. a bare repo with TWO linked worktrees ───────────────────────
+-- Both worktrees probe to the same common_dir, so whichever is recorded FIRST
+-- supplies sample_worktree — the one order-sensitive decision in the walk.
+--
+-- HONEST LIMIT OF THIS CELL: it cannot force the adverse case. `fs_scandir`
+-- order is filesystem-dependent and not controllable from a test, and on this
+-- filesystem it already returns name order — so removing the sort does NOT make
+-- this cell fail (verified by mutation). What it pins is the OUTCOME: the
+-- two paths agree, and sample_worktree is the name-order-first worktree. The
+-- sort is what makes that outcome independent of scandir order rather than
+-- coincident with it, which is a property this cell asserts but cannot
+-- falsify on its own.
+sh({ "git", "--git-dir=" .. barep, "worktree", "add", "-q",
+     root .. "/barerepo/aaa-second", "-b", "second", "main" })
+
+G.invalidate_fan_out()
+local two_sync = G.fan_out(root, { max_depth = 4 })
+G.invalidate_fan_out()
+local two_async = nil
+G.fan_out_async(root, { max_depth = 4 }, function(r) two_async = r end)
+vim.wait(20000, function() return two_async ~= nil end, 25)
+ok("two linked worktrees: async still agrees with sync",
+  two_async ~= nil and shape(two_async) == shape(two_sync),
+  ("\n--- sync ---\n%s\n--- async ---\n%s"):format(
+    shape(two_sync), two_async and shape(two_async) or "nil"))
+
+local picked = nil
+for _, r in ipairs(two_async or {}) do
+  if r.is_bare and (r.common_dir or ""):find("barerepo", 1, true) then
+    picked = r.sample_worktree
+  end
+end
+ok("and the sample_worktree is the name-order-first one",
+  picked ~= nil and picked:find("aaa-second", 1, true) ~= nil,
+  tostring(picked))
+
 -- ── 7. degenerate inputs ────────────────────────────────────────────
 local empty = nil
 G.fan_out_async("", nil, function(r) empty = r end)

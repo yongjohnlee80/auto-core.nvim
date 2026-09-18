@@ -322,6 +322,14 @@ local function _walk_async(dir, depth, ctx, done)
       subdirs[#subdirs + 1] = name
     end
   end
+  -- Sorted, and sorted in the SYNC walk too. `fs_scandir` order is
+  -- filesystem-dependent, so an unsorted traversal makes "which directory was
+  -- seen first" unstable — and that decides which `sample_worktree` a bare
+  -- repo with several linked worktrees keeps. With both walks visiting
+  -- children in name order, a depth-first pre-order visit is exactly
+  -- lexicographic path order, which is what lets the async path replay its
+  -- out-of-order completions by sorted path and land on the sync answer.
+  table.sort(subdirs)
 
   local function descend()
     if #subdirs == 0 then return done() end
@@ -372,13 +380,32 @@ function M.fan_out_async(workspace_root, opts, cb)
   local hit = _fan_out_cache[workspace_root]
   if hit then return vim.schedule(function() cb(hit) end) end
 
-  local waiters = _fan_out_inflight[workspace_root]
-  if waiters then
-    waiters[#waiters + 1] = cb
+  -- A caller arriving AFTER an invalidation must not join a flight that
+  -- started before it — the point of invalidating is that the earlier answer is
+  -- no longer trusted, and a late joiner would be handed exactly that.
+  --
+  -- `invalidate_fan_out` enforces this by DEREGISTERING the flight, so any
+  -- registration still present here belongs to the current generation by
+  -- construction. That is the single mechanism; a generation comparison here
+  -- as well would be a second one that can never fire, and an unexercised
+  -- branch is an untested one.
+  local gen = _fan_out_gen[workspace_root] or 0
+  local flight = _fan_out_inflight[workspace_root]
+  if flight then
+    flight.cbs[#flight.cbs + 1] = cb
     return
   end
-  _fan_out_inflight[workspace_root] = { cb }
-  local gen = _fan_out_gen[workspace_root] or 0
+
+  -- `cbs` is held locally as well as in the table: an invalidation clears the
+  -- registration so new callers start a fresh walk, and this flight must still
+  -- be able to answer the callers it already accepted.
+  local cbs = { cb }
+  _fan_out_inflight[workspace_root] = { cbs = cbs }
+  -- Test seam, mirroring `_async_spawn_count`: counts walks that actually run,
+  -- so a cell can tell a real discovery from a cache hit. Whether the cache
+  -- was served is otherwise unobservable from outside — both paths deliver
+  -- through `vim.schedule`.
+  M._fan_out_walk_count = (M._fan_out_walk_count or 0) + 1
 
   opts = opts or {}
   local ctx = {
@@ -399,11 +426,18 @@ function M.fan_out_async(workspace_root, opts, cb)
       -- Cache BEFORE the callbacks, so a cb that re-queries gets a hit rather
       -- than starting a second walk — but only if nothing invalidated this
       -- workspace while the walk was running.
-      if (_fan_out_gen[workspace_root] or 0) == gen then
+      local current = (_fan_out_gen[workspace_root] or 0) == gen
+      if current then
         _fan_out_cache[workspace_root] = results
       end
-      local cbs = _fan_out_inflight[workspace_root] or {}
-      _fan_out_inflight[workspace_root] = nil
+      -- Deregister only our OWN flight: an invalidation may already have
+      -- cleared it, and a newer flight may already have taken the slot.
+      local reg = _fan_out_inflight[workspace_root]
+      if reg and reg.cbs == cbs then
+        _fan_out_inflight[workspace_root] = nil
+      end
+      -- Answer the callers this flight accepted, current or not: they asked,
+      -- and a stale list beats hanging forever. Only the CACHE is gated.
       for _, fn in ipairs(cbs) do pcall(fn, results) end
     end)
   end)
@@ -446,6 +480,9 @@ function M.fan_out(workspace_root, opts)
         subdirs[#subdirs + 1] = name
       end
     end
+    -- See `_walk_async`: both walks visit children in name order so the two
+    -- paths cannot disagree about which directory was seen first.
+    table.sort(subdirs)
     if has_git then
       local info = _probe(dir)
       if info then
@@ -705,15 +742,36 @@ end
 ---Drop the fan-out cache for one workspace root (or all when nil).
 ---@param workspace_root string?
 function M.invalidate_fan_out(workspace_root)
-  if workspace_root then
-    _fan_out_cache[workspace_root] = nil
-    -- Bump the generation so a walk already in flight cannot install the state
-    -- this call exists to discard. It still answers its own waiters.
-    _fan_out_gen[workspace_root] = (_fan_out_gen[workspace_root] or 0) + 1
-  else
-    _fan_out_cache = {}
-    for k, v in pairs(_fan_out_gen) do _fan_out_gen[k] = v + 1 end
+  ---_retire bumps one root's generation and drops its in-flight registration.
+  ---
+  ---Both halves are needed. The generation stops the running walk installing a
+  ---result it gathered BEFORE this call. Dropping the registration stops a
+  ---caller arriving after this call from joining that walk and being handed
+  ---the very answer the invalidation discarded. The walk keeps its own
+  ---reference to the callers it already accepted, so retiring it here strands
+  ---nobody.
+  local function _retire(root)
+    _fan_out_cache[root] = nil
+    _fan_out_gen[root] = (_fan_out_gen[root] or 0) + 1
+    _fan_out_inflight[root] = nil
   end
+
+  if workspace_root then
+    _retire(workspace_root)
+    return
+  end
+
+  -- All roots. Iterating `_fan_out_gen` alone is not enough: a root whose
+  -- FIRST walk is still running has no generation entry yet (it captured an
+  -- implicit 0), so it would be skipped and would then cache its stale result
+  -- against an unchanged generation. The in-flight and cache tables name the
+  -- roots that matter; take the union.
+  local roots = {}
+  for k in pairs(_fan_out_cache) do roots[k] = true end
+  for k in pairs(_fan_out_gen) do roots[k] = true end
+  for k in pairs(_fan_out_inflight) do roots[k] = true end
+  for k in pairs(roots) do _retire(k) end
+  _fan_out_cache = {}
 end
 
 -- ── auto-invalidation via topic subscriptions ────────────────
