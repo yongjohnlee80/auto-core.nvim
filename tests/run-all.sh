@@ -189,6 +189,7 @@ run_standalone "annotate surface (ADR-0065 P1)" tests/adr0065-p1-annotate.lua
 run_standalone "highlighting (ADR-0065 P2)" tests/adr0065-p2-highlight.lua
 run_standalone "docstore + drafts (ADR-0081 P1-P3)" tests/adr0081-docstore.lua
 run_standalone "git.worktree identity (ADR-0081 §2.5)" tests/git-worktree-id.lua
+run_standalone "fan_out_async (ADR-0193)" tests/adr0193-fanout-async.lua
 run_standalone "diffview-nav (ADR-0083 Phase 2)" tests/adr0083-diffview-nav.lua
 run_standalone "diffview-keys (f/F/T, every pane, real dispatch)" tests/adr0083-diffview-keys.lua
 run_standalone "diffview file list + footer paths" tests/diffview-file-list-paths.lua
