@@ -34,6 +34,21 @@ local M = {}
 ---@type table<string, AutoCoreGraphRepo[]>     workspace_root -> repos
 local _fan_out_cache = {}
 
+---@type table<string, function[]>              workspace_root -> waiting callbacks
+---In-flight coalescing for `fan_out_async`, mirroring `_show_inflight`: two
+---opens of the same workspace before the first resolves share one walk rather
+---than each spawning its own fleet of git probes.
+local _fan_out_inflight = {}
+
+---@type table<string, integer>                 workspace_root -> generation
+---Bumped by `invalidate_fan_out`. A walk that was already running when the
+---cache was invalidated gathered its facts BEFORE the event that invalidated
+---them, so it still answers its own waiters (they asked, and stale beats
+---hanging) but must not write that answer into the cache as though it were
+---fresh. Without this, a refresh during a walk installs the very state the
+---refresh was asked to discard.
+local _fan_out_gen = {}
+
 ---@type table<string, string[]>                "<common_dir>:<hash>" -> lines
 local _stat_cache = {}
 
@@ -216,6 +231,184 @@ local _DEFAULT_SKIP = {
 ---@param workspace_root string  absolute path
 ---@param opts AutoCoreGraphFanOutOpts?
 ---@return AutoCoreGraphRepo[]
+---_record_into folds one probed directory into an accumulating result set.
+---
+---Shared by `fan_out` and `fan_out_async` deliberately: the two differ only in
+---HOW they reach a probe result, and a second copy of this would be a second
+---answer to "what did we discover" that could drift from the first.
+---
+---MUST run on the main loop — `M.repo_label` calls `vim.fn.fnamemodify`, which
+---is not safe from a `vim.system` callback.
+---@param results table[]
+---@param seen table<string, integer>  common_dir -> index in results
+---@param workspace_root string
+---@param parent_dir string
+---@param info { common_dir: string, is_bare: boolean, is_working_tree: boolean }
+local function _record_into(results, seen, workspace_root, parent_dir, info)
+  local idx = seen[info.common_dir]
+  if idx then
+    if info.is_working_tree and not results[idx].sample_worktree then
+      results[idx].sample_worktree = parent_dir
+    end
+    return
+  end
+  results[#results + 1] = {
+    common_dir      = info.common_dir,
+    label           = M.repo_label(info.common_dir, workspace_root, info.is_bare, parent_dir),
+    sample_worktree = info.is_working_tree and parent_dir or nil,
+    is_bare         = info.is_bare,
+  }
+  seen[info.common_dir] = #results
+end
+
+---_probe_async is `_probe` without blocking the loop: the same two git calls,
+---chained because the second needs the first's common-dir.
+---
+---`cb(info|nil)` may run OFF the main loop. Callers must not touch editor state
+---from it without `vim.schedule`.
+---@param dir string
+---@param cb fun(info: table|nil)
+local function _probe_async(dir, cb)
+  vim.system({
+    "git", "-C", dir, "rev-parse",
+    "--path-format=absolute",
+    "--git-common-dir",
+    "--is-inside-work-tree",
+  }, { text = true }, function(res)
+    if res.code ~= 0 then return cb(nil) end
+    local out = vim.split(res.stdout or "", "\n", { plain = true })
+    if out[#out] == "" then table.remove(out) end
+    if #out < 2 then return cb(nil) end
+    local common = (out[1] or ""):gsub("/+$", "")
+    vim.system({
+      "git", "--git-dir=" .. common, "config",
+      "--bool", "--default", "false", "core.bare",
+    }, { text = true }, function(res2)
+      local b = vim.split(res2.stdout or "", "\n", { plain = true })
+      cb({
+        common_dir      = common,
+        is_bare         = (b[1] or "") == "true",
+        is_working_tree = out[2] == "true",
+      })
+    end)
+  end)
+end
+
+---_walk_async mirrors `fan_out`'s `walk`, with one structural difference that
+---is the whole reason this cannot be "collect the dirs, then probe them all":
+---**descent is gated on the probe result**. A non-bare repository stops the
+---walk, so whether to recurse is not known until its probe returns.
+---
+---`done()` is called exactly once per invocation, on every path.
+---@param dir string
+---@param depth integer
+---@param ctx { max_depth: integer, skip: table, found: table[] }
+---@param done fun()
+local function _walk_async(dir, depth, ctx, done)
+  if depth > ctx.max_depth then return done() end
+  local fd = vim.uv.fs_scandir(dir)
+  if not fd then return done() end
+
+  local subdirs, has_git = {}, false
+  while true do
+    local name, t = vim.uv.fs_scandir_next(fd)
+    if not name then break end
+    if name == ".git" or name == ".bare" then
+      has_git = true
+    elseif t == "directory"
+        and not ctx.skip[name]
+        and not name:match("^%.")
+    then
+      subdirs[#subdirs + 1] = name
+    end
+  end
+
+  local function descend()
+    if #subdirs == 0 then return done() end
+    local remaining = #subdirs
+    for _, name in ipairs(subdirs) do
+      _walk_async(dir .. "/" .. name, depth + 1, ctx, function()
+        remaining = remaining - 1
+        if remaining == 0 then done() end
+      end)
+    end
+  end
+
+  if not has_git then return descend() end
+
+  _probe_async(dir, function(info)
+    if info then
+      ctx.found[#ctx.found + 1] = { dir = dir, info = info }
+      -- A non-bare repository is a leaf: do not walk into someone's checkout.
+      if not info.is_bare then return done() end
+    end
+    descend()
+  end)
+end
+
+---fan_out_async is `fan_out` without blocking the UI thread.
+---
+---`fan_out` spawns two synchronous `git` processes per repository directory it
+---finds — on a workspace of 70 such directories that is 140 serial spawns, all
+---of them before the caller can paint anything. This runs the same discovery
+---off the loop and hands the result back on it.
+---
+---Ordering: probe completions arrive in whatever order the processes finish, so
+---discoveries are replayed in sorted PATH order before being recorded. Without
+---that, which directory "wins" a duplicated common-dir — and therefore which
+---`sample_worktree` is kept — would vary run to run.
+---
+---`cb(repos)` always runs on the main loop, including on a cache hit.
+---@param workspace_root string
+---@param opts { max_depth: integer?, skip_dirs: table? }?
+---@param cb fun(repos: AutoCoreGraphRepo[])
+function M.fan_out_async(workspace_root, opts, cb)
+  if type(cb) ~= "function" then return end
+  if type(workspace_root) ~= "string" or workspace_root == "" then
+    return vim.schedule(function() cb({}) end)
+  end
+  workspace_root = (vim.fs.normalize(workspace_root) or workspace_root):gsub("/+$", "")
+
+  local hit = _fan_out_cache[workspace_root]
+  if hit then return vim.schedule(function() cb(hit) end) end
+
+  local waiters = _fan_out_inflight[workspace_root]
+  if waiters then
+    waiters[#waiters + 1] = cb
+    return
+  end
+  _fan_out_inflight[workspace_root] = { cb }
+  local gen = _fan_out_gen[workspace_root] or 0
+
+  opts = opts or {}
+  local ctx = {
+    max_depth = opts.max_depth or 3,
+    skip      = opts.skip_dirs or _DEFAULT_SKIP,
+    found     = {},
+  }
+
+  _walk_async(workspace_root, 0, ctx, function()
+    vim.schedule(function()
+      table.sort(ctx.found, function(a, b) return a.dir < b.dir end)
+      local results, seen = {}, {}
+      for _, e in ipairs(ctx.found) do
+        _record_into(results, seen, workspace_root, e.dir, e.info)
+      end
+      table.sort(results, function(a, b) return a.label < b.label end)
+
+      -- Cache BEFORE the callbacks, so a cb that re-queries gets a hit rather
+      -- than starting a second walk — but only if nothing invalidated this
+      -- workspace while the walk was running.
+      if (_fan_out_gen[workspace_root] or 0) == gen then
+        _fan_out_cache[workspace_root] = results
+      end
+      local cbs = _fan_out_inflight[workspace_root] or {}
+      _fan_out_inflight[workspace_root] = nil
+      for _, fn in ipairs(cbs) do pcall(fn, results) end
+    end)
+  end)
+end
+
 function M.fan_out(workspace_root, opts)
   if type(workspace_root) ~= "string" or workspace_root == "" then
     return {}
@@ -233,20 +426,7 @@ function M.fan_out(workspace_root, opts)
   local seen = {}  -- common_dir -> index
 
   local function record(parent_dir, info)
-    local idx = seen[info.common_dir]
-    if idx then
-      if info.is_working_tree and not results[idx].sample_worktree then
-        results[idx].sample_worktree = parent_dir
-      end
-      return
-    end
-    results[#results + 1] = {
-      common_dir      = info.common_dir,
-      label           = M.repo_label(info.common_dir, workspace_root, info.is_bare, parent_dir),
-      sample_worktree = info.is_working_tree and parent_dir or nil,
-      is_bare         = info.is_bare,
-    }
-    seen[info.common_dir] = #results
+    _record_into(results, seen, workspace_root, parent_dir, info)
   end
 
   local function walk(dir, depth)
@@ -527,8 +707,12 @@ end
 function M.invalidate_fan_out(workspace_root)
   if workspace_root then
     _fan_out_cache[workspace_root] = nil
+    -- Bump the generation so a walk already in flight cannot install the state
+    -- this call exists to discard. It still answers its own waiters.
+    _fan_out_gen[workspace_root] = (_fan_out_gen[workspace_root] or 0) + 1
   else
     _fan_out_cache = {}
+    for k, v in pairs(_fan_out_gen) do _fan_out_gen[k] = v + 1 end
   end
 end
 
