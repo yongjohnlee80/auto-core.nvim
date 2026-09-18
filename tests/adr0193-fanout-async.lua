@@ -179,16 +179,28 @@ ok("and it did not cache its stale result — the next call had to re-walk",
 -- ── 6c. a caller arriving AFTER invalidation must not join the old flight ──
 -- Generation gating only blocks CACHING; without retiring the registration a
 -- late joiner is handed exactly the answer the invalidation discarded.
+-- The discriminator is the WALK COUNT, not the content. Both flights walk the
+-- same unchanged tree, so both produce sync_shape — asserting on the result
+-- passes whether the late caller owned a second walk or silently joined the
+-- retired one. Only "a second walk began" separates the two.
 G.invalidate_fan_out()
 local early, late = nil, nil
 G.fan_out_async(root, { max_depth = 4 }, function(r) early = r end)
+local walks_after_early = G._fan_out_walk_count or 0
+
 G.invalidate_fan_out(root)        -- the early flight is now distrusted
 G.fan_out_async(root, { max_depth = 4 }, function(r) late = r end)
+local walks_after_late = G._fan_out_walk_count or 0
+
 vim.wait(20000, function() return early ~= nil and late ~= nil end, 25)
 ok("both the early and the post-invalidation caller are answered",
   early ~= nil and late ~= nil,
   ("early=%s late=%s"):format(tostring(early ~= nil), tostring(late ~= nil)))
-ok("the late caller got a result from a flight started after the invalidation",
+ok("the late caller owned a SECOND walk rather than joining the retired flight",
+  walks_after_late > walks_after_early,
+  ("walk count %d -> %d (unchanged means it joined the flight the invalidation retired)")
+    :format(walks_after_early, walks_after_late))
+ok("and the late caller's result is well-formed",
   late ~= nil and shape(late) == sync_shape)
 
 -- ── 6d. a bare repo with TWO linked worktrees ───────────────────────
