@@ -3002,3 +3002,29 @@ Pub/sub event bus.
 ## [v0.0.1] — Phase 0
 
 Scaffold + smoke harness.
+
+---
+
+## Where this record starts
+
+**Complete and contiguous from `v0.2.15` onward.** Every release from there
+to the newest tag has an entry here, and the entries are derived from each
+release's own annotated tag message.
+
+**Before `v0.2.15` the record is partial.** auto-core.nvim has been tagged since
+`v0.0.1`; of the 96 releases older than `v0.2.15`, 53 have an entry here and
+the rest do not. This is historical, not an omission introduced by any one
+change.
+
+Those gaps are largely unrecoverable rather than merely unwritten: **28 of the
+older tags are lightweight**, carrying no message at all. There is no published
+note to restore for them, and reconstructing one from the commit range would be
+writing history after the fact rather than recording it — so the boundary is
+stated here instead of being filled in with narrative nobody wrote at the time.
+
+To read what an older release actually said:
+
+```sh
+git tag -n99 <tag>          # annotated tags carry their release notes
+git log <older>..<newer>    # for the lightweight ones, the commits are the record
+```
