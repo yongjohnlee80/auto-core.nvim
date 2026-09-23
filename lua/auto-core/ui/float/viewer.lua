@@ -166,10 +166,6 @@ return function(lines, opts)
   -- buffer allocated just above would otherwise leak. Wipe it and re-raise, so a
   -- caller that falls back to another surface (e.g. auto-core.ui.modal → vim.ui.select)
   -- does so without orphaning a buffer.
-  -- If the window cannot be opened (a degraded/narrow environment), the scratch
-  -- buffer allocated just above would otherwise leak. Wipe it and re-raise, so a
-  -- caller that falls back to another surface (e.g. auto-core.ui.modal → vim.ui.select)
-  -- does so without orphaning a buffer.
   local ok_open, win = pcall(vim.api.nvim_open_win, buf, true, win_opts)
   if not ok_open then
     pcall(vim.api.nvim_buf_delete, buf, { force = true })

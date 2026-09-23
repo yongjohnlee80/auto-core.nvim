@@ -114,13 +114,20 @@ local function prepare(opts)
       if type(m) ~= "string" or m == "" then
         error(("auto-core modal: item %d `mnemonic` must be a non-empty string"):format(i), 3)
       end
+      -- A mnemonic is a single quick key, and it is restricted to ONE printable,
+      -- non-digit character. This is what makes the collision check sound: a
+      -- literal-string comparison is BLIND to Neovim's key ALIASES — `<Enter>`,
+      -- `<Return>`, `<C-m>` all normalize to `<CR>`, and `vim.keymap.set` would
+      -- then overwrite the protected Enter mapping (lector PR#50 r1 P0). Refusing
+      -- all `<...>`/control/multi-char notation means a mnemonic can never spell a
+      -- structural key by an alias. Digits are the rendered number-select keys.
+      if not m:match("^[%w%p]$") or m:match("^%d$") then
+        error(("auto-core modal: item %d mnemonic %q must be a single printable "
+          .. "non-digit character (no <...> key notation)"):format(i, m), 3)
+      end
       local lower = m:lower()
       if RESERVED_KEYS[lower] then
-        error(("auto-core modal: item %d mnemonic %q collides with a reserved key "
-          .. "(<CR> / <Esc> / q)"):format(i, m), 3)
-      end
-      if lower:match("^%d+$") then
-        error(("auto-core modal: item %d mnemonic %q collides with a number-select key")
+        error(("auto-core modal: item %d mnemonic %q collides with a reserved key")
           :format(i, m), 3)
       end
       if seen_mnemonic[lower] then

@@ -334,6 +334,9 @@ do
   ok("mnemonic '1' refused (a number-select key)", not try("1"))
   ok("mnemonic 'q' refused (a close key)", not try("q"))
   ok("mnemonic '<Esc>' refused (a close key)", not try("<Esc>"))
+  ok("mnemonic '<Enter>' refused (an ALIAS of <CR> — r1 P0)", not try("<Enter>"))
+  ok("mnemonic '<Return>' refused (an alias of <CR>)", not try("<Return>"))
+  ok("mnemonic '<C-m>' refused (an alias of <CR>)", not try("<C-m>"))
   ok("duplicate mnemonic refused", not pcall(modal.open, {
     items = {
       { label = "A", value = "a", role = "cancel",  mnemonic = "x" },
