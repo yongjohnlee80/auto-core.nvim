@@ -10,6 +10,192 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.2.29] — 2026-09-23 — a shared confirm modal, and a commit row that shows the commit
+
+Two ADR-0195 phases. Both additive; `api_version` unchanged.
+
+**`ui.modal` (ADR-0195 P1) — NEW.** A shared title + body + select
+confirm/prompt primitive, built on `ui.float.viewer`. The body region shows the
+full text that a single-line `vim.ui.select` prompt truncates — a long review
+filename, say.
+
+Irreversibility is an **enforced construction input**, not a caller convention:
+an `irreversible` modal drops any affirmative default and orders its declining
+answer first with the cursor on it, so a bare `<CR>` cannot fire the destructive
+action. Mnemonics are restricted to one printable non-digit character, so no key
+*alias* (`<Enter>`, `<Return>`, `<C-m>`) can overwrite the protected `<CR>`
+mapping. It falls back to `vim.ui.select` — preserving the decline-first
+ordering, which is the whole safety mechanism in a picker — when a float cannot
+be opened.
+
+The legacy `ui.float.confirm` is deliberately **unchanged**: arbitrary items
+still reach `on_choice(value)`, `format_item` is still forwarded, and
+cancellation is still `on_choice(nil)`. No role is ever inferred from an
+arbitrary label.
+
+**`ui.float.viewer`.** Wipes its scratch buffer and re-raises if the window
+cannot be opened, so a caller that falls back to another surface no longer
+orphans a buffer.
+
+**`ui.diffview` (ADR-0195 P3).** In the multi-commit range view, a cursor on a
+commit-group **header** row now shows the *commit* — its
+`git show --stat --format=fuller` header and diffstat — in the preview pane,
+with the middle pane blanked. Previously the header resolved to its first file's
+index and painted that file's diff. Pane geometry is unchanged, and a move back
+onto a file restores the diff.
+
+A commit row is an explicit **non-file** state: line anchoring (`c` / `x`), hunk
+motion, the context toggle and consumer keys all fail closed there,
+`current_file()` returns nil, both content row maps are invalidated so the status
+column draws no stale source line numbers, and the footer says so. `_show` is the
+single inverse transition — every file render leaves commit mode, so a
+still-pending `show_stat` callback cannot repaint over the file.
+
+Opt-in: pass `common_dir` to `dv.open`. Without it the whole branch is inert and
+the view behaves exactly as before.
+
+Reviewed by lector across five rounds (PRs 50 and 51).
+
+## [v0.2.28] — 2026-09-18 — the diff view's panes move together, and repos discovery leaves the loop
+
+**`ui.diffview` (ADR-0191).** The `a/` and `b/` panes now share a topline while
+the reader scrolls, and `]h` / `[h` move between hunks in both context modes. Not
+`scrollbind`: that option synchronises every scroll-bound window in the tab page,
+so it would have dragged a reader's own diffsplit. A pane-scoped `WinScrolled`
+synchroniser keeps the relation exactly two windows wide.
+
+**`git.graph` (ADR-0193).** `fan_out_async` discovers repositories through
+`vim.system` instead of two synchronous git processes per repository directory.
+Additive; `fan_out` is unchanged. `invalidate_fan_out` also stops a walk that was
+already running from installing a result it gathered before the invalidation.
+
+Reviewed by `agent:zen` across four rounds.
+
+## [v0.2.27] — 2026-09-11 — the Git Diff View's file list becomes readable
+
+The Files pane wrote each file's full repo-relative path into a fixed 34-column
+pane and let the window clip the overflow. Clipping takes from the right, so the
+reader lost the end of the path — the filename — on exactly the rows where the
+path was long enough to matter. Measured on real rows: 50, 38 and 73 columns
+against a 34-column pane, counts off the edge on all three.
+
+- the pane width now ramps with the editor (20% of the float's inner width,
+  clamped to 32..38), resolved once and handed to both the pane spec and the
+  renderer so the budget and the pane cannot disagree;
+- paths elide from the **left** on a `/` boundary, longest fitting suffix,
+  cutting inside the basename only when nothing else fits, always on a character
+  boundary;
+- the `+N -N` counts are appended only when the whole row still fits, so a row
+  carries them whole or not at all — never the clipped fragment;
+- the commit-group header fits too, cutting the subject and never the sha;
+- the footer's empty right-hand run now carries the current file's full
+  worktree-relative path, right-aligned, yielding to the key hints rather than
+  displacing them;
+- the footer is drawn once per open and per transition, not twice: the redraw
+  moved into `_show` while the six old call sites still ran it, which doubled
+  buffer writes and consumer `annotate.pending()` callbacks.
+
+Reviewed by lector (PR 47, two rounds). Full runner green including the pty
+suite.
+
+## [v0.2.26] — 2026-09-09 — the self-stage guard also snapshots the symbolic HEAD ref
+
+Patch. Test/CI only; no runtime behaviour changed.
+
+Follows v0.2.25's self-stage guard. The composite worktree-state fingerprint now
+also captures the symbolic HEAD ref (`git symbolic-ref -q HEAD`), closing the one
+gap lector flagged on PR #45: a suite that switches the checked-out branch to
+another ref at the **same commit** left the commit, tree, index and porcelain all
+identical, so only the ref changed and the guard missed it.
+
+The fingerprint is now HEAD commit + symbolic branch + porcelain status + staged
+blob set (`git ls-files -s`) — all read-only, still a before/after invariant (a
+dirty dev branch is fine), and a detached checkout (CI) reads a stable
+`(detached)` so there is no false positive.
+
+Reviewed by lector: approved at `4132997`, no findings (independently verified
+the same-commit branch switch is now detected). Merged as #46.
+
+## [v0.2.25] — 2026-09-09 — the test runner guards against self-staging the worktree
+
+Patch. Test/CI only; no runtime behaviour changed.
+
+Ports the self-stage guard auto-finder shipped in **v0.4.26** to
+`tests/run-all.sh`. The runner now snapshots a composite, read-only fingerprint
+of the worktree's git state before and after the whole run and fails on any
+change:
+
+- HEAD (`git rev-parse`) — a rogue stage-plus-commit that ends clean
+- porcelain status — untracked / modified / staged
+- staged blob set (`git ls-files -s`) — re-staged different content under an
+  unchanged status glyph
+
+A before/after invariant, not a clean-tree check — a dev on a dirty branch is
+fine as long as the run leaves that state untouched — and skipped when this is
+not a git checkout, so the runner stays usable off a worktree and in CI.
+
+Preventive: auto-core's runner does not currently self-stage (a full `run-all`
+leaves the worktree untouched); as the family foundation it earns the guard so a
+future regression fails loudly instead of riding into a release. That class bit
+the family once (a `PRs/` body into a tagged auto-finder release).
+
+Reviewed by lector: approved at `49392ff` after one round (MF1 — HEAD + index
+added once a temp-repo probe showed porcelain alone was blind to a clean-ending
+commit and to re-staged content). Merged as #45.
+
+## [v0.2.24] — 2026-09-08 — re-assignment re-notifies; floats can sit off centre; repo identity is public
+
+Three additive changes, all consumer-driven by the 2026-09-08 autovim panel
+follow-up.
+
+**`todo.assign`** — a re-assignment to the **current** assignee fires
+`core.todo.assignee:changed` again.
+
+Assignment is two acts in one call: it records ownership, and it hands the
+recipient an instruction. Only the first is idempotent. The old early return
+treated the whole call as a no-op whenever the assignee matched, so an operator
+re-assigning a task to the agent that already holds it — which is how you send a
+**new** directive — got no inbox message, no error, and no way to tell their
+instruction went nowhere.
+
+The no-rewrite half of the old contract survives: nothing changed, so the file is
+not rewritten and `updated` does not move. Clearing an already-unassigned task
+stays a true silent no-op, which is the negative control for "always publish".
+
+**`ui.float.multi`** — `outer.row_offset` / `outer.col_offset`.
+
+Every multi-float centred itself at its own percentages, which put the agent
+edits queue and the git diff view on nearly the same rectangle: opening the
+second over the first read as a redraw. The offset is **clamped** to the
+surrounding margin — a placement preference, never a licence to push a window off
+screen — and a full-bleed float has no slack and therefore cannot be offset at
+all. `ui.diffview.open` forwards both into `outer` and decides nothing: which
+panel a diff is, and therefore which way it should sit, is the consumer's
+knowledge. Omitting the fields is byte-identical to the previous behaviour.
+
+**`git.graph.repo_at(dir?, root?)` + `git.graph.repo_label(...)`** are public.
+
+`fan_out` answers "which repos are under this root". Two consumers —
+auto-finder's panel heading and AutoVim's bufferline offset — need "which repo
+am I in", and were left to walk a whole workspace and match common-dirs by hand,
+or derive the name themselves. A second derivation would disagree with the repos
+panel the moment a layout is unusual, so the label logic `fan_out` already used
+is exported rather than reimplemented, and a cell asserts the two agree.
+
+`repo_at` costs two `git rev-parse` reads. `branch` is the branch actually
+checked out, and nil on a detached HEAD — reporting the literal `HEAD` reads like
+a branch called that. The bare + linked-worktree layout is covered explicitly: it
+names the **repo**, not the checkout directory.
+
+Every new cell was verified **red** against v0.2.23 first: the offset cells
+report no movement at all, the two surface cells report the functions do not
+exist, and the re-notify cells fail with "no event" — while the no-rewrite and
+nothing-to-notify controls stay green there, which is what makes them controls.
+
+PR #44. `tests/float-offset-and-repo-at.lua` (36 cells) registered in
+`tests/run-all.sh`. `run-all` (`AC_SKIP_PTY=1`): 2608 passed, 0 failed across 13
+suites; smoke 1905 → 1909. CI green on the merge commit.
+
 ## [v0.2.23] — 2026-09-07 — a nil scope named neither the caller nor itself
 
 Patch. One guard. `api_version` unchanged at `0.1`.
@@ -2816,3 +3002,29 @@ Pub/sub event bus.
 ## [v0.0.1] — Phase 0
 
 Scaffold + smoke harness.
+
+---
+
+## Where this record starts
+
+**Complete and contiguous from `v0.2.15` onward.** Every release from there
+to the newest tag has an entry here, and the entries are derived from each
+release's own annotated tag message.
+
+**Before `v0.2.15` the record is partial.** auto-core.nvim has been tagged since
+`v0.0.1`; of the 96 releases older than `v0.2.15`, 53 have an entry here and
+the rest do not. This is historical, not an omission introduced by any one
+change.
+
+Those gaps are largely unrecoverable rather than merely unwritten: **28 of the
+older tags are lightweight**, carrying no message at all. There is no published
+note to restore for them, and reconstructing one from the commit range would be
+writing history after the fact rather than recording it — so the boundary is
+stated here instead of being filled in with narrative nobody wrote at the time.
+
+To read what an older release actually said:
+
+```sh
+git tag -n99 <tag>          # annotated tags carry their release notes
+git log <older>..<newer>    # for the lightweight ones, the commits are the record
+```
