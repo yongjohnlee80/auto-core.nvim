@@ -493,6 +493,12 @@ local function _show_commit(commit)
     vim.bo[preview].filetype = "git"
   end
 
+  -- Invalidate the file row maps: `statuscolumn()` draws source line numbers from
+  -- M._rowmap, which still names the last file — stale beside commit metadata
+  -- (lector PR#51 r1). `_show` rebuilds them on the way back to a file.
+  if middle  then M._rowmap[middle]  = nil end
+  if preview then M._rowmap[preview] = nil end
+
   -- The footer is file-oriented (path + c/x/s); on a commit row it must not
   -- advertise actions that now fail closed (lector PR#51 P1). `_show` redraws the
   -- file footer via `M._render_footer` when the cursor returns to a file.
@@ -529,6 +535,11 @@ local function _show(idx)
   local f = _state.files[idx]
   if not f then return end
   _state.idx = idx
+  -- Rendering a FILE is the centralized INVERSE of commit mode: clear it here so
+  -- EVERY file render (T, f/F, the cursor branch, a resumed view) leaves commit
+  -- mode consistently, and a still-pending show_stat callback fails its guard
+  -- rather than repainting the commit over the file (lector PR#51 r1).
+  _state.commit_shown = nil
 
   -- git's own header vocabulary: `a/<old>` and `b/<new>`, with /dev/null for a
   -- side that does not exist, exactly as `git diff` prints it.
@@ -1134,8 +1145,7 @@ function M.open(opts)
         -- diff even when its index is unchanged, because the panes are currently
         -- showing the commit detail rather than that file.
         if target_idx and (_state.commit_shown ~= nil or target_idx ~= _state.idx) then
-          _state.commit_shown = nil
-          _show(target_idx)
+          _show(target_idx) -- _show clears commit_shown (the centralized transition)
         end
       end,
     })
@@ -1310,6 +1320,14 @@ function M.open(opts)
 
       local function _toggle_context()
         if not _state then return end
+        if _state.commit_shown then
+          -- Toggling file-diff context on a commit row would render `_state.idx`
+          -- and leave the left cursor on the header — refuse it, like the other
+          -- file-only actions (lector PR#51 r1).
+          vim.notify("auto-core.diffview: this row is a commit — no file context toggle",
+            vim.log.levels.INFO)
+          return
+        end
         _state.context = (_state.context == "full") and "hunk" or "full"
         local cur_w = vim.api.nvim_get_current_win()
         local cur_c = (cur_w and vim.api.nvim_win_is_valid(cur_w)) and vim.api.nvim_win_get_cursor(cur_w) or { 1, 0 }

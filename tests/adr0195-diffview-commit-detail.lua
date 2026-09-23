@@ -205,6 +205,36 @@ ok("[P2] moving to a file restores its filetype (not git)",
 ok("[P2] the file footer is restored (the commit hint is gone)",
   not has(lines_of(float, "footer"), "no file actions on a commit"))
 
+-- [P3] T (toggle context) is refused on a commit row, so it cannot render the
+-- file while the guards still say commit, and a pending callback then repaints
+-- the COMMIT — never over a file T just drew (lector PR#51 r1).
+io.stdout:write("\n[P3] T is refused on a commit row (+ deferred callback)\n")
+mode = "defer"
+move_to(float, 1) -- header A → commit mode; the show_stat callback is captured
+local pendingT = defer_cb
+focus(float, "preview")
+feedk("T")
+ok("[P3] T does NOT leave commit mode", DV._state_for_tests().commit_shown == SHA_A,
+  DV._state_for_tests().commit_shown)
+ok("[P3] T did NOT render a file (no file b/ side in the preview)",
+  not has(lines_of(float, "preview"), "new alpha.lua")
+    and not has(lines_of(float, "preview"), "new beta.lua"))
+if pendingT then pendingT() end
+vim.wait(20)
+ok("[P3] the pending callback repaints the COMMIT, not a file",
+  has(lines_of(float, "preview"), "Author: Tester"))
+mode, defer_cb = "sync", nil
+
+-- [P4] the content row maps are cleared on a commit row so the statuscolumn draws
+-- no stale source line numbers; `_show` rebuilds them on the way back to a file.
+io.stdout:write("\n[P4] statuscolumn row maps: blank on a commit, rebuilt on a file\n")
+ok("[P4] the preview row map is CLEARED on a commit row",
+  DV._rowmap[float:bufnr("preview")] == nil)
+ok("[P4] the middle row map is CLEARED on a commit row",
+  DV._rowmap[float:bufnr("middle")] == nil)
+move_to(float, 4) -- file → _show rebuilds the maps
+ok("[P4] the preview row map is REBUILT on a file", DV._rowmap[float:bufnr("preview")] ~= nil)
+
 -- [4] backward compatibility: no common_dir → the branch is inert
 io.stdout:write("\n[4] no common_dir → header behaves as before (backward-compatible)\n")
 DV.close()
@@ -219,7 +249,7 @@ DV.close()
 
 GG.show_stat_async = orig_stat
 
-ok("assertion floor reached (>= 30)", (pass + fail) >= 30, pass + fail)
+ok("assertion floor reached (>= 34)", (pass + fail) >= 34, pass + fail)
 
 io.stdout:write(("\n%d passed, %d failed\n"):format(pass, fail)); io.stdout:flush()
 vim.cmd(fail > 0 and "cq!" or "qa!")
