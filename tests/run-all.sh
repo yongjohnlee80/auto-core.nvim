@@ -194,6 +194,7 @@ run_standalone "diffview-nav (ADR-0083 Phase 2)" tests/adr0083-diffview-nav.lua
 run_standalone "diffview-keys (f/F/T, every pane, real dispatch)" tests/adr0083-diffview-keys.lua
 run_standalone "diffview hunk motion ]h/[h (ADR-0191)" tests/adr0191-hunk-nav.lua
 run_standalone "diffview file list + footer paths" tests/diffview-file-list-paths.lua
+run_standalone "diffview commit-row detail (ADR-0195 D1)" tests/adr0195-diffview-commit-detail.lua
 run_standalone "review draft domain (auto-core.review.draft)" tests/review-draft.lua
 run_standalone "float offsets + repo_at" tests/float-offset-and-repo-at.lua
 run_standalone "ui.modal confirm (ADR-0195 P1)" tests/adr0195-ui-modal.lua
