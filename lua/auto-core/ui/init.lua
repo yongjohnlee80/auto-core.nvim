@@ -23,5 +23,6 @@ M.grid       = require("auto-core.ui.grid")
 M.highlights = require("auto-core.ui.highlights")
 M.marks      = require("auto-core.ui.marks")
 M.diffview   = require("auto-core.ui.diffview")
+M.modal      = require("auto-core.ui.modal")
 
 return M
