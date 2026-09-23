@@ -93,10 +93,26 @@ local function has(lines, needle)
   for _, l in ipairs(lines) do if l:find(needle, 1, true) then return true end end
   return false
 end
+local function feedk(keys)
+  vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(keys, true, false, true), "x", false)
+  vim.wait(20)
+end
+local function focus(float, pane) vim.api.nvim_set_current_win(float:winid(pane)) end
+
+-- Consumer/annotation capture: the interaction cells prove commit mode cannot
+-- reach any of these for the previously-selected file (lector PR#51 P1).
+local add_calls, remove_calls, consumer_calls = {}, {}, {}
+local ANNOTATE = {
+  on_add    = function(a) add_calls[#add_calls + 1] = a end,
+  on_remove = function(a) remove_calls[#remove_calls + 1] = a end,
+  pending   = function() return {} end,
+}
+local KEYMAPS = { { key = "s", fn = function(file) consumer_calls[#consumer_calls + 1] = file end, desc = "submit" } }
 
 -- [1] open with common_dir; the header discriminator is populated
 io.stdout:write("\n[1] open + commit_at_line discriminator\n")
-local float = DV.open({ files = build_files(), common_dir = "/repo/.git", read_file = reader, context = "hunk" })
+local float = DV.open({ files = build_files(), common_dir = "/repo/.git", read_file = reader, context = "hunk",
+  annotate = ANNOTATE, keymaps = KEYMAPS })
 ok("diffview opened", float ~= nil)
 local left = lines_of(float, "left")
 ok("left pane renders commit A header", has(left, "▼ Commit aaaaaaa"))
@@ -145,6 +161,50 @@ ok("stale callback did NOT paint the commit over the file",
 ok("the file diff is still shown", has(lines_of(float, "preview"), "new beta.lua"))
 mode, defer_cb = "sync", nil
 
+-- [P1] commit mode fails file-only actions closed (lector PR#51 P1) — real dispatch
+io.stdout:write("\n[P1] commit mode fails file-only actions closed\n")
+-- CONTROL: on a FILE the consumer key fires (so a dead key in commit mode is the
+-- GUARD, not a broken binding).
+move_to(float, 4) -- beta.lua (a file row)
+focus(float, "preview")
+consumer_calls = {}
+feedk("s")
+ok("[P1 control] on a FILE, the consumer key fires WITH the file",
+  #consumer_calls == 1 and consumer_calls[1] ~= nil, #consumer_calls)
+
+-- On a COMMIT header the same interactions must fail closed.
+move_to(float, 1) -- header A → commit mode
+ok("current_file() is nil on a commit row", DV.current_file() == nil)
+do
+  local a, reason = DV._anchor_for_tests(false)
+  ok("_anchor_here fails closed on a commit row (c/x cannot anchor)",
+    a == nil and tostring(reason):find("commit", 1, true) ~= nil, reason)
+end
+focus(float, "preview")
+consumer_calls, remove_calls = {}, {}
+feedk("s") -- consumer submit key
+feedk("x") -- drop-annotation key
+ok("[P1] the consumer key does NOT fire on a commit row", #consumer_calls == 0, #consumer_calls)
+ok("[P1] x does NOT reach on_remove on a commit row", #remove_calls == 0, #remove_calls)
+ok("[P1] the footer reflects commit mode (no file actions)",
+  has(lines_of(float, "footer"), "no file actions on a commit"))
+do
+  local before = vim.api.nvim_win_get_cursor(float:winid("preview"))[1]
+  feedk("]h")
+  ok("[P1] ]h does not jump by stale hunk rows on a commit row",
+    vim.api.nvim_win_get_cursor(float:winid("preview"))[1] == before)
+end
+
+-- [P2] the commit preview is filetype=git; a file restores its own filetype
+io.stdout:write("\n[P2] commit preview is filetype=git; file restores its filetype\n")
+ok("[P2] preview filetype is 'git' on a commit row",
+  vim.bo[float:bufnr("preview")].filetype == "git", vim.bo[float:bufnr("preview")].filetype)
+move_to(float, 4) -- back to beta.lua
+ok("[P2] moving to a file restores its filetype (not git)",
+  vim.bo[float:bufnr("preview")].filetype ~= "git", vim.bo[float:bufnr("preview")].filetype)
+ok("[P2] the file footer is restored (the commit hint is gone)",
+  not has(lines_of(float, "footer"), "no file actions on a commit"))
+
 -- [4] backward compatibility: no common_dir → the branch is inert
 io.stdout:write("\n[4] no common_dir → header behaves as before (backward-compatible)\n")
 DV.close()
@@ -159,7 +219,7 @@ DV.close()
 
 GG.show_stat_async = orig_stat
 
-ok("assertion floor reached (>= 18)", (pass + fail) >= 18, pass + fail)
+ok("assertion floor reached (>= 30)", (pass + fail) >= 30, pass + fail)
 
 io.stdout:write(("\n%d passed, %d failed\n"):format(pass, fail)); io.stdout:flush()
 vim.cmd(fail > 0 and "cq!" or "qa!")

@@ -488,6 +488,22 @@ local function _show_commit(commit)
     vim.api.nvim_buf_set_lines(preview, 0, -1, false,
       { "  loading commit " .. (commit.short or "") .. " …" })
     vim.bo[preview].modifiable = false
+    -- ADR-0195 §2.1: commit detail is `git`, not the previous file's syntax.
+    -- `_show` restores the file's real filetype (`_apply_filetype`) on the way back.
+    vim.bo[preview].filetype = "git"
+  end
+
+  -- The footer is file-oriented (path + c/x/s); on a commit row it must not
+  -- advertise actions that now fail closed (lector PR#51 P1). `_show` redraws the
+  -- file footer via `M._render_footer` when the cursor returns to a file.
+  local foot = _state.float:bufnr("footer")
+  if foot and vim.api.nvim_buf_is_valid(foot) then
+    vim.bo[foot].modifiable = true
+    vim.api.nvim_buf_set_lines(foot, 0, -1, false, {
+      ("  commit %s   j/k row   <Tab> pane   (no file actions on a commit)")
+        :format(commit.short or ""),
+    })
+    vim.bo[foot].modifiable = false
   end
 
   gitgraph.show_stat_async(_state.common_dir, commit.sha, function(lines)
@@ -502,6 +518,7 @@ local function _show_commit(commit)
       vim.api.nvim_buf_set_lines(pv, 0, -1, false,
         (#lines > 0) and lines or { "(no commit detail)" })
       vim.bo[pv].modifiable = false
+      vim.bo[pv].filetype = "git"
     end
   end)
 end
@@ -754,6 +771,13 @@ end
 ---@param visual boolean?  true when invoked from a VISUAL-mode mapping
 ---@return table? anchor, string? reason
 local function _anchor_here(visual)
+  -- A commit-group HEADER is not a file line. Fail c/x anchoring closed here, or
+  -- they would resolve against the last-shown FILE and annotate an unrelated
+  -- source line while commit metadata is on screen (lector PR#51 P1). The file
+  -- view is one cursor move away, on a file row.
+  if _state and _state.commit_shown then
+    return nil, "this row is a commit, not a file line"
+  end
   local pane = _focused_pane()
   local column, side, reason = _side_for(pane)
   if not column then return nil, reason end
@@ -1311,6 +1335,13 @@ function M.open(opts)
       -- behaviour while being an approximation of it.
       local function _jump_hunk(dir)
         if not _state then return end
+        if _state.commit_shown then
+          -- `hunk_rows` still names the last file's hunks; jumping by them on a
+          -- commit row would move the cursor by a stale map (lector PR#51 P1).
+          vim.notify("auto-core.diffview: this row is a commit — no file hunks",
+            vim.log.levels.INFO)
+          return
+        end
         local rows = _state.hunk_rows or {}
         if #rows == 0 then
           vim.notify("auto-core.diffview: no hunks in this file", vim.log.levels.INFO)
@@ -1438,6 +1469,14 @@ function M.open(opts)
         local b = float:bufnr(pane)
         if b and vim.api.nvim_buf_is_valid(b) then
           pcall(vim.keymap.set, "n", km.key, function()
+            -- Fail file-only consumer keys closed on a commit row: current_file
+            -- is nil there, and the trailing `_show` would repaint the file and
+            -- silently leave commit mode (lector PR#51 P1).
+            if _state and _state.commit_shown then
+              vim.notify("auto-core.diffview: this row is a commit — no file action",
+                vim.log.levels.INFO)
+              return
+            end
             -- The current file is handed to the consumer because its keys fire
             -- at press time and the file changes under j/k: an open-time capture
             -- would be stale. `o open this file` is the motivating case.
@@ -1665,7 +1704,9 @@ end
 ---new_path / kind), not a copy — read it, do not mutate it.
 ---@return AutoCoreDiffFile?
 function M.current_file()
-  if not _state then return nil end
+  -- No file is shown on a commit row: return nil so a consumer key reflects that
+  -- rather than acting on the previously selected file (lector PR#51 P1).
+  if not _state or _state.commit_shown then return nil end
   return _state.files[_state.idx]
 end
 
