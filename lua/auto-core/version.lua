@@ -933,6 +933,21 @@ return {
   -- what caught the omission here: the release PR went red on
   -- `module=0.2.15` before the tag existed. That gate is the reason this file
   -- can be trusted at all, given the drift recorded above.
-  version     = "0.2.23",
+  -- 2026-09-23: corrected to `0.2.29` while restoring the CHANGELOG. It had
+  -- drifted SIX releases -- v0.2.24 through v0.2.29 all shipped reporting
+  -- "0.2.23" -- and the gate above did not catch it, which is the part worth
+  -- recording.
+  --
+  -- That cell compares this string to the CHANGELOG's newest entry, and BOTH
+  -- artifacts go stale from the same cause: a release that updates neither. So
+  -- they agreed, and agreement read as correctness. Two instruments that drift
+  -- together are not a check on each other -- the gate only bites when exactly
+  -- one of the pair is forgotten, which is the case it was written for and not
+  -- the case that happened.
+  --
+  -- The durable fix is to anchor this on the git TAG, the one artifact a
+  -- release cannot omit; raised separately rather than bolted onto a docs
+  -- change, because it alters what the gate MEANS and deserves its own review.
+  version     = "0.2.29",
   api_version = "0.1",
 }
