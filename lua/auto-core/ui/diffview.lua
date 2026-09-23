@@ -32,6 +32,7 @@
 local multi = require("auto-core.ui.float.multi")
 local marks = require("auto-core.ui.marks")
 local gitdiff = require("auto-core.git.diff")
+local gitgraph = require("auto-core.git.graph")
 local highlights = require("auto-core.ui.highlights")
 
 local M = {}
@@ -386,11 +387,16 @@ end
 ---@return { lnum: integer, hl: string, col: integer?, end_col: integer? }[] hls
 ---@return table<integer, integer> line_to_idx  1-based buffer line → file index
 ---@return table<integer, integer> idx_to_line  file index → 1-based buffer line
+---@return table<integer, {sha:string, short:string?, subject:string?}> commit_at_line  header line → commit
 local function _file_rows(files, width)
   width = width or _files_pane_width()
   local lines, hls = {}, {}
   local line_to_idx = {}
   local idx_to_line = {}
+  -- A commit-group HEADER row is distinct from its first file row, even though
+  -- both point at the same file index: this map lets the cursor follower render
+  -- the COMMIT on a header rather than that first file's diff (ADR-0195 D1).
+  local commit_at_line = {}
   local last_commit = nil
 
   for idx, f in ipairs(files) do
@@ -406,6 +412,9 @@ local function _file_rows(files, width)
       local lnum = #lines - 1
       hls[#hls + 1] = { lnum = lnum, hl = "AutoCoreSectionActive" }
       line_to_idx[#lines] = idx
+      commit_at_line[#lines] = {
+        sha = f.commit_sha, short = f.commit_short, subject = f.commit_subject,
+      }
     end
 
     local st = gitdiff.stats(f)
@@ -427,7 +436,7 @@ local function _file_rows(files, width)
     line_to_idx[1] = 1
     idx_to_line[1] = 1
   end
-  return lines, hls, line_to_idx, idx_to_line
+  return lines, hls, line_to_idx, idx_to_line, commit_at_line
 end
 
 ---_pane_title retitles a live pane. `float.multi` sets titles at creation, so
@@ -440,6 +449,61 @@ local function _pane_title(pane, title)
   if not ok or not cfg then return end
   cfg.title, cfg.title_pos = title, cfg.title_pos or "center"
   pcall(vim.api.nvim_win_set_config, win, cfg)
+end
+
+---_show_commit renders a COMMIT — its `git show --stat --format=fuller` header
+---and diffstat — into the preview pane when the cursor is on a commit-group
+---header row. A commit has no before/after, so the two synchronised file panes
+---collapse to one detail surface: the geometry stays put, the detail goes in the
+---wider `preview` pane, and the `middle` pane is blanked and titled (ADR-0195 D1
+---/ OQ-1). It reuses the SAME renderer worktree.nvim's commit-graph preview uses
+---(`auto-core.git.graph.show_stat`). The async result is dropped unless it is
+---still the newest request for the still-shown commit (ADR-0195 SF1) — a slow
+---`git show` must never repaint over a file diff the cursor has moved back to.
+---@param commit { sha: string, short: string?, subject: string? }
+local function _show_commit(commit)
+  if not _state or not commit or not commit.sha then return end
+  if _state.commit_shown == commit.sha then return end
+  _state.commit_shown = commit.sha
+  _state.commit_gen = (_state.commit_gen or 0) + 1
+  local gen = _state.commit_gen
+
+  _pane_title("middle", " — commit — ")
+  _pane_title("preview", " " .. (commit.short or "commit") .. " ")
+
+  local middle = _state.float:bufnr("middle")
+  if middle and vim.api.nvim_buf_is_valid(middle) then
+    vim.bo[middle].modifiable = true
+    vim.api.nvim_buf_set_lines(middle, 0, -1, false, {
+      "", "  ── commit ──", "",
+      "  A commit has no before/after view.",
+      "  Its header and diffstat are on the right.",
+    })
+    vim.bo[middle].modifiable = false
+  end
+
+  local preview = _state.float:bufnr("preview")
+  if preview and vim.api.nvim_buf_is_valid(preview) then
+    vim.bo[preview].modifiable = true
+    vim.api.nvim_buf_set_lines(preview, 0, -1, false,
+      { "  loading commit " .. (commit.short or "") .. " …" })
+    vim.bo[preview].modifiable = false
+  end
+
+  gitgraph.show_stat_async(_state.common_dir, commit.sha, function(lines)
+    -- Drop a stale result: while `git show` ran, the cursor may have moved to a
+    -- file (commit_shown cleared) or to a newer commit (generation bumped).
+    if not _state or _state.commit_gen ~= gen or _state.commit_shown ~= commit.sha then
+      return
+    end
+    local pv = _state.float:bufnr("preview")
+    if pv and vim.api.nvim_buf_is_valid(pv) then
+      vim.bo[pv].modifiable = true
+      vim.api.nvim_buf_set_lines(pv, 0, -1, false,
+        (#lines > 0) and lines or { "(no commit detail)" })
+      vim.bo[pv].modifiable = false
+    end
+  end)
 end
 
 ---_show renders the file at `idx` into the a/ and b/ panes.
@@ -955,7 +1019,7 @@ function M.open(opts)
     end,
   })
 
-  local flines, fhls, line_to_idx, idx_to_line = _file_rows(files, files_width)
+  local flines, fhls, line_to_idx, idx_to_line, commit_at_line = _file_rows(files, files_width)
   local initial_positions = (opts.initial and opts.initial.file_positions) or {}
   local initial_pane = (opts.initial and (opts.initial.pane or opts.initial.focused_pane)) or "preview"
   local initial_lnum = (opts.initial and (opts.initial.lnum or (opts.initial.file_positions and (opts.initial.active_file or opts.initial.path) and opts.initial.file_positions[opts.initial.active_file or opts.initial.path] and opts.initial.file_positions[opts.initial.active_file or opts.initial.path].lnum))) or 1
@@ -963,6 +1027,11 @@ function M.open(opts)
   _state = {
     float = float, files = files, annotations = opts.annotations, idx = 1,
     line_to_idx = line_to_idx, idx_to_line = idx_to_line,
+    -- ADR-0195 D1: a cursor on a commit-group header shows the COMMIT, not the
+    -- first file's diff. `common_dir` is what `git.graph.show_stat` needs; absent
+    -- it, the whole commit-detail branch is inert and the view behaves as before.
+    commit_at_line = commit_at_line, common_dir = opts.common_dir,
+    commit_shown = nil, commit_gen = 0,
     annotate = opts.annotate, keymaps = opts.keymaps,
     context = opts.context or (opts.initial and opts.initial.context) or "hunk",
     worktree = opts.worktree,
@@ -1029,8 +1098,21 @@ function M.open(opts)
         local win = _state.float:winid("left")
         if not (win and vim.api.nvim_win_is_valid(win)) then return end
         local row = vim.api.nvim_win_get_cursor(win)[1]
+        -- On a commit-group HEADER row, render the commit (ADR-0195 D1). Gated on
+        -- `common_dir`: without it the map is nil and this whole branch is inert.
+        local commit = _state.common_dir and _state.commit_at_line and _state.commit_at_line[row]
+        if commit then
+          _show_commit(commit)
+          return
+        end
         local target_idx = (_state.line_to_idx and _state.line_to_idx[row]) or row
-        if target_idx and target_idx ~= _state.idx then _show(target_idx) end
+        -- A move OFF a commit header back onto a file must re-render that file's
+        -- diff even when its index is unchanged, because the panes are currently
+        -- showing the commit detail rather than that file.
+        if target_idx and (_state.commit_shown ~= nil or target_idx ~= _state.idx) then
+          _state.commit_shown = nil
+          _show(target_idx)
+        end
       end,
     })
   end
