@@ -228,7 +228,8 @@ do
     on_choice = function(v) got = v end,
     on_cancel = function() cancels = cancels + 1 end,
   })
-  ok("fallback lists the decline FIRST", seen_items and seen_items[1] == "No", vim.inspect(seen_items))
+  ok("fallback lists the decline FIRST (as an item object)",
+    seen_items and type(seen_items[1]) == "table" and seen_items[1].label == "No", vim.inspect(seen_items))
   cb(nil)
   ok("cancelled select → on_cancel", cancels == 1)
   ok("cancelled select does NOT choose", got == "UNSET")
@@ -245,8 +246,8 @@ do
     backend = "select",
     on_choice = function(v) got2 = v end,
   })
-  cb("Delete")
-  ok("choosing the affirmative label → on_choice('delete')", got2 == "delete", tostring(got2))
+  cb(seen_items[2]) -- the affirmative object (decline "No" is first)
+  ok("choosing the affirmative item → on_choice('delete')", got2 == "delete", tostring(got2))
 
   vim.ui.select = orig
 end
@@ -255,8 +256,8 @@ end
 io.stdout:write("\n[11] select fallback (reversible)\n")
 do
   local orig = vim.ui.select
-  local cb
-  vim.ui.select = function(_, _, on_choice) cb = on_choice end
+  local seen, cb
+  vim.ui.select = function(items, _, on_choice) seen = items; cb = on_choice end
   local got, cancels = "UNSET", 0
   modal.open({
     items = { { label = "Yes", value = "yes" }, { label = "No", value = "no", role = "cancel" } },
@@ -265,7 +266,7 @@ do
     on_choice = function(v) got = v end,
     on_cancel = function() cancels = cancels + 1 end,
   })
-  cb("Yes")
+  cb(seen[1]) -- the "Yes" item object (reversible keeps caller order)
   ok("reversible fallback choice → on_choice('yes')", got == "yes")
   ok("no cancel on a choice", cancels == 0)
   vim.ui.select = orig
@@ -314,8 +315,144 @@ do
   vim.ui.select = orig
 end
 
+-- [16] P0 — a caller mnemonic must NOT be able to overwrite a structural key
+io.stdout:write("\n[16] P0 — reserved-key mnemonic collisions refused at construction\n")
+do
+  local orig = vim.ui.select
+  vim.ui.select = function() end -- keep any accepted positive-control off the real UI
+  local function try(mn)
+    return pcall(modal.open, {
+      items = {
+        { label = "Delete", value = "delete", role = "confirm", mnemonic = mn },
+        { label = "Keep",   value = "keep",   role = "cancel" },
+      },
+      reversibility = "irreversible", backend = "select",
+    })
+  end
+  ok("mnemonic '<CR>' refused (would overwrite the safety Enter)", not try("<CR>"))
+  ok("mnemonic '<cr>' (lowercase) refused too", not try("<cr>"))
+  ok("mnemonic '1' refused (a number-select key)", not try("1"))
+  ok("mnemonic 'q' refused (a close key)", not try("q"))
+  ok("mnemonic '<Esc>' refused (a close key)", not try("<Esc>"))
+  ok("duplicate mnemonic refused", not pcall(modal.open, {
+    items = {
+      { label = "A", value = "a", role = "cancel",  mnemonic = "x" },
+      { label = "B", value = "b", role = "confirm", mnemonic = "x" },
+    },
+    reversibility = "reversible", backend = "select",
+  }))
+  ok("a non-colliding mnemonic is still accepted", (pcall(modal.open, {
+    items = {
+      { label = "Keep",    value = "k", role = "cancel" },
+      { label = "Replace", value = "r", role = "confirm", mnemonic = "r" },
+    },
+    reversibility = "reversible", backend = "select",
+  })))
+  vim.ui.select = orig
+end
+
+-- [17] P1 — fallback keeps item identity under duplicate labels
+io.stdout:write("\n[17] P1 — fallback keeps item identity under duplicate labels\n")
+do
+  local orig = vim.ui.select
+  local seen, cb
+  vim.ui.select = function(items, _, on_choice) seen = items; cb = on_choice end
+  local got = "UNSET"
+  modal.open({
+    items = {
+      { label = "Review", value = "decline", role = "cancel" },
+      { label = "Review", value = "affirm",  role = "confirm" }, -- SAME label
+    },
+    reversibility = "irreversible",
+    backend = "select",
+    on_choice = function(v) got = v end,
+  })
+  ok("[17] fallback receives item OBJECTS, decline first", type(seen[1]) == "table" and seen[1].value == "decline")
+  cb(seen[1]) -- pick the first displayed row (the decline)
+  ok("[17] first row resolves the DECLINE, not the duplicate-labelled affirmative", got == "decline", tostring(got))
+  vim.ui.select = orig
+end
+
+-- [18] P1 — multiline body keeps the option-row map correct
+io.stdout:write("\n[18] P1 — multiline body keeps the option-row map correct\n")
+do
+  local got = "UNSET"
+  local h = modal.open({
+    title = "Delete?",
+    body  = "line one of detail\nline two of detail",
+    items = {
+      { label = "Delete", value = "delete", role = "confirm" },
+      { label = "No",     value = "no",     role = "cancel" },
+    },
+    reversibility = "irreversible",
+    on_choice = function(v) got = v end,
+  })
+  local lines = buf_lines(h)
+  ok("[18] body line 1 is its own rendered row", has_line(lines, "line one of detail"))
+  ok("[18] body line 2 is its own rendered row", has_line(lines, "line two of detail"))
+  ok("[18] cursor is on the decline row despite the multiline body",
+    vim.api.nvim_win_get_cursor(h:win())[1] == line_of(lines, "1. No"),
+    vim.api.nvim_win_get_cursor(h:win())[1])
+  feed("<CR>")
+  ok("[18] bare <CR> still resolves the decline with a multiline body", got == "no", tostring(got))
+end
+
+-- [19] P1 — the primitive owns focus restoration to the invoking window
+io.stdout:write("\n[19] P1 — focus returns to the invoking window\n")
+do
+  vim.cmd("new") -- a second window, so a focus move is observable
+  local invoking = vim.api.nvim_get_current_win()
+  local got = "UNSET"
+  modal.open({ -- no `opener` → it must be captured
+    items = { { label = "Yes", value = "y" }, { label = "No", value = "n", role = "cancel" } },
+    reversibility = "reversible",
+    on_choice = function(v) got = v end,
+  })
+  ok("[19] the modal took focus (a float window)", vim.api.nvim_get_current_win() ~= invoking)
+  feed("q")
+  ok("[19] focus restored to the invoking window after cancel",
+    vim.api.nvim_get_current_win() == invoking, vim.api.nvim_get_current_win())
+  pcall(vim.cmd, "close")
+end
+
+-- [20] P2 — enum validation
+io.stdout:write("\n[20] P2 — role/backend enums validated\n")
+do
+  ok("unknown role refused", not pcall(modal.open, {
+    items = { { label = "A", value = 1, role = "maybe" } },
+    reversibility = "reversible", backend = "select",
+  }))
+  ok("unknown backend refused", not pcall(modal.open, {
+    items = { { label = "A", value = 1 }, { label = "B", value = 2, role = "cancel" } },
+    reversibility = "reversible", backend = "bogus",
+  }))
+end
+
+-- [21] P2 — a REAL float-open failure falls back to select with no orphan buffer
+io.stdout:write("\n[21] P2 — auto backend falls back on a real float failure, no orphan buffer\n")
+do
+  local orig_open, orig_sel = vim.api.nvim_open_win, vim.ui.select
+  local sel_called = false
+  vim.ui.select = function() sel_called = true end
+  local before = #vim.api.nvim_list_bufs()
+  vim.api.nvim_open_win = function() error("forced float-open failure") end
+  local okc = pcall(modal.open, {
+    title = "Delete?",
+    body  = "target.review.json",
+    items = { { label = "Delete", value = "d", role = "confirm" }, { label = "No", value = "n", role = "cancel" } },
+    reversibility = "irreversible",
+    backend = "auto",
+  })
+  vim.api.nvim_open_win = orig_open
+  local after = #vim.api.nvim_list_bufs()
+  ok("[21] auto backend did not throw when the float failed", okc)
+  ok("[21] it fell back to vim.ui.select", sel_called)
+  ok("[21] no orphan scratch buffer leaked", after == before, ("before=%d after=%d"):format(before, after))
+  vim.ui.select = orig_sel
+end
+
 -- assertion floor (runner contract §5): a silently-skipped block must not pass quietly
-ok("assertion floor reached (>= 28)", (pass + fail) >= 28, pass + fail)
+ok("assertion floor reached (>= 55)", (pass + fail) >= 55, pass + fail)
 
 io.stdout:write(("\n%d passed, %d failed\n"):format(pass, fail)); io.stdout:flush()
 vim.cmd(fail > 0 and "cq!" or "qa!")

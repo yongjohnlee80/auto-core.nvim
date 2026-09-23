@@ -43,6 +43,35 @@ local M = {}
 
 local function is_cancel(item) return item.role == "cancel" end
 
+-- Keys the modal OWNS structurally. A caller-supplied mnemonic that collides with
+-- one of these would overwrite the protected handler (the safety <CR>, the close
+-- keys, or a rendered number key), so a collision is REFUSED at construction
+-- rather than silently resolved by keymap-install order (lector, PR#50 P0).
+local RESERVED_KEYS = { ["<cr>"] = true, ["<esc>"] = true, ["q"] = true }
+
+---Split a string into buffer lines with the SAME CRLF/LF semantics the viewer
+---uses, so the option-line map is computed against exactly what the viewer will
+---render — a multiline body must not shift the rendered option rows (lector P1).
+---@param s string
+---@return string[]
+local function split_to_lines(s)
+  local out = {}
+  for _, part in ipairs(vim.split((s:gsub("\r\n", "\n")), "\n", { plain = true })) do
+    out[#out + 1] = part
+  end
+  return out
+end
+
+---The body as a single string, for the degraded `vim.ui.select` prompt so the
+---destructive target is not lost precisely in the fallback (lector P2).
+---@return string?
+local function body_text(opts)
+  if opts.body == nil then return nil end
+  local body = opts.body
+  if type(body) == "string" then body = { body } end
+  return table.concat(body, "\n")
+end
+
 ---Validate + normalize the items, decide the ordering and the initially-focused
 ---item. This is where the irreversibility policy is ENFORCED (ADR-0195 §2.3):
 ---an irreversible modal must have a declining answer, that answer is moved to
@@ -66,12 +95,40 @@ local function prepare(opts)
     if type(it) ~= "table" or type(it.label) ~= "string" then
       error(("auto-core modal: item %d needs a string `label`"):format(i), 3)
     end
-    items[i] = {
-      label    = it.label,
-      value    = it.value,
-      role     = it.role or "confirm",
-      mnemonic = it.mnemonic,
-    }
+    local role = it.role or "confirm"
+    if role ~= "confirm" and role ~= "cancel" then
+      error(("auto-core modal: item %d has an unknown role %q (want 'confirm' or 'cancel')")
+        :format(i, tostring(role)), 3)
+    end
+    items[i] = { label = it.label, value = it.value, role = role, mnemonic = it.mnemonic }
+  end
+
+  -- Refuse any mnemonic that would overwrite a structural key. The safety <CR>,
+  -- the close keys, and the rendered number keys (`1`..`N`) belong to the modal,
+  -- and a duplicate mnemonic makes one item unreachable — all are construction
+  -- errors, so ADR-0101 D12 does not depend on keymap-install order (lector P0).
+  local seen_mnemonic = {}
+  for i, it in ipairs(items) do
+    local m = it.mnemonic
+    if m ~= nil then
+      if type(m) ~= "string" or m == "" then
+        error(("auto-core modal: item %d `mnemonic` must be a non-empty string"):format(i), 3)
+      end
+      local lower = m:lower()
+      if RESERVED_KEYS[lower] then
+        error(("auto-core modal: item %d mnemonic %q collides with a reserved key "
+          .. "(<CR> / <Esc> / q)"):format(i, m), 3)
+      end
+      if lower:match("^%d+$") then
+        error(("auto-core modal: item %d mnemonic %q collides with a number-select key")
+          :format(i, m), 3)
+      end
+      if seen_mnemonic[lower] then
+        error(("auto-core modal: item %d mnemonic %q duplicates an earlier item's")
+          :format(i, m), 3)
+      end
+      seen_mnemonic[lower] = true
+    end
   end
 
   local initial = 1
@@ -109,7 +166,12 @@ local function build_lines(opts, items)
   if opts.body ~= nil then
     local body = opts.body
     if type(body) == "string" then body = { body } end
-    for _, l in ipairs(body) do out[#out + 1] = l end
+    -- Split embedded newlines HERE, with the viewer's own semantics, so the
+    -- option-line map below counts exactly the rows the viewer will render — a
+    -- multiline body must not shift the decline row the cursor starts on (P1).
+    for _, l in ipairs(body) do
+      for _, part in ipairs(split_to_lines(l)) do out[#out + 1] = part end
+    end
     out[#out + 1] = ""
   end
   local option_line = {}
@@ -125,8 +187,19 @@ end
 ---@return AutoCoreViewerHandle|table handle
 function M.open(opts)
   opts = opts or {}
+  -- Capture the invoking window NOW, before any float steals focus, so the
+  -- primitive OWNS focus restoration rather than leaving a destructive dialog's
+  -- focus lifecycle to each consumer (lector P1). A caller may still override it.
+  local opener = opts.opener
+  if opener == nil then opener = vim.api.nvim_get_current_win() end
+
   local items, initial = prepare(opts)
+
   local backend = opts.backend or "auto"
+  if backend ~= "auto" and backend ~= "float" and backend ~= "select" then
+    error(("auto-core modal: unknown backend %q (want 'auto' | 'float' | 'select')")
+      :format(tostring(backend)), 2)
+  end
 
   local resolved = false
   local handle
@@ -149,18 +222,18 @@ function M.open(opts)
   -- highlights the safe one — ordering is the whole safety mechanism here,
   -- because a picker has no notion of a default. A cancelled select is a decline.
   local function open_select()
-    local labels, by_label = {}, {}
-    for _, it in ipairs(items) do
-      labels[#labels + 1] = it.label
-      by_label[it.label] = it
-    end
-    vim.ui.select(labels, {
-      prompt      = opts.title or "Confirm",
-      format_item = function(l) return l end,
-    }, function(choice)
-      if choice == nil then resolve_cancel(); return end
-      local it = by_label[choice]
-      if it then resolve_choice(it) else resolve_cancel() end
+    -- Pass the item OBJECTS themselves — not their labels — so duplicate labels
+    -- cannot make the first (decline) row resolve to a later affirmative
+    -- (lector P1). The prompt carries the body so the destructive target is not
+    -- lost in the degraded environment (lector P2).
+    local prompt = opts.title or "Confirm"
+    local bt = body_text(opts)
+    if bt and bt ~= "" then prompt = bt .. "\n" .. prompt end
+    vim.ui.select(items, {
+      prompt      = prompt,
+      format_item = function(it) return it.label end,
+    }, function(item)
+      if item == nil then resolve_cancel() else resolve_choice(item) end
     end)
     return {
       is_open = function() return not resolved end,
@@ -196,7 +269,7 @@ function M.open(opts)
     cursorline = true,
     wrap       = true,
     keymaps    = keymaps,
-    opener     = opts.opener,
+    opener     = opener,
     on_close   = function() resolve_cancel() end,
   })
   if not ok then
