@@ -196,6 +196,7 @@ run_standalone "diffview hunk motion ]h/[h (ADR-0191)" tests/adr0191-hunk-nav.lu
 run_standalone "diffview file list + footer paths" tests/diffview-file-list-paths.lua
 run_standalone "review draft domain (auto-core.review.draft)" tests/review-draft.lua
 run_standalone "float offsets + repo_at" tests/float-offset-and-repo-at.lua
+run_standalone "ui.modal confirm (ADR-0195 P1)" tests/adr0195-ui-modal.lua
 run_pty
 run_bench
 
