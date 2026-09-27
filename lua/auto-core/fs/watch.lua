@@ -300,8 +300,43 @@ local function catchup_emit(dir, state)
   end
 end
 
--- Start a single fs_event handle on one directory. Wires it to the
--- shared state's debounce + ignore + classification logic.
+-- One libuv fs_event callback for `dir`: the shared debounce + ignore + classification logic. Named (and
+-- exposed as M._on_fs_event) so a suite can deliver the events libuv will not produce on demand — a
+-- nameless event or a handle error.
+---@param state AutoCoreWatchHandle
+---@param dir string
+local function on_fs_event(state, dir, uv_err, filename, uv_events)
+  if uv_err or not filename then
+    -- Something in `dir` changed and libuv cannot say what (no child name, or an error on the handle).
+    -- Dropping it would leave a consumer's listing stale with nothing to refresh it, so the directory
+    -- itself is published as dirty (ADR-0200 §4.4). Debounced on the dir's own key.
+    if not debounce_check(state, dir .. "/") then return end
+    local reason = uv_err and "error" or "unnamed"
+    vim.schedule(function()
+      events.publish("core.fs.dir:dirty", { path = dir, reason = reason, err = uv_err })
+    end)
+    return
+  end
+  local full = dir .. "/" .. filename
+  if should_ignore(full, state.opts.ignore) then return end
+  local kind = classify(full, uv_events)
+  if not debounce_check(state, full) then return end
+  -- Hop to the main loop before publishing — events.publish runs subscriber callbacks synchronously and
+  -- many of them will touch nvim API. Self-extension + deletion cleanup also touch libuv handle APIs and
+  -- MUST run on the main loop, never the libuv callback thread (C1/C7).
+  vim.schedule(function()
+    publish_event(full, kind)
+    if state.opts.self_extend then
+      if kind == "created" then
+        extend_for_new_dir(state, full)
+      elseif kind == "deleted" and state._watched_dirs[full] then
+        cleanup_dynamic_subtree(state, full)
+      end
+    end
+  end)
+end
+
+-- Start a single fs_event handle on one directory.
 ---@param dir string
 ---@param state AutoCoreWatchHandle
 ---@return userdata? handle, string? err
@@ -310,26 +345,7 @@ local function start_one_dir(dir, state)
   if not fs_event then return nil end
   local ok, err = pcall(function()
     fs_event:start(dir, {}, function(uv_err, filename, uv_events)
-      if uv_err or not filename then return end
-      local full = dir .. "/" .. filename
-      if should_ignore(full, state.opts.ignore) then return end
-      local kind = classify(full, uv_events)
-      if not debounce_check(state, full) then return end
-      -- Hop to the main loop before publishing — events.publish
-      -- runs subscriber callbacks synchronously and many of them
-      -- will touch nvim API. Self-extension + deletion cleanup also
-      -- touch libuv handle APIs and MUST run on the main loop, never
-      -- the libuv callback thread (C1/C7).
-      vim.schedule(function()
-        publish_event(full, kind)
-        if state.opts.self_extend then
-          if kind == "created" then
-            extend_for_new_dir(state, full)
-          elseif kind == "deleted" and state._watched_dirs[full] then
-            cleanup_dynamic_subtree(state, full)
-          end
-        end
-      end)
+      on_fs_event(state, dir, uv_err, filename, uv_events)
     end)
   end)
   if not ok then
@@ -620,6 +636,8 @@ function M.list()
 end
 
 ---Test-only — production code never calls this.
+M._on_fs_event = on_fs_event
+
 function M._reset_for_tests()
   M.stop_all()
   _next_id = 0
