@@ -13519,6 +13519,60 @@ print("\n[88] ui.edit — open a file from a window that cannot take one")
   vim.fn.delete(dir, "rf")
 end)()
 
+-- ── [89] git.worktree — a bare repo cloned in place is a repo ────────
+-- list_child_repos and collect recognised a child only by `<child>/.git`.
+-- A bare repository cloned straight into its container (`git clone --bare
+-- <url> name`, worktrees inside it) has no `.git` — its HEAD, objects/ and
+-- refs/ sit in the container itself — so it was invisible: missing from every
+-- repo picker and every worktree listing (auto-run.nvim in Johno's workspace
+-- has this shape; ADR 0199 §7.3). Recognised now by git's own test for a git
+-- directory: HEAD plus objects/ and refs/.
+print("\n[89] git.worktree — bare repos without .git are enumerated")
+;(function()
+  local wt = require("auto-core.git.worktree")
+  local ws = vim.fn.tempname() .. "-ws89"
+  vim.fn.mkdir(ws, "p")
+  local function git(dir, ...)
+    local r = vim.system({ "git", "-C", dir, "-c", "user.email=s@t", "-c", "user.name=s", ... },
+      { text = true }):wait()
+    return r.code == 0, (r.stderr or "")
+  end
+  -- a/: a plain repository.
+  vim.system({ "git", "init", "-q", "-b", "main", ws .. "/a" }, { text = true }):wait()
+  git(ws .. "/a", "commit", "-q", "--allow-empty", "-m", "init")
+  -- b/: the family layout — a bare git dir at b/.git, a worktree at b/main.
+  vim.fn.mkdir(ws .. "/b", "p")
+  vim.system({ "git", "clone", "-q", "--bare", ws .. "/a", ws .. "/b/.git" }, { text = true }):wait()
+  local okb, eb = git(ws .. "/b", "worktree", "add", "-q", ws .. "/b/main", "main")
+  -- c/: a bare repo cloned IN PLACE — no .git — with a worktree inside it.
+  vim.system({ "git", "clone", "-q", "--bare", ws .. "/a", ws .. "/c" }, { text = true }):wait()
+  local okc, ec = git(ws .. "/c", "worktree", "add", "-q", ws .. "/c/wt1", "main")
+  ok("[89] fixture: both bare layouts have a worktree", okb and okc, eb .. ec)
+  -- d/: a plain directory. e/: a HEAD file alone is NOT a git directory.
+  vim.fn.mkdir(ws .. "/d", "p")
+  vim.fn.mkdir(ws .. "/e", "p")
+  vim.fn.writefile({ "ref: refs/heads/main" }, ws .. "/e/HEAD")
+
+  local names = {}
+  for _, r in ipairs(wt.list_child_repos(ws)) do names[#names + 1] = r.name end
+  ok("[89] list_child_repos includes the in-place bare repo, alongside the other layouts",
+    vim.deep_equal(names, { "a", "b", "c" }), vim.inspect(names))
+
+  local paths = {}
+  for _, e in ipairs(wt.collect(ws) or {}) do paths[#paths + 1] = e.path end
+  local norm = require("auto-core.fs.path").normalize
+  local function has(p) return vim.tbl_contains(paths, norm(p)) end
+  ok("[89] collect lists the in-place bare repo's worktree", has(ws .. "/c/wt1"), vim.inspect(paths))
+  ok("[89] collect still lists the plain repo and the family layout's worktree",
+    has(ws .. "/a") and has(ws .. "/b/main"), vim.inspect(paths))
+  ok("[89] collect drops the bare entries themselves (nothing to run in)",
+    not has(ws .. "/c") and not has(ws .. "/b/.git") and not has(ws .. "/b"), vim.inspect(paths))
+  ok("[89] a plain dir and a lone HEAD file are not repos",
+    not has(ws .. "/d") and not has(ws .. "/e"), vim.inspect(paths))
+
+  vim.fn.delete(ws, "rf")
+end)()
+
 -- Convention §3: emit the `<P> passed, <F> failed` summary and exit
 -- EXPLICITLY — os.exit(1) on any failure, os.exit(0) otherwise. Do not
 -- rely on falling off the end for the success exit: an explicit 0 keeps

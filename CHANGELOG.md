@@ -10,6 +10,18 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.2.31] — 2026-09-27 — a bare repo cloned in place is a repo (ADR 0199 §7.3)
+
+Patch. `git.worktree.list_child_repos` and `collect` recognised a child only by
+`<child>/.git`, so a bare repository cloned straight into its container
+(`git clone --bare <url> name`, worktrees inside it — `auto-run.nvim` in the
+nvim-plugins workspace) was missing from every repo picker and worktree
+listing, including auto-finder's new Active-worktree selector. A child now also
+counts when it IS a git directory, by git's own test: `HEAD` + `objects/` +
+`refs/` (a stray `HEAD` alone does not). `collect` still drops bare entries, so
+such a repo contributes only its worktrees; consumers see no new shape.
+Additive. Reviewed by Lector (ADR 0199 M4).
+
 ## [v0.2.30] — 2026-09-27 — bounded directory reads, a dirty-directory signal, async git status (ADR-0200)
 
 Patch. Needed by auto-finder v0.5.0 (its files and buffers slots are built on `fs.scan`,

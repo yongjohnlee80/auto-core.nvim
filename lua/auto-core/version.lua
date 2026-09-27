@@ -952,6 +952,9 @@ return {
   -- v0.2.30 adds fs.scan (bounded single-flight directory reads), the
   -- core.fs.dir:dirty topic and git.status.get_async + the porcelain v2 -z
   -- parser (ADR-0200). Additive; `api_version` stays at `0.1`.
-  version     = "0.2.30",
+  --
+  -- v0.2.31: git.worktree enumerates a bare repo cloned in place (HEAD +
+  -- objects/ + refs/, no `.git`), ADR 0199 §7.3. Additive.
+  version     = "0.2.31",
   api_version = "0.1",
 }

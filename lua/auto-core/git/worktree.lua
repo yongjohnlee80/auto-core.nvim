@@ -134,6 +134,24 @@ function M.list(repo_path)
   return M.parse_porcelain(lines)
 end
 
+---Is `dir` a git repository a workspace listing should include? Either it
+---carries `.git` (a dir, a gitfile, or the family's bare git dir at
+---`<container>/.git`), or it IS a bare git directory — a repo cloned with
+---`git clone --bare <url> <name>` straight into its container, whose HEAD,
+---objects/ and refs/ sit in the container itself. The second shape has no
+---`.git`, so a `.git` check alone left it out of every repo picker and
+---worktree listing (ADR 0199 §7.3). HEAD + objects/ + refs/ is git's own test
+---for a git directory (setup.c is_git_directory), so a stray HEAD file alone
+---does not qualify.
+---@param dir string
+---@return boolean
+local function is_repo_dir(dir)
+  if path_mod.exists(dir .. "/.git") then return true end
+  return path_mod.is_file(dir .. "/HEAD")
+    and path_mod.is_dir(dir .. "/objects")
+    and path_mod.is_dir(dir .. "/refs")
+end
+
 ---Walk `dir`'s immediate children, run `git worktree list --porcelain`
 ---against each git-managed child, dedupe paths, drop bare entries.
 ---Returns the union of every child repo's worktrees, sorted by path.
@@ -151,7 +169,7 @@ function M.collect(workspace_dir)
     if not name then break end
     if (t == "directory" or t == "link") and not name:match("^%.") then
       local full = dir .. "/" .. name
-      if path_mod.exists(full .. "/.git") then
+      if is_repo_dir(full) then
         local entries = M.list(full)
         if entries then
           for _, wt in ipairs(entries) do
@@ -180,7 +198,8 @@ function M.collect(workspace_dir)
   return out
 end
 
----List immediate child directories of `dir` that are git-managed.
+---List immediate child directories of `dir` that are git-managed —
+---including a bare repo cloned in place (see `is_repo_dir`).
 ---Sorted by name. Useful for building a "registered repos" picker.
 ---@param dir string?     -- defaults to cwd
 ---@return { name: string, path: string }[]
@@ -194,7 +213,7 @@ function M.list_child_repos(dir)
     if not name then break end
     if (t == "directory" or t == "link") and not name:match("^%.") then
       local full = cwd .. "/" .. name
-      if path_mod.exists(full .. "/.git") then
+      if is_repo_dir(full) then
         repos[#repos + 1] = { name = name, path = path_mod.normalize(full) }
       end
     end
