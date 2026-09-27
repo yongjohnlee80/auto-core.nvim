@@ -82,6 +82,12 @@ local M = {
     payload = "{ path = string, change = 'deleted', buf = integer? }",
     publishers = { "auto-core" },
   },
+  ["core.fs.dir:dirty"] = {
+    doc = "A watched directory changed but libuv reported no child name (or an error on its handle). "
+      .. "Consumers holding a listing of `path` must re-read it; nothing more specific is known (ADR-0200 §4.4).",
+    payload = "{ path = string, reason = 'unnamed'|'error', err = string? }",
+    publishers = { "auto-core" },
+  },
   ["core.fs.watch:partial"] = {
     doc = "fs.watch self-extension (ADR 0042, Linux walker) could not fully cover a "
       .. "runtime-created subtree because the max_handles cap was reached. Live refresh "
