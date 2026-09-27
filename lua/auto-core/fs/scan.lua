@@ -9,7 +9,8 @@
 ---  * a path is never read twice inside `MIN_INTERVAL_MS`; a request inside the window is DEFERRED to its
 ---    end and coalesced, never dropped — so a storm of requests becomes a bounded read rate;
 ---  * at most `MAX_INFLIGHT` reads run at once; the rest wait in a FIFO of paths;
----  * the main loop is never held for more than `BATCH` entries of one directory;
+---  * the main loop is never held for more than `BATCH` entries of one directory (the drain resumes from a
+---    libuv timer, so pending input and timers run between batches);
 ---  * one waiter per (owner, path): the waiter tables and the queue are bounded by the number of distinct
 ---    directories the live owners asked for.
 ---
@@ -172,7 +173,14 @@ start_read = function(path, slot)
           entries[#entries + 1] = e
         end
         if epoch ~= _epoch then return end
-        vim.schedule(drain) -- yield: a very wide directory must not hold the main loop
+        -- Yield THROUGH libuv, not via vim.schedule: nvim drains callbacks scheduled from a scheduled
+        -- callback in the same pass, so a vim.schedule chain never lets input or timers in. A 0 ms timer
+        -- fires only after the loop has polled for I/O.
+        local t = vim.uv.new_timer()
+        t:start(0, 0, function()
+          t:close()
+          vim.schedule(drain)
+        end)
       end
       drain()
     end)
