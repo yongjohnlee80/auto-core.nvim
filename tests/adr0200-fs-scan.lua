@@ -52,6 +52,26 @@ local function names(res)
 end
 local function wait(pred, ms) return vim.wait(ms or 3000, pred, 5) end
 
+-- Run `action` once, from a main-loop callback that INTERLEAVES with a read in progress: a repeating
+-- libuv timer schedules a check every tick, and the action fires the first time the scanner has examined
+-- some entries of a read but not all of them. `vim.wait` cannot be used for this — it drains the event
+-- queue between predicate checks, so a whole batched read completes inside one poll. If the scanner did
+-- not yield between batches, no tick would ever see a partial read and the caller's cell fails.
+local function during_read(total, action)
+  local fired = false
+  local t = vim.uv.new_timer()
+  t:start(0, 1, vim.schedule_wrap(function()
+    if fired then return end
+    local st = scan.stats()
+    if st.inflight > 0 and st.entries > 0 and (st.entries % total) ~= 0 then
+      fired = true
+      t:stop(); t:close()
+      action(st)
+    end
+  end))
+  return function() return fired end
+end
+
 -- A wide directory makes a read span several main-loop ticks (BATCH = 512 per tick).
 local WIDE = mkdir("wide")
 for i = 1, 20000 do vim.uv.fs_close(vim.uv.fs_open(WIDE .. "/f" .. i, "w", 420)) end
@@ -81,22 +101,23 @@ end
 section("[2] fresh request during a read gets exactly one follow-up read that sees the change")
 scan._reset_for_tests()
 do
-  local plain_res, fresh_hits, fresh_saw = nil, 0, 0
+  local plain_res, fresh_hits, fresh_saw, mid = nil, 0, 0, nil
+  local fired = during_read(20000, function(st)
+    mid = { entries = st.entries, plain_done = plain_res ~= nil }
+    touch(WIDE .. "/zz-created-mid-read")
+    for _ = 1, 10 do
+      scan.read_dir(WIDE, {}, { fresh = true }, function(res)
+        fresh_hits = fresh_hits + 1
+        for _, e in ipairs(res.entries) do
+          if e.name == "zz-created-mid-read" then fresh_saw = fresh_saw + 1; break end
+        end
+      end)
+    end
+  end)
   scan.read_dir(WIDE, {}, nil, function(res) plain_res = res end)
-  -- Wait until the read is genuinely in progress (entries examined but not finished).
-  wait(function() return scan.stats().entries > 0 end)
-  ok("precondition: the read is in flight", scan.stats().inflight == 1 and plain_res == nil,
-    vim.inspect(scan.stats()))
-  touch(WIDE .. "/zz-created-mid-read")
-  for _ = 1, 10 do
-    scan.read_dir(WIDE, {}, { fresh = true }, function(res)
-      fresh_hits = fresh_hits + 1
-      for _, e in ipairs(res.entries) do
-        if e.name == "zz-created-mid-read" then fresh_saw = fresh_saw + 1; break end
-      end
-    end)
-  end
   wait(function() return fresh_hits == 10 end, 10000)
+  ok("precondition: the fresh requests were issued while the read was in progress",
+    fired() and mid and not mid.plain_done, vim.inspect(mid))
   ok("plain waiter delivered", plain_res ~= nil)
   ok("all 10 fresh waiters delivered", fresh_hits == 10, fresh_hits)
   ok("every fresh result contains the entry created after the first read began", fresh_saw == 10, fresh_saw)
@@ -161,11 +182,11 @@ do
   -- Two owners on one path; cancel one while reading.
   local a, b = {}, {}
   local a_got, b_got = false, false
+  local fired = during_read(20000, function() scan.cancel(a) end)
   scan.read_dir(WIDE, a, nil, function() a_got = true end)
   scan.read_dir(WIDE, b, nil, function() b_got = true end)
-  wait(function() return scan.stats().entries > 0 end)
-  scan.cancel(a)
   wait(function() return b_got end, 10000)
+  ok("precondition: the cancel ran while the read was in progress", fired())
   ok("the other owner is still delivered", b_got)
   ok("the cancelled owner is not", a_got == false)
   -- Owners are compared by identity: two tables with equal contents are different owners.
@@ -181,10 +202,13 @@ do
   wait(function() return scan.stats().slots == 0 end, 3000)
   scan._reset_for_tests()
   local r = {}
+  local fired_r = during_read(20000, function()
+    scan.read_dir(WIDE, r, { fresh = true }, function() end)
+    scan.cancel(r)
+  end)
   scan.read_dir(WIDE, {}, nil, function() end)
-  wait(function() return scan.stats().entries > 0 end)
-  scan.read_dir(WIDE, r, { fresh = true }, function() end)
-  scan.cancel(r)
+  wait(fired_r, 10000)
+  ok("precondition: the fresh request and its cancel happened mid-read", fired_r())
   wait(function() return scan.stats().slots == 0 end, 10000)
   vim.wait(scan.MIN_INTERVAL_MS + 100)
   ok("a cancelled fresh waiter's rerun never ran", scan.stats().reads == 1, scan.stats().reads)
@@ -208,15 +232,16 @@ section("[6] a 20,000-entry read yields to the main loop between batches")
 scan._reset_for_tests()
 do
   local order = {}
+  local fired = during_read(20000, function(st) order[#order + 1] = "tick@" .. st.entries end)
   scan.read_dir(WIDE, {}, nil, function(res)
     order[#order + 1] = "read:" .. #res.entries
   end)
-  -- Scheduled AFTER the read started: with batching it must run before the read completes.
-  wait(function() return scan.stats().entries > 0 end)
-  vim.schedule(function() order[#order + 1] = "timer" end)
-  wait(function() return #order == 2 end, 10000)
-  ok("the read saw every entry", order[#order] == "read:20000" or order[1] == "read:20000", vim.inspect(order))
-  ok("a callback scheduled mid-read ran before the read completed", order[1] == "timer", vim.inspect(order))
+  wait(function() return #order >= 2 or (#order == 1 and not fired()) and scan.stats().inflight == 0 end, 10000)
+  wait(function() return #order == 2 end, 2000)
+  ok("the read saw every entry", order[#order] == "read:20000", vim.inspect(order))
+  ok("an unrelated main-loop callback ran while the read was part-way through",
+    fired() and order[1]:match("^tick@") ~= nil, vim.inspect(order))
+  ok("positive control: more than one batch was needed", 20000 > scan.BATCH)
 end
 
 -- ── [7] MAX_INFLIGHT ─────────────────────────────────────────────────────────────────────────────
