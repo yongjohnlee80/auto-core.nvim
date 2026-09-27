@@ -37,7 +37,8 @@ mutants=(
 
 # git.status mutants (applied to lua/auto-core/git/status.lua)
 git_mutants=(
-  "raw output: text mode rewrites CRLF|  local result = vim.system(argv(root, opts), {}):wait()|  local result = vim.system(argv(root, opts), { text = true }):wait()"
+  "raw output (sync get): text mode rewrites CRLF|  local result = vim.system(argv(root, opts), {}):wait()|  local result = vim.system(argv(root, opts), { text = true }):wait()"
+  "raw output (get_async): text mode rewrites CRLF|  vim.system(argv(root, opts), {}, function(result)|  vim.system(argv(root, opts), { text = true }, function(result)"
 )
 
 killed=0; survived=0; broken=0
