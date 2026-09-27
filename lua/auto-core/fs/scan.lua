@@ -32,7 +32,7 @@ local M = {}
 M.MIN_INTERVAL_MS = 250
 M.MAX_INFLIGHT    = 8
 M.BATCH           = 512
-M.STAT_WINDOW     = 16   -- link/unknown-type fs_stat requests outstanding at once, across all reads
+M.STAT_WINDOW     = 16   -- link/unknown-type fs_stat requests outstanding at once, across ALL reads (one queue)
 
 ---@class AutoCoreScanEntry
 ---@field name string
@@ -130,40 +130,45 @@ local function finish(path, slot, res, epoch)
   pump()
 end
 
--- Resolve link / unknown-d_type entries with at most STAT_WINDOW fs_stat requests outstanding, refilled as
--- each completes, then finish. A directory of 20,000 symlinks (or a filesystem whose readdir carries no
--- d_type, where EVERY entry lands here) must not become 20,000 simultaneous requests.
+-- Link / unknown-d_type entries are resolved through ONE global queue of stat jobs: at most STAT_WINDOW
+-- fs_stat requests are outstanding across all reads at once, refilled as each completes. A directory of
+-- 20,000 symlinks (or a filesystem whose readdir carries no d_type, where EVERY entry lands here), or eight
+-- such reads in flight together, never becomes more than STAT_WINDOW simultaneous requests.
+local _stat_queue = {}  -- FIFO of { dir, entry, epoch, on_done }
+
+local function pump_stats()
+  while _stat_outstanding < M.STAT_WINDOW and #_stat_queue > 0 do
+    local job = table.remove(_stat_queue, 1)
+    if job.epoch == _epoch then
+      _stat_outstanding = _stat_outstanding + 1
+      if _stat_outstanding > _stats.stat_peak then _stats.stat_peak = _stat_outstanding end
+      vim.uv.fs_stat(job.dir .. "/" .. job.entry.name, function(_, st)
+        vim.schedule(function()
+          if job.epoch ~= _epoch then return end
+          _stat_outstanding = _stat_outstanding - 1
+          if st then
+            local t = st.type == "directory" and "directory" or "file"
+            if job.entry.type == "link" then job.entry.target_type = t else job.entry.type = t end
+          end
+          job.on_done()
+          pump_stats()
+        end)
+      end)
+    end
+  end
+end
+
 local function resolve_links(path, slot, entries, links, epoch)
   if #links == 0 then
     return finish(path, slot, { path = path, entries = entries }, epoch)
   end
-  local next_i, outstanding, done = 1, 0, 0
-  local function pump_stats()
-    if epoch ~= _epoch then return end
-    while outstanding < M.STAT_WINDOW and next_i <= #links do
-      local e = links[next_i]
-      next_i = next_i + 1
-      outstanding = outstanding + 1
-      _stat_outstanding = _stat_outstanding + 1
-      if _stat_outstanding > _stats.stat_peak then _stats.stat_peak = _stat_outstanding end
-      vim.uv.fs_stat(path .. "/" .. e.name, function(_, st)
-        vim.schedule(function()
-          if epoch ~= _epoch then return end
-          outstanding = outstanding - 1
-          _stat_outstanding = _stat_outstanding - 1
-          done = done + 1
-          if st then
-            local t = st.type == "directory" and "directory" or "file"
-            if e.type == "link" then e.target_type = t else e.type = t end
-          end
-          if done == #links then
-            finish(path, slot, { path = path, entries = entries }, epoch)
-          else
-            pump_stats()
-          end
-        end)
-      end)
-    end
+  local done = 0
+  local function on_done()
+    done = done + 1
+    if done == #links then finish(path, slot, { path = path, entries = entries }, epoch) end
+  end
+  for _, e in ipairs(links) do
+    _stat_queue[#_stat_queue + 1] = { dir = path, entry = e, epoch = epoch, on_done = on_done }
   end
   pump_stats()
 end
@@ -287,6 +292,7 @@ function M._reset_for_tests()
   _epoch = _epoch + 1
   _stats = { reads = 0, entries = 0, coalesced = 0, deferred = 0, cancelled = 0, stat_peak = 0 }
   _stat_outstanding = 0
+  _stat_queue = {}
 end
 
 return M

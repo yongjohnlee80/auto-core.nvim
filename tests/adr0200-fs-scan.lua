@@ -460,6 +460,32 @@ do
   ok("nothing left outstanding", scan.stats().stat_outstanding == 0, scan.stats().stat_outstanding)
 end
 
+section("[12b] the stat window is GLOBAL: four link-heavy reads in flight together share it")
+scan._reset_for_tests()
+do
+  local target = ROOT .. "/links-target"
+  local dirs, got = {}, 0
+  for k = 1, 4 do
+    dirs[k] = mkdir("links-many/d" .. k)
+    for i = 1, 1500 do vim.uv.fs_symlink(target, dirs[k] .. "/l" .. i) end
+  end
+  local peak_inflight = 0
+  for k = 1, 4 do
+    scan.read_dir(dirs[k], {}, nil, function(r)
+      local ok_all = #r.entries == 1500
+      for _, e in ipairs(r.entries) do if e.target_type ~= "directory" then ok_all = false end end
+      if ok_all then got = got + 1 end
+    end)
+    peak_inflight = math.max(peak_inflight, scan.stats().inflight)
+  end
+  wait(function() return got == 4 end, 30000)
+  ok("all four reads delivered with every link resolved", got == 4, got)
+  ok("precondition: the four reads were in flight together", peak_inflight == 4, peak_inflight)
+  ok(("global peak outstanding stats ≤ STAT_WINDOW across reads (%d ≤ %d)"):format(scan.stats().stat_peak, scan.STAT_WINDOW),
+    scan.stats().stat_peak <= scan.STAT_WINDOW)
+  ok("nothing left outstanding", scan.stats().stat_outstanding == 0, scan.stats().stat_outstanding)
+end
+
 -- ── [13] git.status reads raw: a CRLF inside a filename survives ─────────────────────────────────
 section("[13] git.status: a filename containing CRLF arrives byte-exact (sync and async)")
 do

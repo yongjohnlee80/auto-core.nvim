@@ -32,7 +32,8 @@ mutants=(
   "batch: drain the whole directory in one tick|        for _ = 1, M.BATCH do|        for _ = 1, math.huge do"
   "yield: vim.schedule chain instead of a libuv timer|        local t = vim.uv.new_timer()\n        t:start(0, 0, function()\n          t:close()\n          vim.schedule(drain)\n        end)|        vim.schedule(drain)"
   "cancel: a no-op|  if type(owner) ~= \"table\" then return end|  do return end"
-  "stat window: unbounded link resolution|    while outstanding < M.STAT_WINDOW and next_i <= #links do|    while next_i <= #links do"
+  "stat window: unbounded link resolution|  while _stat_outstanding < M.STAT_WINDOW and #_stat_queue > 0 do|  while #_stat_queue > 0 do"
+  "stat window: per-read instead of global|  local done = 0\n  local function on_done()|  local done = 0\n  _stat_outstanding = 0\n  local function on_done()"
 )
 
 # git.status mutants (applied to lua/auto-core/git/status.lua)
