@@ -948,6 +948,10 @@ return {
   -- The durable fix is to anchor this on the git TAG, the one artifact a
   -- release cannot omit; raised separately rather than bolted onto a docs
   -- change, because it alters what the gate MEANS and deserves its own review.
-  version     = "0.2.29",
+  --
+  -- v0.2.30 adds fs.scan (bounded single-flight directory reads), the
+  -- core.fs.dir:dirty topic and git.status.get_async + the porcelain v2 -z
+  -- parser (ADR-0200). Additive; `api_version` stays at `0.1`.
+  version     = "0.2.30",
   api_version = "0.1",
 }

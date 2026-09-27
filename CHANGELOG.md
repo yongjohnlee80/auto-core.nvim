@@ -10,7 +10,10 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
-## [Unreleased] — bounded directory reads, a dirty-directory signal, async git status (ADR-0200)
+## [v0.2.30] — 2026-09-27 — bounded directory reads, a dirty-directory signal, async git status (ADR-0200)
+
+Patch. Needed by auto-finder v0.5.0 (its files and buffers slots are built on `fs.scan`,
+`git.status.get_async` and `core.fs.dir:dirty`). Reviewed by Lector (M2, four rounds).
 
 Groundwork for auto-finder's rebuilt files and buffers panes. New surface is additive; `api_version`
 unchanged. **One observable change to an existing function:** `git.status.get()` entry VALUES differ for
