@@ -10,7 +10,8 @@
 ---    end and coalesced, never dropped — so a storm of requests becomes a bounded read rate;
 ---  * at most `MAX_INFLIGHT` reads run at once; the rest wait in a FIFO of paths;
 ---  * the main loop is never held for more than `BATCH` entries of one directory (the drain resumes from a
----    libuv timer, so pending input and timers run between batches);
+---    libuv timer, so pending input and timers run between batches), and at most `STAT_WINDOW` link /
+---    unknown-type stats are outstanding at once;
 ---  * one waiter per (owner, path): the waiter tables and the queue are bounded by the number of distinct
 ---    directories the live owners asked for.
 ---
@@ -31,6 +32,7 @@ local M = {}
 M.MIN_INTERVAL_MS = 250
 M.MAX_INFLIGHT    = 8
 M.BATCH           = 512
+M.STAT_WINDOW     = 16   -- link/unknown-type fs_stat requests outstanding at once, across all reads
 
 ---@class AutoCoreScanEntry
 ---@field name string
@@ -57,7 +59,8 @@ local _last = {}
 local _inflight = 0
 -- Bumped by _reset_for_tests: a read started before a reset must not touch the state that replaced it.
 local _epoch = 0
-local _stats = { reads = 0, entries = 0, coalesced = 0, deferred = 0, cancelled = 0 }
+local _stat_outstanding = 0
+local _stats = { reads = 0, entries = 0, coalesced = 0, deferred = 0, cancelled = 0, stat_peak = 0 }
 
 local start_read -- forward
 
@@ -96,6 +99,9 @@ local function schedule(path, slot)
   pump()
 end
 
+-- Delivery runs while the slot is still "reading": a request made FROM a callback with `fresh` becomes a
+-- rerun waiter; one without `fresh` becomes a waiter of a NEW read (deferred by MIN_INTERVAL_MS) rather than
+-- being answered from the result just delivered. Accepted: bounded by the interval (Lector, PR #53 r0).
 local function finish(path, slot, res, epoch)
   if epoch ~= _epoch then return end
   _inflight = _inflight - 1
@@ -124,24 +130,42 @@ local function finish(path, slot, res, epoch)
   pump()
 end
 
--- Resolve link targets asynchronously, then finish. `pending` counts outstanding stats.
+-- Resolve link / unknown-d_type entries with at most STAT_WINDOW fs_stat requests outstanding, refilled as
+-- each completes, then finish. A directory of 20,000 symlinks (or a filesystem whose readdir carries no
+-- d_type, where EVERY entry lands here) must not become 20,000 simultaneous requests.
 local function resolve_links(path, slot, entries, links, epoch)
   if #links == 0 then
     return finish(path, slot, { path = path, entries = entries }, epoch)
   end
-  local pending = #links
-  for _, e in ipairs(links) do
-    vim.uv.fs_stat(path .. "/" .. e.name, function(_, st)
-      vim.schedule(function()
-        if st then
-          local t = st.type == "directory" and "directory" or "file"
-          if e.type == "link" then e.target_type = t else e.type = t end
-        end
-        pending = pending - 1
-        if pending == 0 then finish(path, slot, { path = path, entries = entries }, epoch) end
+  local next_i, outstanding, done = 1, 0, 0
+  local function pump_stats()
+    if epoch ~= _epoch then return end
+    while outstanding < M.STAT_WINDOW and next_i <= #links do
+      local e = links[next_i]
+      next_i = next_i + 1
+      outstanding = outstanding + 1
+      _stat_outstanding = _stat_outstanding + 1
+      if _stat_outstanding > _stats.stat_peak then _stats.stat_peak = _stat_outstanding end
+      vim.uv.fs_stat(path .. "/" .. e.name, function(_, st)
+        vim.schedule(function()
+          if epoch ~= _epoch then return end
+          outstanding = outstanding - 1
+          _stat_outstanding = _stat_outstanding - 1
+          done = done + 1
+          if st then
+            local t = st.type == "directory" and "directory" or "file"
+            if e.type == "link" then e.target_type = t else e.type = t end
+          end
+          if done == #links then
+            finish(path, slot, { path = path, entries = entries }, epoch)
+          else
+            pump_stats()
+          end
+        end)
       end)
-    end)
+    end
   end
+  pump_stats()
 end
 
 start_read = function(path, slot)
@@ -151,6 +175,7 @@ start_read = function(path, slot)
   local epoch = _epoch
   vim.uv.fs_scandir(path, function(err, handle)
     vim.schedule(function()
+      if epoch ~= _epoch then return end
       if err or not handle then
         return finish(path, slot, { path = path, entries = {}, err = tostring(err) }, epoch)
       end
@@ -241,7 +266,7 @@ function M.cancel(owner)
 end
 
 ---@return { reads: integer, entries: integer, coalesced: integer, deferred: integer, cancelled: integer,
----          inflight: integer, queued: integer, slots: integer }
+---          inflight: integer, queued: integer, slots: integer, stat_peak: integer, stat_outstanding: integer }
 function M.stats()
   local slots = 0
   for _ in pairs(_slots) do slots = slots + 1 end
@@ -249,6 +274,7 @@ function M.stats()
     reads = _stats.reads, entries = _stats.entries, coalesced = _stats.coalesced,
     deferred = _stats.deferred, cancelled = _stats.cancelled,
     inflight = _inflight, queued = #_queue, slots = slots,
+    stat_peak = _stats.stat_peak, stat_outstanding = _stat_outstanding,
   }
 end
 
@@ -259,7 +285,8 @@ function M._reset_for_tests()
   end
   _slots, _queue, _last, _inflight = {}, {}, {}, 0
   _epoch = _epoch + 1
-  _stats = { reads = 0, entries = 0, coalesced = 0, deferred = 0, cancelled = 0 }
+  _stats = { reads = 0, entries = 0, coalesced = 0, deferred = 0, cancelled = 0, stat_peak = 0 }
+  _stat_outstanding = 0
 end
 
 return M

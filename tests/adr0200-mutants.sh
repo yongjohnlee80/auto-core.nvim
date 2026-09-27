@@ -32,6 +32,12 @@ mutants=(
   "batch: drain the whole directory in one tick|        for _ = 1, M.BATCH do|        for _ = 1, math.huge do"
   "yield: vim.schedule chain instead of a libuv timer|        local t = vim.uv.new_timer()\n        t:start(0, 0, function()\n          t:close()\n          vim.schedule(drain)\n        end)|        vim.schedule(drain)"
   "cancel: a no-op|  if type(owner) ~= \"table\" then return end|  do return end"
+  "stat window: unbounded link resolution|    while outstanding < M.STAT_WINDOW and next_i <= #links do|    while next_i <= #links do"
+)
+
+# git.status mutants (applied to lua/auto-core/git/status.lua)
+git_mutants=(
+  "raw output: text mode rewrites CRLF|  local result = vim.system(argv(root, opts), {}):wait()|  local result = vim.system(argv(root, opts), { text = true }):wait()"
 )
 
 killed=0; survived=0; broken=0
@@ -42,6 +48,32 @@ for m in "${mutants[@]}"; do
   if ! python3 - "$dir/lua/auto-core/fs/scan.lua" "$old" "$new" <<'PY'
 import sys
 p, old, new = sys.argv[1], sys.argv[2].encode().decode("unicode_escape"), sys.argv[3].encode().decode("unicode_escape")
+s = open(p).read()
+n = s.count(old)
+if n != 1:
+    print(f"    mutation matched {n} times"); sys.exit(1)
+open(p, "w").write(s.replace(old, new))
+PY
+  then
+    echo "NOT APPLIED  $name"; broken=$((broken + 1)); continue
+  fi
+  out="$(run_suite "$dir")"
+  summary="$(printf '%s\n' "$out" | grep -oE '[0-9]+ passed, [0-9]+ failed' | tail -1)"
+  if [ -n "$summary" ] && [ "${summary##*, }" = "0 failed" ]; then
+    echo "SURVIVED     $name"; survived=$((survived + 1))
+  else
+    echo "KILLED       $name  (${summary:-aborted})"
+    printf '%s\n' "$out" | grep -E '^  FAIL' | head -4 | sed 's/^/               /'
+    killed=$((killed + 1))
+  fi
+done
+for m in "${git_mutants[@]}"; do
+  name="${m%%|*}"; rest="${m#*|}"; old="${rest%%|*}"; new="${rest#*|}"
+  dir="$WORK/g$((killed + survived + broken))"
+  cp -r "$SRC" "$dir"
+  if ! python3 - "$dir/lua/auto-core/git/status.lua" "$old" "$new" <<'PY'
+import sys
+p, old, new = sys.argv[1], sys.argv[2], sys.argv[3]
 s = open(p).read()
 n = s.count(old)
 if n != 1:

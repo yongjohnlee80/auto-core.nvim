@@ -438,6 +438,62 @@ do
     before.sec == after.sec and before.nsec == after.nsec, vim.inspect({ before, after }))
 end
 
+-- ── [12] link resolution is bounded ─────────────────────────────────────────────────────────────
+section("[12] link / unknown-type resolution keeps at most STAT_WINDOW stats outstanding")
+scan._reset_for_tests()
+do
+  local d = mkdir("links")
+  local target = mkdir("links-target")
+  touch(target .. "/t")
+  for i = 1, 5000 do vim.uv.fs_symlink(i % 2 == 0 and target or (target .. "/t"), d .. "/l" .. i) end
+  local res
+  scan.read_dir(d, {}, nil, function(r) res = r end)
+  wait(function() return res ~= nil end, 20000)
+  local resolved = 0
+  for _, e in ipairs(res and res.entries or {}) do
+    if e.type == "link" and (e.target_type == "directory" or e.target_type == "file") then resolved = resolved + 1 end
+  end
+  ok("all 5,000 links delivered and resolved", resolved == 5000, resolved)
+  ok(("peak outstanding stats ≤ STAT_WINDOW (%d ≤ %d)"):format(scan.stats().stat_peak, scan.STAT_WINDOW),
+    scan.stats().stat_peak <= scan.STAT_WINDOW)
+  ok("positive control: stats did overlap (peak > 1)", scan.stats().stat_peak > 1, scan.stats().stat_peak)
+  ok("nothing left outstanding", scan.stats().stat_outstanding == 0, scan.stats().stat_outstanding)
+end
+
+-- ── [13] git.status reads raw: a CRLF inside a filename survives ─────────────────────────────────
+section("[13] git.status: a filename containing CRLF arrives byte-exact (sync and async)")
+do
+  local name = "cr\r\nlf.txt"
+  local f = assert(io.open(GR .. "/" .. name, "w")); f:write("x"); f:close()
+  status._reset_for_tests()
+  local function has(list)
+    for _, e in ipairs(list or {}) do if e.path == name then return true end end
+    return false
+  end
+  ok("sync get returns the exact CRLF path", has(status.get(GR)))
+  status.invalidate(GR)
+  local a
+  status.get_async(GR, nil, function(e) a = e end)
+  wait(function() return a ~= nil end)
+  ok("async get_async returns the exact CRLF path", has(a))
+  os.remove(GR .. "/" .. name)
+end
+
+-- ── [14] re-entrancy from a delivery callback (documented behaviour) ─────────────────────────────
+section("[14] a non-fresh request made from a delivery callback is served by one more (deferred) read")
+scan._reset_for_tests()
+do
+  local d = mkdir("reentrant")
+  local second
+  scan.read_dir(d, {}, nil, function()
+    scan.read_dir(d, {}, nil, function(r) second = r end)
+  end)
+  wait(function() return second ~= nil end)
+  ok("the inner request is delivered", second ~= nil)
+  ok("by exactly one further read, deferred by the interval",
+    scan.stats().reads == 2 and scan.stats().deferred == 1, vim.inspect(scan.stats()))
+end
+
 vim.fn.delete(ROOT, "rf")
 vim.fn.delete(SANDBOX, "rf")
 io.stdout:write(("\n%d passed, %d failed\n"):format(pass, fail))

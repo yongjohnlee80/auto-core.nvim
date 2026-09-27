@@ -12,13 +12,16 @@ cycle plus a major bump.
 
 ## [Unreleased] — bounded directory reads, a dirty-directory signal, async git status (ADR-0200)
 
-Groundwork for auto-finder's rebuilt files and buffers panes. All additive; `api_version` unchanged.
+Groundwork for auto-finder's rebuilt files and buffers panes. New surface is additive; `api_version`
+unchanged. **One observable change to an existing function:** `git.status.get()` entry VALUES differ for
+renamed/copied paths and for paths with special characters — see the `git.status` paragraph.
 
 **`fs.scan` — NEW.** `read_dir(path, owner, opts?, cb)` reads ONE directory asynchronously. Concurrent
 callers share one read; a `fresh` request made during a read is served by exactly one follow-up read; a path
 is never re-read inside `MIN_INTERVAL_MS` (requests in the window are deferred, never dropped); at most
 `MAX_INFLIGHT` reads run at once; a wide directory is drained `BATCH` entries per tick, resuming from a libuv
-timer so input is processed between batches. Owners are tables compared by identity; `cancel(owner)` drops
+timer so input is processed between batches; link and unknown-type entries are resolved with at most
+`STAT_WINDOW` stats outstanding. Owners are tables compared by identity; `cancel(owner)` drops
 every waiter of an owner and its reruns. `stats()` exposes examined-work counters.
 
 **`fs.watch` — `core.fs.dir:dirty` (NEW topic).** A libuv event with no child name, or an error on a watched
@@ -30,7 +33,10 @@ single-flight per (root, ignored); a call made after an invalidation that landed
 follow-up read, and the running read's result is not cached. `opts.ignored` adds `--ignored=matching` (`!!`
 entries), cached separately. `get` now parses `--porcelain=v2 -z` too: entries keep `{ path, status_x,
 status_y }` and gain `orig_path` for renames/copies. Paths with special characters now arrive unquoted, and a
-rename's `path` is the new path (v1 without `-z` reported `"old -> new"`).
+rename's `path` is the new path (v1 without `-z` reported `"old -> new"`). Output is read raw, so a
+filename containing CRLF is not rewritten. The only in-tree consumer (auto-finder `core/git.lua`) is
+unaffected by the new values; an out-of-tree caller that parsed `"old -> new"` itself must switch to
+`path` + `orig_path`.
 
 ## [v0.2.29] — 2026-09-23 — a shared confirm modal, and a commit row that shows the commit
 

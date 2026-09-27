@@ -22,9 +22,13 @@
 ---  path      = repo-relative path; a trailing "/" means a whole untracked or ignored directory
 ---  orig_path = rename/copy origin (R/C entries only)
 ---
+---Output is read RAW (no `text = true`): text mode rewrites CRLF to LF, and git permits CRLF inside a
+---filename, which the NUL-delimited protocol carries verbatim.
+---
 ---`get_async` is single-flight per (root, ignored): concurrent callers share one subprocess. A call made
 ---after an invalidation that happened while a read was running is served by exactly one follow-up read,
----because the running read may predate the change. The read passes `--no-optional-locks`, so it never
+---because the running read may predate the change. Callers that joined BEFORE the invalidation receive the
+---running read's result: a snapshot from when they asked. The read passes `--no-optional-locks`, so it never
 ---rewrites the index and cannot re-trigger `core.git.state:changed` (ADR-0050 §2.1).
 ---@module 'auto-core.git.status'
 
@@ -111,7 +115,7 @@ local function shell_status(root, opts)
   -- `--no-optional-locks` (GIT_OPTIONAL_LOCKS=0) keeps `git status` from taking `index.lock` to rewrite
   -- the on-disk index stat cache; without it a status against a freshly checked-out worktree rewrites
   -- `git_dir/index`, which `git.watch` observes as an `index` mutation (ADR-0050 §2.1).
-  local result = vim.system(argv(root, opts), { text = true }):wait()
+  local result = vim.system(argv(root, opts), {}):wait()
   if result.code ~= 0 then
     return nil, "git status failed: " .. tostring(result.stderr or "(no stderr)")
   end
@@ -185,7 +189,7 @@ end
 
 local function start_async(root, k, opts, slot)
   slot.epoch = _epoch[root] or 0
-  vim.system(argv(root, opts), { text = true }, function(result)
+  vim.system(argv(root, opts), {}, function(result)
     vim.schedule(function()
       local entries, err
       if result.code ~= 0 then
