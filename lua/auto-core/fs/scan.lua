@@ -134,11 +134,27 @@ end
 -- fs_stat requests are outstanding across all reads at once, refilled as each completes. A directory of
 -- 20,000 symlinks (or a filesystem whose readdir carries no d_type, where EVERY entry lands here), or eight
 -- such reads in flight together, never becomes more than STAT_WINDOW simultaneous requests.
-local _stat_queue = {}  -- FIFO of { dir, entry, epoch, on_done }
+-- FIFO with head/tail indices: a pop is O(1). (table.remove(q, 1) shifts every remaining job, which for a
+-- 20,000-link directory is ~2e8 moves on the main loop — Lector, PR #53 r2.) Reset to empty when drained.
+local _stat_queue, _stat_head, _stat_tail = {}, 1, 0  -- jobs: { dir, entry, epoch, on_done }
+
+local function push_stat(job)
+  _stat_tail = _stat_tail + 1
+  _stat_queue[_stat_tail] = job
+end
+
+local function pop_stat()
+  if _stat_head > _stat_tail then return nil end
+  local job = _stat_queue[_stat_head]
+  _stat_queue[_stat_head] = nil
+  _stat_head = _stat_head + 1
+  if _stat_head > _stat_tail then _stat_head, _stat_tail = 1, 0 end
+  return job
+end
 
 local function pump_stats()
-  while _stat_outstanding < M.STAT_WINDOW and #_stat_queue > 0 do
-    local job = table.remove(_stat_queue, 1)
+  while _stat_outstanding < M.STAT_WINDOW and _stat_head <= _stat_tail do
+    local job = pop_stat()
     if job.epoch == _epoch then
       _stat_outstanding = _stat_outstanding + 1
       if _stat_outstanding > _stats.stat_peak then _stats.stat_peak = _stat_outstanding end
@@ -168,7 +184,7 @@ local function resolve_links(path, slot, entries, links, epoch)
     if done == #links then finish(path, slot, { path = path, entries = entries }, epoch) end
   end
   for _, e in ipairs(links) do
-    _stat_queue[#_stat_queue + 1] = { dir = path, entry = e, epoch = epoch, on_done = on_done }
+    push_stat({ dir = path, entry = e, epoch = epoch, on_done = on_done })
   end
   pump_stats()
 end
@@ -292,7 +308,7 @@ function M._reset_for_tests()
   _epoch = _epoch + 1
   _stats = { reads = 0, entries = 0, coalesced = 0, deferred = 0, cancelled = 0, stat_peak = 0 }
   _stat_outstanding = 0
-  _stat_queue = {}
+  _stat_queue, _stat_head, _stat_tail = {}, 1, 0
 end
 
 return M

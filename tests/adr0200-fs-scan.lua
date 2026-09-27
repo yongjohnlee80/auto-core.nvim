@@ -486,6 +486,31 @@ do
   ok("nothing left outstanding", scan.stats().stat_outstanding == 0, scan.stats().stat_outstanding)
 end
 
+section("[12c] link resolution does linear queue work: a 20,000-link read shifts no queue")
+scan._reset_for_tests()
+do
+  local target = ROOT .. "/links-target"
+  local d = mkdir("links-wide")
+  for i = 1, 20000 do vim.uv.fs_symlink(target, d .. "/l" .. i) end
+  -- Count elements moved by front-removal on large tables while the read runs: the queue's real cost.
+  local real_remove, shifted = table.remove, 0
+  table.remove = function(t, pos, ...)
+    if pos == 1 and #t > 1000 then shifted = shifted + (#t - 1) end
+    return real_remove(t, pos, ...)
+  end
+  local res, t0 = nil, vim.uv.hrtime()
+  scan.read_dir(d, {}, nil, function(r) res = r end)
+  wait(function() return res ~= nil end, 60000)
+  table.remove = real_remove
+  local ms = (vim.uv.hrtime() - t0) / 1e6
+  local resolved = 0
+  for _, e in ipairs(res and res.entries or {}) do if e.target_type == "directory" then resolved = resolved + 1 end end
+  ok("all 20,000 links resolved", resolved == 20000, resolved)
+  ok(("no quadratic queue shifting (elements shifted = %d)"):format(shifted), shifted == 0)
+  ok(("peak outstanding stats ≤ STAT_WINDOW (%d)"):format(scan.stats().stat_peak), scan.stats().stat_peak <= scan.STAT_WINDOW)
+  io.stdout:write(("  info  20,000-link read took %.0f ms\n"):format(ms))
+end
+
 -- ── [13] git.status reads raw: a CRLF inside a filename survives ─────────────────────────────────
 section("[13] git.status: a filename containing CRLF arrives byte-exact (sync and async)")
 do
