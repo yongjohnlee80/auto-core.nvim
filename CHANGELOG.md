@@ -10,6 +10,28 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [Unreleased] — bounded directory reads, a dirty-directory signal, async git status (ADR-0200)
+
+Groundwork for auto-finder's rebuilt files and buffers panes. All additive; `api_version` unchanged.
+
+**`fs.scan` — NEW.** `read_dir(path, owner, opts?, cb)` reads ONE directory asynchronously. Concurrent
+callers share one read; a `fresh` request made during a read is served by exactly one follow-up read; a path
+is never re-read inside `MIN_INTERVAL_MS` (requests in the window are deferred, never dropped); at most
+`MAX_INFLIGHT` reads run at once; a wide directory is drained `BATCH` entries per tick, resuming from a libuv
+timer so input is processed between batches. Owners are tables compared by identity; `cancel(owner)` drops
+every waiter of an owner and its reruns. `stats()` exposes examined-work counters.
+
+**`fs.watch` — `core.fs.dir:dirty` (NEW topic).** A libuv event with no child name, or an error on a watched
+directory's handle, used to be dropped silently. It is now published as `{ path = <dir>, reason =
+"unnamed"|"error" }`, debounced per directory, so a consumer holding a listing knows to re-read it.
+
+**`git.status` — `get_async` (NEW) and a porcelain v2 `-z` parser.** `get_async(root?, opts?, cb)` is
+single-flight per (root, ignored); a call made after an invalidation that landed during a running read gets one
+follow-up read, and the running read's result is not cached. `opts.ignored` adds `--ignored=matching` (`!!`
+entries), cached separately. `get` now parses `--porcelain=v2 -z` too: entries keep `{ path, status_x,
+status_y }` and gain `orig_path` for renames/copies. Paths with special characters now arrive unquoted, and a
+rename's `path` is the new path (v1 without `-z` reported `"old -> new"`).
+
 ## [v0.2.29] — 2026-09-23 — a shared confirm modal, and a commit row that shows the commit
 
 Two ADR-0195 phases. Both additive; `api_version` unchanged.
