@@ -13573,6 +13573,161 @@ print("\n[89] git.worktree — bare repos without .git are enumerated")
   vim.fn.delete(ws, "rf")
 end)()
 
+-- ── [90] git.worktree — prunable and locked worktrees are marked ──────
+-- parse_porcelain dropped git's `prunable` and `locked` lines, so a worktree
+-- whose directory had been deleted was listed exactly like a live one, and
+-- auto-finder's Active-worktree picker offered (and crashed on) two dead /tmp
+-- worktrees. The flags are kept now; the entries stay listed.
+print("\n[90] git.worktree — prunable and locked worktrees are marked")
+;(function()
+  local wt = require("auto-core.git.worktree")
+  local parsed = wt.parse_porcelain({
+    "worktree /r/live", "HEAD 1111111111", "branch refs/heads/main", "",
+    "worktree /r/gone", "HEAD 2222222222", "detached", "prunable gitdir file points to non-existent location", "",
+    "worktree /r/held", "HEAD 3333333333", "branch refs/heads/hold", "locked on a USB drive", "",
+    "worktree /r/both", "HEAD 4444444444", "branch refs/heads/b", "locked", "prunable",
+  })
+  ok("[90] every entry is still listed", #parsed == 4, vim.inspect(parsed))
+  ok("[90] a live worktree carries neither flag",
+    parsed[1].prunable == nil and parsed[1].locked == nil, vim.inspect(parsed[1]))
+  ok("[90] prunable with a reason is flagged; detached is still read",
+    parsed[2].prunable == true and parsed[2].detached == true, vim.inspect(parsed[2]))
+  ok("[90] locked with a reason is flagged; the branch is still read",
+    parsed[3].locked == true and parsed[3].branch == "hold" and parsed[3].prunable == nil, vim.inspect(parsed[3]))
+  ok("[90] the bare keywords set both flags",
+    parsed[4].locked == true and parsed[4].prunable == true, vim.inspect(parsed[4]))
+
+  -- The real thing: git marks a worktree whose directory was deleted.
+  local ws = vim.fn.tempname() .. "-ws90"
+  vim.fn.mkdir(ws, "p")
+  local function git(dir, ...)
+    local r = vim.system({ "git", "-C", dir, "-c", "user.email=s@t", "-c", "user.name=s", ... },
+      { text = true }):wait()
+    return r.code == 0, (r.stderr or "")
+  end
+  vim.system({ "git", "init", "-q", "-b", "main", ws .. "/repo" }, { text = true }):wait()
+  git(ws .. "/repo", "commit", "-q", "--allow-empty", "-m", "init")
+  local gone = ws .. "/elsewhere/gone"
+  local okw, ew = git(ws .. "/repo", "worktree", "add", "-q", "--detach", gone)
+  ok("[90] fixture: a linked worktree outside the workspace", okw, ew)
+  vim.fn.delete(ws .. "/elsewhere", "rf")
+
+  local norm = require("auto-core.fs.path").normalize
+  local by = {}
+  for _, e in ipairs(wt.collect(ws) or {}) do by[e.path] = e end
+  ok("[90] collect still lists the deleted worktree, flagged prunable",
+    by[norm(gone)] and by[norm(gone)].prunable == true, vim.inspect(by))
+  ok("[90] the live main worktree is not flagged",
+    by[norm(ws .. "/repo")] and by[norm(ws .. "/repo")].prunable == nil, vim.inspect(by))
+
+  vim.fn.delete(ws, "rf")
+end)()
+
+-- ── [91] git.worktree — the one worktree picker ────────────────────
+-- worktree.nvim's <leader>gw, auto-finder's `w` and auto-run's <leader>rw all
+-- show git.worktree.select's list: every worktree of every repo under the
+-- root, plus the root's own when the root is a repo (a single plain repo —
+-- collect alone found nothing there), without bare or prunable entries.
+-- choose_active is select + set_active and leaves the cwd alone.
+print("\n[91] git.worktree — select / choose_active: the one worktree picker")
+;(function()
+  local wt = require("auto-core.git.worktree")
+  local norm = require("auto-core.fs.path").normalize
+  local function git(dir, ...)
+    local r = vim.system({ "git", "-C", dir, "-c", "user.email=s@t", "-c", "user.name=s", ... },
+      { text = true }):wait()
+    return r.code == 0, (r.stderr or "")
+  end
+  local function init(dir)
+    vim.system({ "git", "init", "-q", "-b", "main", dir }, { text = true }):wait()
+    git(dir, "commit", "-q", "--allow-empty", "-m", "init")
+  end
+
+  -- A multi-repo workspace: plain repo a/ with a linked worktree a-feat/, the
+  -- family layout b/ (bare at b/.git, worktree b/main), and a deleted worktree.
+  local ws = norm(vim.fn.tempname() .. "-ws91")
+  vim.fn.mkdir(ws, "p")
+  init(ws .. "/a")
+  local ok1 = git(ws .. "/a", "worktree", "add", "-q", "-b", "feat", ws .. "/a-feat")
+  vim.fn.mkdir(ws .. "/b", "p")
+  vim.system({ "git", "clone", "-q", "--bare", ws .. "/a", ws .. "/b/.git" }, { text = true }):wait()
+  local ok2 = git(ws .. "/b", "worktree", "add", "-q", ws .. "/b/main", "main")
+  local ok3 = git(ws .. "/a", "worktree", "add", "-q", "--detach", ws .. "/gone")
+  vim.fn.delete(ws .. "/gone", "rf")
+  ok("[91] fixture built", ok1 and ok2 and ok3)
+
+  local paths = {}
+  for _, e in ipairs(wt.selectable(ws)) do paths[#paths + 1] = e.path end
+  ok("[91] selectable: every live worktree, sorted; no bare, no prunable",
+    vim.deep_equal(paths, { ws .. "/a", ws .. "/a-feat", ws .. "/b/main" }), vim.inspect(paths))
+
+  -- A single plain repo as the root, with one linked worktree beside it.
+  local solo = norm(vim.fn.tempname() .. "-solo91")
+  init(solo)
+  git(solo, "worktree", "add", "-q", "-b", "side", solo .. "-side")
+  local solo_paths = {}
+  for _, e in ipairs(wt.selectable(solo)) do solo_paths[#solo_paths + 1] = e.path end
+  ok("[91] selectable: a root that is itself a plain repo offers its own worktrees",
+    vim.deep_equal(solo_paths, { solo, solo .. "-side" }), vim.inspect(solo_paths))
+
+  local by = {}
+  for _, e in ipairs(wt.selectable(solo)) do by[e.path] = e end
+  ok("[91] format_entry: '.' for the root, marked when current",
+    wt.format_entry(by[solo], solo, solo):match("^● %.%s+%[main%]$") ~= nil, wt.format_entry(by[solo], solo, solo))
+  local outside = wt.format_entry(by[solo .. "-side"], solo, solo)
+  ok("[91] format_entry: a worktree outside the root shows its ~-relative path",
+    outside:match("^  " .. vim.pesc(vim.fn.fnamemodify(solo .. "-side", ":~")) .. "%s+%[side%]$") ~= nil, outside)
+
+  -- select: the list, the labels and the prompt; the choice goes to on_choice.
+  local real_select = vim.ui.select
+  local seen
+  local pick_index = 2
+  vim.ui.select = function(items, o, cb)
+    seen = { items = items, prompt = o.prompt, labels = vim.tbl_map(o.format_item, items) }
+    cb(pick_index and items[pick_index] or nil)
+  end
+  local chosen
+  local okS = wt.select({ root = ws, prompt = "Switch worktree:", current = ws .. "/a" }, function(e) chosen = e end)
+  ok("[91] select opens the picker with the caller's prompt", okS and seen and seen.prompt == "Switch worktree:",
+    vim.inspect(seen))
+  ok("[91] select labels: marker on current, relative path, branch",
+    seen.labels[1]:match("^● a%s+%[main%]$") and seen.labels[2]:match("^  a%-feat%s+%[feat%]$")
+      and seen.labels[3]:match("^  b/main%s+%[main%]$"), vim.inspect(seen.labels))
+  ok("[91] select hands the chosen entry to on_choice", chosen and chosen.path == ws .. "/a-feat", vim.inspect(chosen))
+
+  local empty = norm(vim.fn.tempname() .. "-empty91")
+  vim.fn.mkdir(empty, "p")
+  seen = nil
+  local okE, errE = wt.select({ root = empty }, function() end)
+  ok("[91] select with nothing to offer reports it and opens no picker",
+    okE == false and seen == nil and tostring(errE):match("no worktrees found") ~= nil, tostring(errE))
+
+  -- choose_active: sets the active worktree, never the cwd; cancel changes nothing.
+  wt._reset_for_tests()
+  local cwd_before = vim.fn.getcwd()
+  local changed = {}
+  local sub = events_mod.subscribe("core.active_worktree:changed", function(p) changed[#changed + 1] = p end)
+  pick_index = 3
+  local okA = wt.choose_active({ root = ws })
+  ok("[91] choose_active sets the chosen worktree active",
+    okA and wt.get_active() == ws .. "/b/main", tostring(wt.get_active()))
+  ok("[91] choose_active leaves the cwd alone", vim.fn.getcwd() == cwd_before, vim.fn.getcwd())
+  vim.wait(200, function() return #changed > 0 end)
+  ok("[91] choose_active publishes core.active_worktree:changed",
+    #changed == 1 and changed[1].to == ws .. "/b/main", vim.inspect(changed))
+  pick_index = 1
+  wt.choose_active({ root = ws })
+  ok("[91] choose_active marks the current active worktree", seen.labels[3]:match("^●") ~= nil, vim.inspect(seen.labels))
+  pick_index = nil
+  wt.choose_active({ root = ws })
+  ok("[91] cancelling choose_active changes nothing", wt.get_active() == ws .. "/a", tostring(wt.get_active()))
+
+  events_mod.unsubscribe(sub)
+  vim.ui.select = real_select
+  wt._reset_for_tests()
+  for _, d in ipairs({ ws, solo, solo .. "-side", empty }) do vim.fn.delete(d, "rf") end
+end)()
+
 -- Convention §3: emit the `<P> passed, <F> failed` summary and exit
 -- EXPLICITLY — os.exit(1) on any failure, os.exit(0) otherwise. Do not
 -- rely on falling off the end for the success exit: an explicit 0 keeps

@@ -33,6 +33,13 @@
 ---  M.default_branch(repo_path?)           → string
 ---  M.repo_name_from_url(url)              → string
 ---  M.repo_container(common_dir)           → string
+---  M.selectable(root)                     → entry[]   (what a picker offers)
+---  M.format_entry(entry, root, current?)  → string    (a picker line)
+---
+---Public surface — the worktree picker (vim.ui.select):
+---
+---  M.select(opts?, on_choice)             → ok, err   (the one list)
+---  M.choose_active(opts?)                 → ok, err   (select + set_active)
 ---
 ---Public surface — workspace memory (uses `auto-core.state`):
 ---
@@ -75,8 +82,14 @@ local _active_worktree = nil
 -- ── pure data layer (verbatim port from worktree.nvim/git.lua) ──
 
 ---Parse `git worktree list --porcelain` output (already split into
----lines) into a list of `{ path, branch?, head?, bare?, detached? }`
----records. Pure function — no IO, no shell.
+---lines) into a list of `{ path, branch?, head?, bare?, detached?,
+---locked?, prunable? }` records. Pure function — no IO, no shell.
+---
+---`prunable` is git's own verdict that the worktree's directory is gone
+---(`git worktree prune` would remove the entry). Such an entry is still
+---listed, so a consumer offering worktrees to open or activate should skip
+---it. `locked` marks `git worktree lock`. Both lines may carry a reason
+---after the keyword; only the flag is kept.
 ---@param lines string[]
 ---@return AutoCoreWorktreeEntry[]
 function M.parse_porcelain(lines)
@@ -99,6 +112,10 @@ function M.parse_porcelain(lines)
         cur.bare = true
       elseif line == "detached" then
         cur.detached = true
+      elseif line == "locked" or line:match("^locked ") then
+        cur.locked = true
+      elseif line == "prunable" or line:match("^prunable ") then
+        cur.prunable = true
       end
     end
   end
@@ -112,6 +129,8 @@ end
 ---@field head     string?        -- 7-char short HEAD
 ---@field bare     boolean?       -- true for the bare-repo entry itself
 ---@field detached boolean?
+---@field locked   boolean?       -- `git worktree lock`ed
+---@field prunable boolean?       -- directory is gone; `git worktree prune` would drop it
 
 ---Run `git -C <repo_path> worktree list --porcelain` and parse it.
 ---Returns nil + err when the shell call fails.
@@ -409,6 +428,95 @@ end
 ---@return string?
 function M.get_workspace_root()
   return _workspace_root
+end
+
+-- ── the worktree picker (one list for every consumer) ────────────
+
+---The worktrees a picker offers under `root`: every worktree of every repo
+---directly under it (`collect`), plus the root's own worktrees when the root
+---is itself a repo — nvim opened inside a single plain repository, where
+---`collect` alone finds nothing. Bare entries (nothing to run in) and
+---`prunable` ones (the directory is gone) are left out. Sorted by path.
+---@param root string
+---@return AutoCoreWorktreeEntry[]
+function M.selectable(root)
+  root = path_mod.normalize(root)
+  local out, seen = {}, {}
+  local function add(list)
+    for _, e in ipairs(list or {}) do
+      local p = e.path and path_mod.normalize(e.path)
+      if p and not e.bare and not e.prunable and not seen[p] then
+        seen[p] = true
+        e.path = p
+        out[#out + 1] = e
+      end
+    end
+  end
+  if is_repo_dir(root) then add((M.list(root))) end
+  add((M.collect(root)))
+  table.sort(out, function(a, b) return a.path < b.path end)
+  return out
+end
+
+---How a picker labels `e`: a marker on `current`, the path relative to
+---`root` (`.` for the root, `~`-relative when outside it), and the branch.
+---@param e AutoCoreWorktreeEntry
+---@param root string
+---@param current string?
+---@return string
+function M.format_entry(e, root, current)
+  local rel
+  if e.path == root then
+    rel = "."
+  elseif e.path:sub(1, #root + 1) == root .. "/" then
+    rel = e.path:sub(#root + 2)
+  else
+    rel = vim.fn.fnamemodify(e.path, ":~")
+  end
+  local branch = e.branch and ("[" .. e.branch .. "]") or e.detached and "[detached]" or ""
+  local marker = e.path == current and "●" or " "
+  return ("%s %-40s %s"):format(marker, rel, branch)
+end
+
+---Offer the workspace's worktrees with `vim.ui.select`. This is the one list
+---every worktree picker shows — worktree.nvim's switch (`<leader>gw`),
+---auto-finder's `w`, auto-run's `<leader>rw` — so they cannot drift apart.
+---What a choice DOES is the caller's: `on_choice(entry)` (nil on cancel).
+---
+---Returns false and a message when there is nothing to offer, without
+---opening a picker.
+---@param opts { root: string?, prompt: string?, current: string? }?
+---@param on_choice fun(entry: AutoCoreWorktreeEntry?)
+---@return boolean ok, string? err
+function M.select(opts, on_choice)
+  opts = opts or {}
+  local root = path_mod.normalize(opts.root or _workspace_root or vim.fn.getcwd())
+  local entries = M.selectable(root)
+  if #entries == 0 then
+    return false, "no worktrees found under " .. vim.fn.fnamemodify(root, ":~")
+  end
+  local current = opts.current and path_mod.normalize(opts.current) or nil
+  vim.ui.select(entries, {
+    prompt = opts.prompt or "Switch worktree:",
+    format_item = function(e) return M.format_entry(e, root, current) end,
+  }, on_choice)
+  return true
+end
+
+---Choose the ACTIVE worktree from the same list: the directory auto-run and
+---every other auto-core consumer work in. It never changes the editor's cwd;
+---worktree.nvim's switch is the one that does.
+---@param opts { root: string?, prompt: string? }?
+---@return boolean ok, string? err
+function M.choose_active(opts)
+  opts = opts or {}
+  return M.select({
+    root = opts.root,
+    prompt = opts.prompt or "Active worktree (cwd stays):",
+    current = _active_worktree,
+  }, function(e)
+    if e then M.set_active(e.path) end
+  end)
 end
 
 -- ── destroy: remove a linked worktree (+ optional branch delete) ─

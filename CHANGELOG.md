@@ -10,6 +10,24 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.2.32] — 2026-09-29 — one worktree picker; listings say which worktrees are gone
+
+Patch. Two additions to `git.worktree`, both additive:
+
+- **`select(opts, on_choice)`** is the one worktree list every picker shows:
+  worktree.nvim's switch (`<leader>gw`), auto-finder's `w` and auto-run's
+  `<leader>rw`. Each worktree of every repo under the workspace root, plus the
+  root's own worktrees when the root is itself a repo (nvim opened in a single
+  plain repository, where `collect` alone found nothing), labelled `● <path>
+  [branch]`. The caller decides what a choice does. **`choose_active(opts)`**
+  is select plus `set_active`: it moves auto-run's working worktree and leaves
+  the cwd alone. `selectable(root)` and `format_entry` are the pieces.
+- **`parse_porcelain` keeps git's `prunable` and `locked` lines**, as
+  `prunable = true` / `locked = true`. It dropped them, so a worktree whose
+  directory had been deleted was listed like a live one, and auto-finder's old
+  Active-worktree list crashed on two dead `/tmp` worktrees. `list` and
+  `collect` still return such entries; `selectable` leaves them out.
+
 ## [v0.2.31] — 2026-09-27 — a bare repo cloned in place is a repo (ADR 0199 §7.3)
 
 Patch. `git.worktree.list_child_repos` and `collect` recognised a child only by
