@@ -13772,7 +13772,10 @@ print("\n[92] git.worktree — choose_dir: root, project folders, a typed direct
   touch("go-contacts/cmd/server/main.go")
   touch("rust-contacts/Cargo.toml")
   touch("web/package.json")
-  touch("web/node_modules/dep/package.json")   -- dependency output: skipped
+  touch("web/node_modules/dep/package.json")   -- inside a project: not searched
+  touch("go-contacts/tools/go.mod")            -- a project inside a project, depth 2: not listed
+  touch("node_modules/dep/package.json")       -- dependency output at depth 2: skipped
+  touch("target/debug/Cargo.toml")             -- build output at depth 2: skipped
   touch("services/api/go.mod")                 -- depth 2, under a non-project dir
   touch("services/api/internal/x/go.mod")      -- inside a project: not searched
   touch("deep/a/b/package.json")               -- depth 3: beyond the default
