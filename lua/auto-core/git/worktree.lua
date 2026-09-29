@@ -33,6 +33,16 @@
 ---  M.default_branch(repo_path?)           → string
 ---  M.repo_name_from_url(url)              → string
 ---  M.repo_container(common_dir)           → string
+---  M.selectable(root)                     → entry[]   (what a picker offers)
+---  M.format_entry(entry, root, current?)  → string    (a picker line)
+---
+---Public surface — the worktree picker (vim.ui.select):
+---
+---  M.select(opts?, on_choice)             → ok, err   (the one list)
+---  M.choose_active(opts?)                 → ok, err   (select, then choose_dir)
+---  M.choose_dir(worktree, opts?)          -- root / project folder / typed path → set_active
+---  M.project_dirs(root, opts?)            → { path, marker }[]
+---  M.resolve_dir_input(input, base)       → dir?, err
 ---
 ---Public surface — workspace memory (uses `auto-core.state`):
 ---
@@ -75,8 +85,14 @@ local _active_worktree = nil
 -- ── pure data layer (verbatim port from worktree.nvim/git.lua) ──
 
 ---Parse `git worktree list --porcelain` output (already split into
----lines) into a list of `{ path, branch?, head?, bare?, detached? }`
----records. Pure function — no IO, no shell.
+---lines) into a list of `{ path, branch?, head?, bare?, detached?,
+---locked?, prunable? }` records. Pure function — no IO, no shell.
+---
+---`prunable` is git's own verdict that the worktree's directory is gone
+---(`git worktree prune` would remove the entry). Such an entry is still
+---listed, so a consumer offering worktrees to open or activate should skip
+---it. `locked` marks `git worktree lock`. Both lines may carry a reason
+---after the keyword; only the flag is kept.
 ---@param lines string[]
 ---@return AutoCoreWorktreeEntry[]
 function M.parse_porcelain(lines)
@@ -99,6 +115,10 @@ function M.parse_porcelain(lines)
         cur.bare = true
       elseif line == "detached" then
         cur.detached = true
+      elseif line == "locked" or line:match("^locked ") then
+        cur.locked = true
+      elseif line == "prunable" or line:match("^prunable ") then
+        cur.prunable = true
       end
     end
   end
@@ -112,6 +132,8 @@ end
 ---@field head     string?        -- 7-char short HEAD
 ---@field bare     boolean?       -- true for the bare-repo entry itself
 ---@field detached boolean?
+---@field locked   boolean?       -- `git worktree lock`ed
+---@field prunable boolean?       -- directory is gone; `git worktree prune` would drop it
 
 ---Run `git -C <repo_path> worktree list --porcelain` and parse it.
 ---Returns nil + err when the shell call fails.
@@ -409,6 +431,212 @@ end
 ---@return string?
 function M.get_workspace_root()
   return _workspace_root
+end
+
+-- ── the worktree picker (one list for every consumer) ────────────
+
+---The worktrees a picker offers under `root`: every worktree of every repo
+---directly under it (`collect`), plus the root's own worktrees when the root
+---is itself a repo — nvim opened inside a single plain repository, where
+---`collect` alone finds nothing. Bare entries (nothing to run in) and
+---`prunable` ones (the directory is gone) are left out. Sorted by path.
+---@param root string
+---@return AutoCoreWorktreeEntry[]
+function M.selectable(root)
+  root = path_mod.normalize(root)
+  local out, seen = {}, {}
+  local function add(list)
+    for _, e in ipairs(list or {}) do
+      local p = e.path and path_mod.normalize(e.path)
+      if p and not e.bare and not e.prunable and not seen[p] then
+        seen[p] = true
+        e.path = p
+        out[#out + 1] = e
+      end
+    end
+  end
+  if is_repo_dir(root) then add((M.list(root))) end
+  add((M.collect(root)))
+  table.sort(out, function(a, b) return a.path < b.path end)
+  return out
+end
+
+---How a picker labels `e`: a marker on `current`, the path relative to
+---`root` (`.` for the root, `~`-relative when outside it), and the branch.
+---@param e AutoCoreWorktreeEntry
+---@param root string
+---@param current string?
+---@return string
+function M.format_entry(e, root, current)
+  local rel
+  if e.path == root then
+    rel = "."
+  elseif e.path:sub(1, #root + 1) == root .. "/" then
+    rel = e.path:sub(#root + 2)
+  else
+    rel = vim.fn.fnamemodify(e.path, ":~")
+  end
+  local branch = e.branch and ("[" .. e.branch .. "]") or e.detached and "[detached]" or ""
+  local marker = e.path == current and "●" or " "
+  return ("%s %-40s %s"):format(marker, rel, branch)
+end
+
+---Offer the workspace's worktrees with `vim.ui.select`. This is the one list
+---every worktree picker shows — worktree.nvim's switch (`<leader>gw`),
+---auto-finder's `w`, auto-run's `<leader>rw` — so they cannot drift apart.
+---What a choice DOES is the caller's: `on_choice(entry)` (nil on cancel).
+---
+---Returns false and a message when there is nothing to offer, without
+---opening a picker.
+---@param opts { root: string?, prompt: string?, current: string? }?
+---@param on_choice fun(entry: AutoCoreWorktreeEntry?)
+---@return boolean ok, string? err
+function M.select(opts, on_choice)
+  opts = opts or {}
+  local root = path_mod.normalize(opts.root or _workspace_root or vim.fn.getcwd())
+  local entries = M.selectable(root)
+  if #entries == 0 then
+    return false, "no worktrees found under " .. vim.fn.fnamemodify(root, ":~")
+  end
+  -- Mark the entry that contains `current` (the deepest one), so a cwd or an
+  -- active directory inside a worktree still marks that worktree.
+  local current
+  if opts.current then
+    local c = path_mod.normalize(opts.current)
+    for _, e in ipairs(entries) do
+      if (c == e.path or c:sub(1, #e.path + 1) == e.path .. "/") and (not current or #e.path > #current) then
+        current = e.path
+      end
+    end
+  end
+  vim.ui.select(entries, {
+    prompt = opts.prompt or "Switch worktree:",
+    format_item = function(e) return M.format_entry(e, root, current) end,
+  }, on_choice)
+  return true
+end
+
+---Files that make a directory a project a runner can work in. The folder
+---step of `choose_active` offers every directory under a worktree that
+---carries one.
+M.PROJECT_MARKERS = { "go.work", "go.mod", "Cargo.toml", "package.json", "pubspec.yaml", "pyproject.toml" }
+
+-- Never descended into: build output, dependencies, VCS data.
+local SKIP_DIRS = { node_modules = true, target = true, build = true, dist = true, vendor = true }
+
+---Project folders under `root`, down to `opts.depth` (default 2) levels:
+---each directory carrying one of `M.PROJECT_MARKERS`, with the marker it
+---carries. The root itself is not listed. A project folder is not searched
+---further (its own subdirectories belong to it), and neither is a directory
+---with its own `.git` (a nested repo or worktree is a list entry of its own).
+---Hidden directories and build/dependency output are skipped. Sorted by path.
+---@param root string
+---@param opts { depth: integer?, markers: string[]? }?
+---@return { path: string, marker: string }[]
+function M.project_dirs(root, opts)
+  opts = opts or {}
+  local markers = opts.markers or M.PROJECT_MARKERS
+  local out = {}
+  local function marker_of(dir)
+    for _, m in ipairs(markers) do
+      if path_mod.exists(dir .. "/" .. m) then return m end
+    end
+  end
+  local function walk(dir, depth)
+    local handle = vim.uv.fs_scandir(dir)
+    if not handle then return end
+    while true do
+      local name, t = vim.uv.fs_scandir_next(handle)
+      if not name then break end
+      if t == "directory" and not name:match("^%.") and not SKIP_DIRS[name] then
+        local full = dir .. "/" .. name
+        if not path_mod.exists(full .. "/.git") then
+          local m = marker_of(full)
+          if m then
+            out[#out + 1] = { path = full, marker = m }
+          elseif depth > 1 then
+            walk(full, depth - 1)
+          end
+        end
+      end
+    end
+  end
+  root = path_mod.normalize(root)
+  walk(root, opts.depth or 2)
+  table.sort(out, function(a, b) return a.path < b.path end)
+  return out
+end
+
+local function warn(msg)
+  vim.notify(msg, vim.log.levels.WARN, { title = "auto-core" })
+end
+
+---Resolve what was typed into the custom-directory prompt: `~` expanded, a
+---relative path taken from `base`. Returns the directory, or nil and why.
+---@param input string
+---@param base string
+---@return string? dir, string? err
+function M.resolve_dir_input(input, base)
+  input = vim.trim(input or "")
+  if input == "" then return nil, "no directory given" end
+  local p = vim.fn.expand(input)
+  if p:sub(1, 1) ~= "/" then p = base .. "/" .. p end
+  p = path_mod.normalize(p)
+  if not path_mod.is_dir(p) then return nil, "not a directory: " .. vim.fn.fnamemodify(p, ":~") end
+  return p
+end
+
+---Second step of `choose_active`: the directory inside `worktree` to work in.
+---Offers the worktree root, its project folders (`project_dirs`) and a
+---"Custom directory…" entry that takes a typed path (completed as a
+---directory, relative to the worktree). The chosen directory becomes the
+---active worktree; nothing changes on cancel or on a path that is not a
+---directory.
+---@param worktree string
+---@param opts { current: string?, prompt: string? }?
+function M.choose_dir(worktree, opts)
+  opts = opts or {}
+  worktree = path_mod.normalize(worktree)
+  local current = opts.current and path_mod.normalize(opts.current) or nil
+  local items = { { path = worktree, label = ". (worktree root)" } }
+  for _, d in ipairs(M.project_dirs(worktree)) do
+    items[#items + 1] = { path = d.path, label = ("%-30s %s"):format(d.path:sub(#worktree + 2), d.marker) }
+  end
+  items[#items + 1] = { custom = true, label = "Custom directory…" }
+  vim.ui.select(items, {
+    prompt = opts.prompt or ("Working directory in " .. vim.fn.fnamemodify(worktree, ":t") .. ":"),
+    format_item = function(it)
+      return ((it.path and it.path == current) and "● " or "  ") .. it.label
+    end,
+  }, function(it)
+    if not it then return end
+    if not it.custom then return M.set_active(it.path) end
+    vim.ui.input({ prompt = "Working directory: ", default = worktree .. "/", completion = "dir" }, function(input)
+      if input == nil then return end
+      local dir, err = M.resolve_dir_input(input, worktree)
+      if not dir then return warn("working directory unchanged: " .. err) end
+      M.set_active(dir)
+    end)
+  end)
+end
+
+---Choose the ACTIVE worktree, the directory auto-run and every other
+---auto-core consumer work in, in two steps: a worktree from the same list
+---worktree.nvim's switch shows (`select`), then a directory in it
+---(`choose_dir`) — its root, a project folder, or a typed path. It never
+---changes the editor's cwd; worktree.nvim's switch is the one that does.
+---@param opts { root: string?, prompt: string? }?
+---@return boolean ok, string? err
+function M.choose_active(opts)
+  opts = opts or {}
+  local current = _active_worktree
+  return M.select({
+    root = opts.root,
+    prompt = opts.prompt or "Active worktree (cwd stays):",
+    current = current,
+  }, function(e)
+    if e then M.choose_dir(e.path, { current = current }) end
+  end)
 end
 
 -- ── destroy: remove a linked worktree (+ optional branch delete) ─
