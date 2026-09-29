@@ -13670,13 +13670,15 @@ print("\n[91] git.worktree — select / choose_active: the one worktree picker")
   ok("[91] selectable: a root that is itself a plain repo offers its own worktrees",
     vim.deep_equal(solo_paths, { solo, solo .. "-side" }), vim.inspect(solo_paths))
 
-  local by = {}
-  for _, e in ipairs(wt.selectable(solo)) do by[e.path] = e end
+  -- Fixed entries, so these cells do not depend on selectable's answer.
+  local root_label = wt.format_entry({ path = solo, branch = "main" }, solo, solo)
   ok("[91] format_entry: '.' for the root, marked when current",
-    wt.format_entry(by[solo], solo, solo):match("^● %.%s+%[main%]$") ~= nil, wt.format_entry(by[solo], solo, solo))
-  local outside = wt.format_entry(by[solo .. "-side"], solo, solo)
+    root_label:match("^● %.%s+%[main%]$") ~= nil, root_label)
+  local outside = wt.format_entry({ path = solo .. "-side", branch = "side" }, solo, solo)
   ok("[91] format_entry: a worktree outside the root shows its ~-relative path",
     outside:match("^  " .. vim.pesc(vim.fn.fnamemodify(solo .. "-side", ":~")) .. "%s+%[side%]$") ~= nil, outside)
+  local detached = wt.format_entry({ path = solo .. "/x", detached = true }, solo, nil)
+  ok("[91] format_entry: a detached worktree says so", detached:match("^  x%s+%[detached%]$") ~= nil, detached)
 
   -- select: the list, the labels and the prompt; the choice goes to on_choice.
   local real_select = vim.ui.select
