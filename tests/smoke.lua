@@ -13704,30 +13704,146 @@ print("\n[91] git.worktree — select / choose_active: the one worktree picker")
   ok("[91] select with nothing to offer reports it and opens no picker",
     okE == false and seen == nil and tostring(errE):match("no worktrees found") ~= nil, tostring(errE))
 
-  -- choose_active: sets the active worktree, never the cwd; cancel changes nothing.
+  -- choose_active: step 1 is this list, step 2 a directory in the chosen
+  -- worktree. Answers are queued, one per prompt; a prompt with none cancels.
+  local answers, prompts = {}, {}
+  vim.ui.select = function(items, o, cb)
+    prompts[#prompts + 1] = o.prompt
+    seen = { prompt = o.prompt, labels = vim.tbl_map(o.format_item, items), items = items }
+    local i = table.remove(answers, 1)
+    cb(i and items[i] or nil)
+  end
   wt._reset_for_tests()
   local cwd_before = vim.fn.getcwd()
   local changed = {}
   local sub = events_mod.subscribe("core.active_worktree:changed", function(p) changed[#changed + 1] = p end)
-  pick_index = 3
+  answers = { 3, 1 } -- b/main, then its root
   local okA = wt.choose_active({ root = ws })
+  ok("[91] choose_active: the worktree list, then the folder step",
+    okA and prompts[1] == "Active worktree (cwd stays):" and prompts[2] == "Working directory in main:",
+    vim.inspect(prompts))
   ok("[91] choose_active sets the chosen worktree active",
-    okA and wt.get_active() == ws .. "/b/main", tostring(wt.get_active()))
+    wt.get_active() == ws .. "/b/main", tostring(wt.get_active()))
   ok("[91] choose_active leaves the cwd alone", vim.fn.getcwd() == cwd_before, vim.fn.getcwd())
   vim.wait(200, function() return #changed > 0 end)
   ok("[91] choose_active publishes core.active_worktree:changed",
     #changed == 1 and changed[1].to == ws .. "/b/main", vim.inspect(changed))
-  pick_index = 1
+  answers = {}
+  prompts = {}
   wt.choose_active({ root = ws })
-  ok("[91] choose_active marks the current active worktree", seen.labels[3]:match("^●") ~= nil, vim.inspect(seen.labels))
-  pick_index = nil
+  ok("[91] step 1 marks the worktree that is active", seen and seen.labels[3]:match("^●") ~= nil,
+    vim.inspect(seen and seen.labels))
+  ok("[91] cancelling step 1 opens no folder step and changes nothing",
+    #prompts == 1 and wt.get_active() == ws .. "/b/main", vim.inspect(prompts))
+  answers = { 1 }
+  prompts = {}
   wt.choose_active({ root = ws })
-  ok("[91] cancelling choose_active changes nothing", wt.get_active() == ws .. "/a", tostring(wt.get_active()))
+  ok("[91] cancelling step 2 changes nothing",
+    #prompts == 2 and wt.get_active() == ws .. "/b/main", tostring(wt.get_active()))
+  -- An active directory INSIDE a worktree still marks that worktree.
+  wt.set_active(ws .. "/a-feat/sub")
+  answers = {}
+  wt.choose_active({ root = ws })
+  ok("[91] an active folder inside a worktree marks that worktree",
+    seen.labels[2]:match("^●") ~= nil and seen.labels[1]:match("^●") == nil, vim.inspect(seen.labels))
 
   events_mod.unsubscribe(sub)
   vim.ui.select = real_select
   wt._reset_for_tests()
   for _, d in ipairs({ ws, solo, solo .. "-side", empty }) do vim.fn.delete(d, "rf") end
+end)()
+
+-- ── [92] git.worktree — the folder step: project folders, custom paths ──
+-- A multi-project repo (playground: go-contacts/, rust-contacts/, web/ ...)
+-- is ONE worktree; the folder step lets auto-run work in one of its
+-- directories. Project folders are those carrying a marker; any directory can
+-- be typed. The active worktree becomes that directory; the cwd never moves.
+print("\n[92] git.worktree — choose_dir: root, project folders, a typed directory")
+;(function()
+  local wt = require("auto-core.git.worktree")
+  local norm = require("auto-core.fs.path").normalize
+  local repo = norm(vim.fn.tempname() .. "-play92")
+  vim.system({ "git", "init", "-q", "-b", "main", repo }, { text = true }):wait()
+  local function touch(rel)
+    vim.fn.mkdir(vim.fn.fnamemodify(repo .. "/" .. rel, ":h"), "p")
+    vim.fn.writefile({}, repo .. "/" .. rel)
+  end
+  touch("go-contacts/go.mod")
+  touch("go-contacts/cmd/server/main.go")
+  touch("rust-contacts/Cargo.toml")
+  touch("web/package.json")
+  touch("web/node_modules/dep/package.json")   -- dependency output: skipped
+  touch("services/api/go.mod")                 -- depth 2, under a non-project dir
+  touch("services/api/internal/x/go.mod")      -- inside a project: not searched
+  touch("deep/a/b/package.json")               -- depth 3: beyond the default
+  touch(".hidden/go.mod")
+  touch("nested/.git")                          -- a nested repo: its own entry
+  touch("nested/go.mod")
+  vim.fn.mkdir(repo .. "/docs", "p")
+
+  local got = {}
+  for _, d in ipairs(wt.project_dirs(repo)) do got[#got + 1] = d.path:sub(#repo + 2) .. ":" .. d.marker end
+  ok("[92] project_dirs: marker folders to depth 2, not inside a project, no deps/hidden/nested repos",
+    vim.deep_equal(got, { "go-contacts:go.mod", "rust-contacts:Cargo.toml", "services/api:go.mod", "web:package.json" }),
+    vim.inspect(got))
+
+  local r1 = wt.resolve_dir_input("go-contacts", repo)
+  local r2 = wt.resolve_dir_input(repo .. "/docs", repo)
+  local r3, e3 = wt.resolve_dir_input("missing/dir", repo)
+  local r4, e4 = wt.resolve_dir_input("go-contacts/go.mod", repo)
+  local r5, e5 = wt.resolve_dir_input("   ", repo)
+  ok("[92] resolve_dir_input: relative to the worktree, absolute as given",
+    r1 == repo .. "/go-contacts" and r2 == repo .. "/docs", vim.inspect({ r1, r2 }))
+  ok("[92] resolve_dir_input: a missing path, a file and nothing are refused with a reason",
+    r3 == nil and tostring(e3):match("not a directory") ~= nil and r4 == nil
+      and tostring(e4):match("not a directory") ~= nil and r5 == nil and tostring(e5):match("no directory") ~= nil,
+    vim.inspect({ e3, e4, e5 }))
+
+  local real_select, real_input, real_notify = vim.ui.select, vim.ui.input, vim.notify
+  local seen, answer, typed, notes = nil, nil, nil, {}
+  vim.ui.select = function(items, o, cb)
+    seen = { prompt = o.prompt, labels = vim.tbl_map(o.format_item, items) }
+    cb(answer and items[answer] or nil)
+  end
+  vim.ui.input = function(o, cb) seen.input = o; cb(typed) end
+  vim.notify = function(m) notes[#notes + 1] = m end
+
+  wt._reset_for_tests()
+  local cwd_before = vim.fn.getcwd()
+  answer = 2 -- go-contacts
+  wt.choose_dir(repo)
+  ok("[92] the folder step lists the root, the project folders, then the custom entry",
+    #seen.labels == 6 and seen.labels[1] == "  . (worktree root)" and seen.labels[2]:match("^  go%-contacts%s+go%.mod$") ~= nil
+      and seen.labels[6] == "  Custom directory…", vim.inspect(seen.labels))
+  ok("[92] choosing a project folder makes it the active worktree", wt.get_active() == repo .. "/go-contacts",
+    tostring(wt.get_active()))
+  ok("[92] the cwd does not move", vim.fn.getcwd() == cwd_before, vim.fn.getcwd())
+
+  wt.choose_dir(repo, { current = wt.get_active() })
+  ok("[92] the current directory is marked", seen.labels[2]:match("^● go%-contacts") ~= nil, vim.inspect(seen.labels))
+
+  answer, typed = 6, "docs"
+  wt.choose_dir(repo)
+  ok("[92] the custom entry prompts for a directory, completed as one, starting at the worktree",
+    seen.input and seen.input.completion == "dir" and seen.input.default == repo .. "/", vim.inspect(seen.input))
+  ok("[92] a typed relative directory becomes active", wt.get_active() == repo .. "/docs", tostring(wt.get_active()))
+
+  typed = "no/such/dir"
+  wt.choose_dir(repo)
+  ok("[92] a typed path that is not a directory changes nothing and says why",
+    wt.get_active() == repo .. "/docs" and #notes == 1 and tostring(notes[1]):match("unchanged: not a directory") ~= nil,
+    vim.inspect(notes))
+
+  typed = nil
+  wt.choose_dir(repo)
+  answer = nil
+  wt.choose_dir(repo)
+  ok("[92] cancelling the prompt or the list changes nothing", wt.get_active() == repo .. "/docs" and #notes == 1,
+    tostring(wt.get_active()))
+
+  vim.ui.select, vim.ui.input, vim.notify = real_select, real_input, real_notify
+  wt._reset_for_tests()
+  vim.fn.delete(repo, "rf")
 end)()
 
 -- Convention §3: emit the `<P> passed, <F> failed` summary and exit

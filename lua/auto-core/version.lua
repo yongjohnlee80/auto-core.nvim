@@ -956,8 +956,9 @@ return {
   -- v0.2.31: git.worktree enumerates a bare repo cloned in place (HEAD +
   -- objects/ + refs/, no `.git`), ADR 0199 §7.3. Additive.
   -- v0.2.32: git.worktree.parse_porcelain keeps git's `locked` and
-  -- `prunable` attributes; git.worktree.select / choose_active are the one
-  -- worktree picker every consumer shows. Additive.
+  -- `prunable` attributes; git.worktree.select is the one worktree list
+  -- every picker shows, and choose_active adds a folder step (a project
+  -- folder or a typed directory inside the worktree). Additive.
   version     = "0.2.32",
   api_version = "0.1",
 }

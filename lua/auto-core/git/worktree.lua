@@ -39,7 +39,10 @@
 ---Public surface — the worktree picker (vim.ui.select):
 ---
 ---  M.select(opts?, on_choice)             → ok, err   (the one list)
----  M.choose_active(opts?)                 → ok, err   (select + set_active)
+---  M.choose_active(opts?)                 → ok, err   (select, then choose_dir)
+---  M.choose_dir(worktree, opts?)          -- root / project folder / typed path → set_active
+---  M.project_dirs(root, opts?)            → { path, marker }[]
+---  M.resolve_dir_input(input, base)       → dir?, err
 ---
 ---Public surface — workspace memory (uses `auto-core.state`):
 ---
@@ -495,7 +498,17 @@ function M.select(opts, on_choice)
   if #entries == 0 then
     return false, "no worktrees found under " .. vim.fn.fnamemodify(root, ":~")
   end
-  local current = opts.current and path_mod.normalize(opts.current) or nil
+  -- Mark the entry that contains `current` (the deepest one), so a cwd or an
+  -- active directory inside a worktree still marks that worktree.
+  local current
+  if opts.current then
+    local c = path_mod.normalize(opts.current)
+    for _, e in ipairs(entries) do
+      if (c == e.path or c:sub(1, #e.path + 1) == e.path .. "/") and (not current or #e.path > #current) then
+        current = e.path
+      end
+    end
+  end
   vim.ui.select(entries, {
     prompt = opts.prompt or "Switch worktree:",
     format_item = function(e) return M.format_entry(e, root, current) end,
@@ -503,19 +516,126 @@ function M.select(opts, on_choice)
   return true
 end
 
----Choose the ACTIVE worktree from the same list: the directory auto-run and
----every other auto-core consumer work in. It never changes the editor's cwd;
----worktree.nvim's switch is the one that does.
+---Files that make a directory a project a runner can work in. The folder
+---step of `choose_active` offers every directory under a worktree that
+---carries one.
+M.PROJECT_MARKERS = { "go.work", "go.mod", "Cargo.toml", "package.json", "pubspec.yaml", "pyproject.toml" }
+
+-- Never descended into: build output, dependencies, VCS data.
+local SKIP_DIRS = { node_modules = true, target = true, build = true, dist = true, vendor = true }
+
+---Project folders under `root`, down to `opts.depth` (default 2) levels:
+---each directory carrying one of `M.PROJECT_MARKERS`, with the marker it
+---carries. The root itself is not listed. A project folder is not searched
+---further (its own subdirectories belong to it), and neither is a directory
+---with its own `.git` (a nested repo or worktree is a list entry of its own).
+---Hidden directories and build/dependency output are skipped. Sorted by path.
+---@param root string
+---@param opts { depth: integer?, markers: string[]? }?
+---@return { path: string, marker: string }[]
+function M.project_dirs(root, opts)
+  opts = opts or {}
+  local markers = opts.markers or M.PROJECT_MARKERS
+  local out = {}
+  local function marker_of(dir)
+    for _, m in ipairs(markers) do
+      if path_mod.exists(dir .. "/" .. m) then return m end
+    end
+  end
+  local function walk(dir, depth)
+    local handle = vim.uv.fs_scandir(dir)
+    if not handle then return end
+    while true do
+      local name, t = vim.uv.fs_scandir_next(handle)
+      if not name then break end
+      if t == "directory" and not name:match("^%.") and not SKIP_DIRS[name] then
+        local full = dir .. "/" .. name
+        if not path_mod.exists(full .. "/.git") then
+          local m = marker_of(full)
+          if m then
+            out[#out + 1] = { path = full, marker = m }
+          elseif depth > 1 then
+            walk(full, depth - 1)
+          end
+        end
+      end
+    end
+  end
+  root = path_mod.normalize(root)
+  walk(root, opts.depth or 2)
+  table.sort(out, function(a, b) return a.path < b.path end)
+  return out
+end
+
+local function warn(msg)
+  vim.notify(msg, vim.log.levels.WARN, { title = "auto-core" })
+end
+
+---Resolve what was typed into the custom-directory prompt: `~` expanded, a
+---relative path taken from `base`. Returns the directory, or nil and why.
+---@param input string
+---@param base string
+---@return string? dir, string? err
+function M.resolve_dir_input(input, base)
+  input = vim.trim(input or "")
+  if input == "" then return nil, "no directory given" end
+  local p = vim.fn.expand(input)
+  if p:sub(1, 1) ~= "/" then p = base .. "/" .. p end
+  p = path_mod.normalize(p)
+  if not path_mod.is_dir(p) then return nil, "not a directory: " .. vim.fn.fnamemodify(p, ":~") end
+  return p
+end
+
+---Second step of `choose_active`: the directory inside `worktree` to work in.
+---Offers the worktree root, its project folders (`project_dirs`) and a
+---"Custom directory…" entry that takes a typed path (completed as a
+---directory, relative to the worktree). The chosen directory becomes the
+---active worktree; nothing changes on cancel or on a path that is not a
+---directory.
+---@param worktree string
+---@param opts { current: string?, prompt: string? }?
+function M.choose_dir(worktree, opts)
+  opts = opts or {}
+  worktree = path_mod.normalize(worktree)
+  local current = opts.current and path_mod.normalize(opts.current) or nil
+  local items = { { path = worktree, label = ". (worktree root)" } }
+  for _, d in ipairs(M.project_dirs(worktree)) do
+    items[#items + 1] = { path = d.path, label = ("%-30s %s"):format(d.path:sub(#worktree + 2), d.marker) }
+  end
+  items[#items + 1] = { custom = true, label = "Custom directory…" }
+  vim.ui.select(items, {
+    prompt = opts.prompt or ("Working directory in " .. vim.fn.fnamemodify(worktree, ":t") .. ":"),
+    format_item = function(it)
+      return ((it.path and it.path == current) and "● " or "  ") .. it.label
+    end,
+  }, function(it)
+    if not it then return end
+    if not it.custom then return M.set_active(it.path) end
+    vim.ui.input({ prompt = "Working directory: ", default = worktree .. "/", completion = "dir" }, function(input)
+      if input == nil then return end
+      local dir, err = M.resolve_dir_input(input, worktree)
+      if not dir then return warn("working directory unchanged: " .. err) end
+      M.set_active(dir)
+    end)
+  end)
+end
+
+---Choose the ACTIVE worktree, the directory auto-run and every other
+---auto-core consumer work in, in two steps: a worktree from the same list
+---worktree.nvim's switch shows (`select`), then a directory in it
+---(`choose_dir`) — its root, a project folder, or a typed path. It never
+---changes the editor's cwd; worktree.nvim's switch is the one that does.
 ---@param opts { root: string?, prompt: string? }?
 ---@return boolean ok, string? err
 function M.choose_active(opts)
   opts = opts or {}
+  local current = _active_worktree
   return M.select({
     root = opts.root,
     prompt = opts.prompt or "Active worktree (cwd stays):",
-    current = _active_worktree,
+    current = current,
   }, function(e)
-    if e then M.set_active(e.path) end
+    if e then M.choose_dir(e.path, { current = current }) end
   end)
 end
 
