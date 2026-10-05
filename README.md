@@ -248,6 +248,59 @@ registered here is therefore discovered and dispatched with no auto-agents
 change at all. Registering it in both places would be a second implementation
 of the window logic, which is the thing this module exists to prevent.
 
+## `kb` — the project's primary knowledge base (ADR 1791209945 §5)
+
+`auto-core.kb` answers "which KB does this project use?" for every plugin
+and agent. It is the **one** KB-root resolver: the todo store's `$KB_ROOT`
+variable, its reference validator and `review.draft.kb_root()` all delegate
+to it, so they can no longer disagree.
+
+```lua
+local kb = require("auto-core").kb
+
+kb.primary(project_root?)  -- { workspace, root } | nil
+kb.root(project_root?)     -- root | nil
+kb.set_primary(project_root, { workspace = "global", root = "/abs/kb" },
+  { confirmed = true })    -- ok, err
+```
+
+`project_root` defaults to the session's project, resolved the way the todo
+store resolves its workspace (git.worktree workspace root → active worktree
+→ cwd). Records are keyed by the project root's **real path**
+(`vim.uv.fs_realpath`), so a symlinked or aliased root maps to one entry.
+They persist in the `kb` state namespace as `{ workspace, root, set_at }`.
+
+**`kb.root()` resolves in this order:**
+
+1. the project's primary;
+2. `$AUTO_AGENTS_KB_ROOT`, which is set inside a spawned agent;
+3. the first-run import (below), then nil.
+
+`AUTO_AGENTS_KB_READ` and `AUTO_AGENTS_KB_WRITE` are no longer read. A spawned
+agent always receives ROOT, and READ/WRITE name scoped sub-directories, never
+the root.
+
+**First run is an idempotent import.** A project without a primary still gets
+the answer it got before, from `require("auto-agents.kb").root()` (a soft
+dependency), and that answer is recorded as the project's primary once and
+logged. It is recorded only when it is an existing directory, and only for
+the session's own project, because auto-agents resolves for the session. A
+second call, or a call through an alias of the same real path, is a no-op.
+Nothing on disk changes except the state file. The import guards against
+re-entry, so auto-agents' `kb.root()` can become a shim over this module
+without the two recursing.
+
+**`set_primary` is interactive only.** It refuses unless
+`opts.confirmed == true`, which the caller passes once the user has confirmed,
+and it is not a mailbox verb, so a remote agent cannot re-point a project's
+KB. It rejects a root that is not an existing directory. Each change publishes
+`core.kb:primary_changed` with
+`{ project_root, workspace, root, old, source = "set" | "import" }`.
+
+**The todo store is untouched.** `set_primary` changes only which KB a project
+uses. The todo directory, its overrides and the `todos.*` surface stay as they
+are.
+
 ## Logging — the family contract (ADR 0021 / v0.1.11+)
 
 `auto-core.log` is the single ring for the entire AutoVim family.

@@ -9,6 +9,16 @@
 --
 -- These assertions are about BEHAVIOUR, not placement: an extraction that
 -- compiles but quietly drops a guard is the failure mode worth catching.
+
+-- kb_root resolves through auto-core.kb, which reads (and on first run
+-- records) the project's primary KB in auto-core's state store. Sandbox the
+-- state dir BEFORE any module load so this suite can neither read the
+-- developer's recorded primary nor write one (tests-never-touch-the-
+-- developer-environment).
+local STATE_SANDBOX = vim.fn.tempname() .. "-review-draft-state"
+vim.fn.mkdir(STATE_SANDBOX, "p")
+vim.env.XDG_STATE_HOME = STATE_SANDBOX
+
 local plugin_root = vim.fn.fnamemodify(
   vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p"), ":h:h")
 vim.opt.runtimepath:prepend(plugin_root)
@@ -136,23 +146,28 @@ vim.env.AUTO_AGENTS_KB_ROOT = "/tmp/af-test-kb-root"
 ok("kb_root resolves the configured root (not a nil upvalue)",
   A.kb_root() == "/tmp/af-test-kb-root", tostring(A.kb_root()))
 
--- KB_ROOT is not the only source — clearing it falls back to KB_WRITE, which is
--- how an earlier version of this cell passed on a clean runner and failed in an
--- agent session. So pin the PRECEDENCE, which is the portable property: with
--- both set to different values, KB_ROOT wins.
+-- An earlier version of this cell passed on a clean runner and failed in an
+-- agent session, because KB_WRITE was a fallback source. Since ADR 1791209945
+-- §5 kb_root is auto-core.kb.root() and KB_WRITE is not read at all; pin that
+-- portable property: with both set to different values, KB_ROOT answers.
 local saved_w = vim.env.AUTO_AGENTS_KB_WRITE
 vim.env.AUTO_AGENTS_KB_WRITE = "/tmp/af-test-kb-write"
 ok("KB_ROOT takes precedence over KB_WRITE",
   A.kb_root() == "/tmp/af-test-kb-root", tostring(A.kb_root()))
 
--- With every source cleared the only portable claim is that it does not THROW.
--- Whether it then answers nil or something from auto-agents depends on what is
--- loaded, and that is not this suite's to pin.
+-- With every source cleared — auto-agents stubbed ABSENT so the first-run
+-- import cannot answer — nothing resolves, and it must not THROW.
 vim.env.AUTO_AGENTS_KB_ROOT = nil
 vim.env.AUTO_AGENTS_KB_WRITE = nil
 local saved_r = vim.env.AUTO_AGENTS_KB_READ
 vim.env.AUTO_AGENTS_KB_READ = nil
-ok("kb_root does not throw with nothing configured", (pcall(A.kb_root)) == true)
+local saved_aa_loaded, saved_aa_preload = package.loaded["auto-agents.kb"], package.preload["auto-agents.kb"]
+package.loaded["auto-agents.kb"] = nil
+package.preload["auto-agents.kb"] = function() error("auto-agents not installed") end
+local okn, rn = pcall(A.kb_root)
+ok("kb_root does not throw with nothing configured, and answers nil", okn == true and rn == nil,
+  tostring(rn))
+package.loaded["auto-agents.kb"], package.preload["auto-agents.kb"] = saved_aa_loaded, saved_aa_preload
 vim.env.AUTO_AGENTS_KB_READ = saved_r
 vim.env.AUTO_AGENTS_KB_WRITE = saved_w
 vim.env.AUTO_AGENTS_KB_ROOT = saved_kb

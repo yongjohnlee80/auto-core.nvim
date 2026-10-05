@@ -105,6 +105,8 @@ M.docstore = require("auto-core.docstore")
 M.drafts   = require("auto-core.drafts")
 M.mailbox = require("auto-core.mailbox")
 M.trust   = require("auto-core.trust")
+-- ADR 1791209945 §5: the project's primary KB, and the one KB-root resolver.
+M.kb      = require("auto-core.kb")
 
 ---Initialize auto-core. Idempotent — re-calling re-applies opts and
 ---propagates the relevant subset to each subsystem.

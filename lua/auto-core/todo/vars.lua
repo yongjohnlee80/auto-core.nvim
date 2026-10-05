@@ -27,7 +27,7 @@
 ---
 ---  • **Built-in** (auto-resolved, read-only): `$KB_ROOT`,
 ---    `$WORKSPACE`, `$HOME`, `$CWD`. The values come from existing
----    auto-core infrastructure (KB env vars, git.worktree, expand,
+---    auto-core infrastructure (auto-core.kb, git.worktree, expand,
 ---    getcwd). These are always available — no setup needed.
 ---
 ---  • **User-defined** (editable via panel or `M.set`): everything
@@ -62,34 +62,18 @@ local M = {}
 M.BUILTINS = {
   {
     name = "KB_ROOT",
-    doc  = "Auto-agents knowledge-base root. Resolved (in order): "
-      .. "env AUTO_AGENTS_KB_ROOT > env AUTO_AGENTS_KB_READ[0] > env "
-      .. "AUTO_AGENTS_KB_WRITE > require('auto-agents.kb').root() "
-      .. "(Lua-API fallback for the parent nvim).",
+    doc  = "The project's knowledge-base root, from auto-core.kb.root(): "
+      .. "the project's primary KB > env AUTO_AGENTS_KB_ROOT (inside a "
+      .. "spawned agent) > a first-run import of "
+      .. "require('auto-agents.kb').root(), recorded as the primary.",
     resolver = function()
-      local r = vim.env.AUTO_AGENTS_KB_ROOT
-      if r and r ~= "" then return fs_path.normalize(r) end
-      local rd = vim.env.AUTO_AGENTS_KB_READ
-      if rd and rd ~= "" then
-        local first = rd:match("^([^:]+)")
-        if first and first ~= "" then return fs_path.normalize(first) end
-      end
-      local w = vim.env.AUTO_AGENTS_KB_WRITE
-      if w and w ~= "" then return fs_path.normalize(w) end
-      -- v0.1.41: when the panel runs in the parent nvim (not an
-      -- agent), the AUTO_AGENTS_KB_* env vars aren't set on the
-      -- nvim process — they only land in spawned agent processes.
-      -- auto-agents.kb.root() reads from the active TOML config
-      -- (global vs. project-local) and returns the same path the
-      -- spawn step would inject. Soft dependency via pcall.
-      local ok, kb = pcall(require, "auto-agents.kb")
-      if ok and kb and type(kb.root) == "function" then
-        local ok_r, root = pcall(kb.root)
-        if ok_r and type(root) == "string" and root ~= "" then
-          return fs_path.normalize(root)
-        end
-      end
-      return nil
+      -- ADR 1791209945 §5: ONE KB resolver. This built-in used to carry
+      -- its own chain (env ROOT > READ[0] > WRITE > auto-agents.kb.root())
+      -- that todo/init.lua's reference validator re-implemented without
+      -- the auto-agents step, so the two could disagree. Both delegate
+      -- now; the order, the import and the re-entrancy guard live in
+      -- auto-core.kb.
+      return require("auto-core.kb").root()
     end,
   },
   {
@@ -259,7 +243,7 @@ end
 ---
 ---For a built-in whose resolver returns nil on this machine, the
 ---entry is still emitted (with `value = nil`) so the panel can
----show "(unset)" — handy diagnostic when KB env vars aren't set.
+---show "(unset)" — handy diagnostic when no KB root resolves.
 ---@return table[]
 function M.list()
   local out = {}

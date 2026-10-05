@@ -46,6 +46,16 @@ local M = {
     publishers = { "worktree.nvim" },
   },
 
+  -- ── knowledge base (auto-core.kb, ADR 1791209945 §5) ──────────
+  ["core.kb:primary_changed"] = {
+    doc = "A project's primary KB changed: set interactively (kb.set_primary, source 'set') "
+      .. "or recorded once from auto-agents' legacy answer on first run (source 'import'). "
+      .. "`project_root` is the real path the record is keyed by.",
+    payload = "{ project_root = string, workspace = string?, root = string, "
+      .. "old = { workspace = string?, root = string }?, source = 'set'|'import' }",
+    publishers = { "auto-core" },
+  },
+
   -- ── panel lifecycle ───────────────────────────────────────────
   ["panel:opened"] = {
     doc = "An auto-core.ui.panel singleton just opened.",

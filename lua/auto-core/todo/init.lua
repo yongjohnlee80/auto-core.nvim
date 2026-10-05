@@ -819,39 +819,21 @@ end
 
 -- ─── reference validation (task 7) ────────────────────────────
 
----Resolve the KB root for KB-relative reference paths. Source order:
----  1. `$AUTO_AGENTS_KB_WRITE` (write target — see auto-agents KB config)
----  2. `$AUTO_AGENTS_KB_READ` first colon-separated entry (read root)
----  3. `$AUTO_AGENTS_KB_ROOT` (legacy single-root env)
----Returns nil when none are set — in which case KB-relative refs
----are not validated (we can't check what we can't find).
+---Resolve the KB root for KB-relative reference paths. Returns nil
+---when no KB root resolves — in which case KB-relative refs are not
+---validated (we can't check what we can't find).
+---
+---ADR 1791209945 §5: this delegates to `auto-core.kb.root()`, the ONE
+---KB resolver (the project's primary > `$AUTO_AGENTS_KB_ROOT` > the
+---first-run import from auto-agents). It used to carry its own env
+---chain (ROOT > READ[0] > WRITE, v0.1.37) that had already diverged
+---from `todo/vars.lua`'s `$KB_ROOT` built-in — that one also asked
+---auto-agents — so a `$KB_ROOT/...` ref and a bare KB-relative ref in
+---the same task could resolve against different roots. Smoke section
+---[61] locks the delegated order.
 ---@return string?
 local function kb_root()
-  -- v0.1.37: AUTO_AGENTS_KB_ROOT is the KB-ROOT env var per the
-  -- auto-agents KB convention; AUTO_AGENTS_KB_READ + KB_WRITE are
-  -- scoped sub-directories (e.g. KB_WRITE may point at
-  -- `<kb>/shared/` or `<kb>/agents/<name>/`). The original order
-  -- preferred KB_WRITE first, which broke validation of
-  -- `shared/...`-rooted adr / review paths in real sessions: the
-  -- join would produce `<kb>/shared/shared/...` (duplicated
-  -- segment) and report not-found. Resolution order is now:
-  --   1. AUTO_AGENTS_KB_ROOT     — authoritative root, when set
-  --   2. AUTO_AGENTS_KB_READ[0]  — first colon-separated entry
-  --                                 (conventionally the KB root)
-  --   3. AUTO_AGENTS_KB_WRITE    — last-resort fallback for
-  --                                 setups that only set WRITE
-  -- Smoke section [61] now exercises the realistic env shape
-  -- (ROOT + WRITE both set, WRITE under ROOT) to lock the order.
-  local root = vim.env.AUTO_AGENTS_KB_ROOT
-  if root and root ~= "" then return fs_path.normalize(root) end
-  local r = vim.env.AUTO_AGENTS_KB_READ
-  if r and r ~= "" then
-    local first = r:match("^([^:]+)")
-    if first and first ~= "" then return fs_path.normalize(first) end
-  end
-  local w = vim.env.AUTO_AGENTS_KB_WRITE
-  if w and w ~= "" then return fs_path.normalize(w) end
-  return nil
+  return require("auto-core.kb").root()
 end
 
 ---Build the canonical {field, code} lookup key for stable `detected`

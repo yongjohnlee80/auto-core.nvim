@@ -7879,6 +7879,18 @@ print("\n[60] todo.refresh — bucket reconciliation + auto-archive")
 end)()
 
 -- ─────────────────────── 61. todo.refresh — reference validation + errors[] (§3) ─
+-- auto-core.kb keeps its records in the `kb` state namespace. Every section
+-- that wipes them (kb._reset_for_tests) first proves that namespace is NOT the
+-- developer's real state file under stdpath("state") — a reset there would
+-- erase the user's recorded primaries. Loud (an abort, which run-all reports as
+-- a missing summary) rather than a skipped cell: it must never be green.
+local function assert_kb_state_sandboxed()
+  local ns = require("auto-core.state").namespace("kb", { persist = "json" })
+  local real = vim.fn.stdpath("state")
+  assert(type(ns._path) == "string" and not vim.startswith(ns._path, real),
+    "auto-core.kb state is NOT sandboxed: " .. tostring(ns._path))
+end
+
 print("\n[61] todo.refresh — reference validation + errors[] stability")
 ;(function()
   local ok_req, todo = pcall(require, "auto-core.todo")
@@ -8036,23 +8048,29 @@ print("\n[61] todo.refresh — reference validation + errors[] stability")
     t_multi and t_multi.errors and #t_multi.errors == 5,
     t_multi and ("got " .. #t_multi.errors .. " entries"))
 
-  -- ── v0.1.37: KB-root resolver prefers AUTO_AGENTS_KB_ROOT ────
-  -- The original resolver order was WRITE > READ > ROOT, which
-  -- broke real-world env shapes where ROOT is the KB root and
-  -- WRITE points at a sub-directory (e.g. `<kb>/shared/`). Joining
-  -- a `shared/...`-rooted adr path onto KB_WRITE produced
-  -- `<kb>/shared/shared/...` (duplicated segment) and reported
-  -- not-found. Lock the new order:
-  --   1. AUTO_AGENTS_KB_ROOT  2. AUTO_AGENTS_KB_READ[0]  3. AUTO_AGENTS_KB_WRITE
+  -- ── KB-root resolver: delegated to auto-core.kb (ADR 1791209945 §5) ──
+  -- History: v0.1.37 fixed an order of WRITE > READ > ROOT that joined
+  -- `shared/...` refs onto `<kb>/shared` (a duplicated segment). The
+  -- validator then carried its own ROOT > READ[0] > WRITE chain, which
+  -- diverged from the `$KB_ROOT` built-in. Both now ask auto-core.kb:
+  --   1. the project's primary  2. AUTO_AGENTS_KB_ROOT  3. first-run import
+  -- READ / WRITE are no longer read. auto-agents is stubbed ABSENT so the
+  -- import step cannot answer for the fixture, and the kb records are wiped
+  -- on both sides so a primary cannot leak in or out of this block.
   do
+    local kb = require("auto-core.kb")
+    assert_kb_state_sandboxed()
+    kb._reset_for_tests()
+    local saved_aa_loaded  = package.loaded["auto-agents.kb"]
+    local saved_aa_preload = package.preload["auto-agents.kb"]
+    package.loaded["auto-agents.kb"]  = nil
+    package.preload["auto-agents.kb"] = function() error("auto-agents not installed") end
     local saved_root  = vim.env.AUTO_AGENTS_KB_ROOT
     local saved_read  = vim.env.AUTO_AGENTS_KB_READ
     local saved_write = vim.env.AUTO_AGENTS_KB_WRITE
 
     -- Realistic shape: ROOT is the kb dir, WRITE is `<kb>/shared`,
-    -- READ is colon-separated (we'll only use the WRITE entry for
-    -- the test, but include READ in the env to verify ROOT still
-    -- wins).
+    -- READ is colon-separated — ROOT must win over both.
     vim.env.AUTO_AGENTS_KB_ROOT  = kb_dir
     vim.env.AUTO_AGENTS_KB_WRITE = kb_dir .. "/shared"
     vim.env.AUTO_AGENTS_KB_READ  = kb_dir .. "/shared:" .. kb_dir .. "/agents"
@@ -8069,32 +8087,52 @@ print("\n[61] todo.refresh — reference validation + errors[] stability")
       t_root and (t_root.errors == nil or #t_root.errors == 0),
       t_root and vim.inspect(t_root.errors))
 
-    -- Now unset ROOT and confirm the fallback chain: READ wins.
-    -- (kb_dir .. "/shared" is the first READ entry; `shared/adrs/...`
-    -- joined to `<kb>/shared` again produces the duplicated artifact
-    -- — so we EXPECT a not-found error this time, proving READ is
-    -- the fallback path and that the bug pattern is well-defined.)
+    -- ROOT unset, READ / WRITE both pointing at the real KB root: they are
+    -- NOT fallbacks any more, so no KB root resolves and a bare KB-relative
+    -- ref is left unvalidated — even a broken one. Under the old chain
+    -- READ[0] answered and this ref reported not-found.
     vim.env.AUTO_AGENTS_KB_ROOT  = nil
-    todo.update(id_root, { adr = { "shared/adrs/0099-real.md" } })
+    vim.env.AUTO_AGENTS_KB_READ  = kb_dir
+    vim.env.AUTO_AGENTS_KB_WRITE = kb_dir
+    todo.update(id_root, { adr = { "shared/adrs/0998-missing.md" } })
     -- update() doesn't run refresh; trigger explicitly.
     todo.refresh()
-    local t_fallback = todo.get(id_root)
-    ok("KB-root resolver: with ROOT unset, READ[0] is the next fallback",
-      t_fallback and type(t_fallback.errors) == "table" and #t_fallback.errors == 1,
-      t_fallback and vim.inspect(t_fallback.errors))
+    local t_noroot = todo.get(id_root)
+    ok("KB-root resolver: READ / WRITE are no longer fallbacks (ref left unvalidated)",
+      t_noroot and (t_noroot.errors == nil or #t_noroot.errors == 0),
+      t_noroot and vim.inspect(t_noroot.errors))
 
-    -- Finally: only WRITE set (legacy / minimal shape) — should
-    -- still work as a last-resort fallback.
+    -- The project's primary wins over env. The ref exists ONLY under the
+    -- primary, while ROOT points at a KB that lacks it: clean means the
+    -- primary answered.
+    local kb_primary = vim.fn.tempname()
+    vim.fn.mkdir(kb_primary .. "/shared/adrs", "p")
+    vim.fn.writefile({ "# primary only" }, kb_primary .. "/shared/adrs/0100-primary-only.md")
     vim.env.AUTO_AGENTS_KB_READ  = nil
-    -- Point WRITE at the actual kb root for this test so the adr
-    -- path resolves cleanly via the last-resort branch.
-    vim.env.AUTO_AGENTS_KB_WRITE = kb_dir
+    vim.env.AUTO_AGENTS_KB_WRITE = nil
+    vim.env.AUTO_AGENTS_KB_ROOT  = kb_dir
+    todo.update(id_root, { adr = { "shared/adrs/0100-primary-only.md" } })
     todo.refresh()
-    local t_write = todo.get(id_root)
-    ok("KB-root resolver: WRITE-only setup still works as last-resort fallback",
-      t_write and (t_write.errors == nil or #t_write.errors == 0),
-      t_write and vim.inspect(t_write.errors))
+    local t_env = todo.get(id_root)
+    ok("KB-root resolver: control — with no primary, ROOT answers and the ref is not-found",
+      t_env and type(t_env.errors) == "table" and #t_env.errors == 1
+        and t_env.errors[1].code == "not-found",
+      t_env and vim.inspect(t_env.errors))
+    kb.set_primary(tmp_root, { workspace = "smoke", root = kb_primary }, { confirmed = true })
+    todo.refresh()
+    local t_primary = todo.get(id_root)
+    ok("KB-root resolver: the project's primary wins over AUTO_AGENTS_KB_ROOT",
+      t_primary and (t_primary.errors == nil or #t_primary.errors == 0),
+      t_primary and vim.inspect(t_primary.errors))
+    ok("KB-root resolver: the validator and the $KB_ROOT built-in agree",
+      require("auto-core.todo.vars").get("KB_ROOT") == kb.root()
+        and kb.root() == fs_path.normalize(kb_primary),
+      tostring(require("auto-core.todo.vars").get("KB_ROOT")))
 
+    kb._reset_for_tests()
+    vim.fn.delete(kb_primary, "rf")
+    package.loaded["auto-agents.kb"]  = saved_aa_loaded
+    package.preload["auto-agents.kb"] = saved_aa_preload
     vim.env.AUTO_AGENTS_KB_ROOT  = saved_root
     vim.env.AUTO_AGENTS_KB_READ  = saved_read
     vim.env.AUTO_AGENTS_KB_WRITE = saved_write
@@ -8508,7 +8546,17 @@ print("\n[65] todo.vars — variable store + $VAR resolver")
     type(vars.get("CWD")) == "string" and vars.get("CWD") ~= "")
 
   -- KB_ROOT pinned via env so the test doesn't depend on the
-  -- user's actual KB setup.
+  -- user's actual KB setup. Since ADR 1791209945 §5 the built-in is
+  -- auto-core.kb.root(), where a project's primary outranks env — so
+  -- the kb records are wiped (no primary can answer instead) and
+  -- auto-agents is stubbed absent (no first-run import can either).
+  local kb = require("auto-core.kb")
+  assert_kb_state_sandboxed()
+  kb._reset_for_tests()
+  local saved_aa_loaded  = package.loaded["auto-agents.kb"]
+  local saved_aa_preload = package.preload["auto-agents.kb"]
+  package.loaded["auto-agents.kb"]  = nil
+  package.preload["auto-agents.kb"] = function() error("auto-agents not installed") end
   local saved_root  = vim.env.AUTO_AGENTS_KB_ROOT
   local saved_read  = vim.env.AUTO_AGENTS_KB_READ
   local saved_write = vim.env.AUTO_AGENTS_KB_WRITE
@@ -8518,6 +8566,14 @@ print("\n[65] todo.vars — variable store + $VAR resolver")
   ok("KB_ROOT built-in resolves via AUTO_AGENTS_KB_ROOT",
     vars.get("KB_ROOT") == "/tmp/fake-kb-root",
     "got " .. tostring(vars.get("KB_ROOT")))
+  ok("KB_ROOT built-in IS auto-core.kb.root() (one resolver, not a copy)",
+    (function()
+      local real = kb.root
+      kb.root = function() return "/tmp/from-auto-core-kb" end
+      local got = vars.get("KB_ROOT")
+      kb.root = real
+      return got == "/tmp/from-auto-core-kb", got
+    end)())
 
   -- Set / list / remove ----------------------------------------
   local state_tmp = vim.fn.tempname()
@@ -8605,6 +8661,8 @@ print("\n[65] todo.vars — variable store + $VAR resolver")
   vim.env.AUTO_AGENTS_KB_READ  = saved_read
   vim.env.AUTO_AGENTS_KB_WRITE = saved_write
   vim.env.MY_FALLBACK          = nil
+  package.loaded["auto-agents.kb"]  = saved_aa_loaded
+  package.preload["auto-agents.kb"] = saved_aa_preload
   require("auto-core.state").configure({ persist_dir = nil })
   vim.fn.delete(state_tmp, "rf")
   package.loaded["auto-core.todo.vars"] = nil
@@ -13847,6 +13905,262 @@ print("\n[92] git.worktree — choose_dir: root, project folders, a typed direct
   vim.ui.select, vim.ui.input, vim.notify = real_select, real_input, real_notify
   wt._reset_for_tests()
   vim.fn.delete(repo, "rf")
+end)()
+
+-- ── [93] auto-core.kb — the project's primary KB (ADR 1791209945 §5) ──────
+--
+-- The one KB resolver: primary > $AUTO_AGENTS_KB_ROOT > first-run import from
+-- auto-agents > nil. auto-agents is STUBBED through package.loaded for every
+-- cell (absent / answering / erroring / calling back in) so no cell depends on
+-- what happens to be on the runtimepath, and the env trio is saved, cleared
+-- and restored so an agent session's ambient KB cannot answer for a fixture.
+-- State isolation: the namespace's records are wiped before and after, and
+-- persist_dir points at this section's own tempdir.
+print("\n[93] auto-core.kb — primary KB, the one resolver, first-run import")
+;(function()
+  local ok_k, kb = pcall(require, "auto-core.kb")
+  ok("[93] auto-core.kb loads", ok_k, tostring(kb))
+  if not ok_k then return end
+  local state  = require("auto-core.state")
+  local events = require("auto-core.events")
+  local wt     = require("auto-core.git.worktree")
+  local todo   = require("auto-core.todo")
+
+  ok("[93] the facade exposes it", core.kb == kb)
+
+  local state_tmp = vim.fn.tempname()
+  vim.fn.mkdir(state_tmp, "p")
+  state.configure({ persist_dir = state_tmp })
+  assert_kb_state_sandboxed()
+  kb._reset_for_tests()
+
+  local saved_env = {
+    ROOT  = vim.env.AUTO_AGENTS_KB_ROOT,
+    READ  = vim.env.AUTO_AGENTS_KB_READ,
+    WRITE = vim.env.AUTO_AGENTS_KB_WRITE,
+  }
+  vim.env.AUTO_AGENTS_KB_ROOT  = nil
+  vim.env.AUTO_AGENTS_KB_READ  = nil
+  vim.env.AUTO_AGENTS_KB_WRITE = nil
+  local saved_aa_loaded  = package.loaded["auto-agents.kb"]
+  local saved_aa_preload = package.preload["auto-agents.kb"]
+  local saved_ws = wt.get_workspace_root()
+
+  -- auto-agents ABSENT: require must fail, not merely find nothing loaded.
+  local function aa_absent()
+    package.loaded["auto-agents.kb"] = nil
+    package.preload["auto-agents.kb"] = function() error("auto-agents not installed") end
+  end
+  local aa_calls = 0
+  local function aa_answers(fn)
+    aa_calls = 0
+    package.preload["auto-agents.kb"] = nil
+    package.loaded["auto-agents.kb"] = {
+      root = function() aa_calls = aa_calls + 1; return fn() end,
+    }
+  end
+
+  local function mkdir(p) vim.fn.mkdir(p, "p"); return vim.uv.fs_realpath(p) end
+  local base  = mkdir(vim.fn.tempname())
+  local proj  = mkdir(base .. "/proj")
+  local kb_a  = mkdir(base .. "/kb-a")
+  local kb_b  = mkdir(base .. "/kb-b")
+  local alias = base .. "/proj-alias"
+  vim.uv.fs_symlink(proj, alias)
+  vim.fn.writefile({ "x" }, base .. "/a-file")
+
+  local function primaries()
+    local all = state.namespace("kb"):get("primaries")
+    local keys = {}
+    for k in pairs(type(all) == "table" and all or {}) do keys[#keys + 1] = k end
+    table.sort(keys)
+    return keys, all
+  end
+
+  local seen = {}
+  local h = events.subscribe("core.kb:primary_changed", function(p) seen[#seen + 1] = p end)
+
+  -- ── nothing configured ───────────────────────────────────────
+  aa_absent()
+  wt.set_workspace_root(proj)
+  ok("[93] no primary, no env, no auto-agents → root is nil",
+    kb.root(proj) == nil and kb.root() == nil, tostring(kb.root(proj)))
+  ok("[93] … and primary is nil, nothing recorded",
+    kb.primary(proj) == nil and #primaries() == 0, vim.inspect(primaries()))
+
+  -- ── env: used when there is no primary ───────────────────────
+  vim.env.AUTO_AGENTS_KB_ROOT = kb_a
+  ok("[93] env AUTO_AGENTS_KB_ROOT answers when no primary is set",
+    kb.root(proj) == kb_a, tostring(kb.root(proj)))
+  -- READ/WRITE are dropped: a spawned agent always gets ROOT.
+  vim.env.AUTO_AGENTS_KB_ROOT  = nil
+  vim.env.AUTO_AGENTS_KB_READ  = kb_a
+  vim.env.AUTO_AGENTS_KB_WRITE = kb_a
+  ok("[93] READ / WRITE are no longer fallbacks",
+    kb.root(proj) == nil, tostring(kb.root(proj)))
+  vim.env.AUTO_AGENTS_KB_READ  = nil
+  vim.env.AUTO_AGENTS_KB_WRITE = nil
+  vim.env.AUTO_AGENTS_KB_ROOT  = kb_a
+
+  -- ── set_primary is interactive only ──────────────────────────
+  local okc, errc = kb.set_primary(proj, { workspace = "global", root = kb_b })
+  ok("[93] set_primary refuses without opts.confirmed", okc == false and errc == "not_confirmed",
+    tostring(errc))
+  local okt = kb.set_primary(proj, { root = kb_b }, { confirmed = "yes" })
+  ok("[93] … and refuses a truthy non-true confirmed", okt == false)
+  ok("[93] … and wrote nothing, published nothing", kb.primary(proj) == nil and #seen == 0)
+
+  local okm, errm = kb.set_primary(proj, { root = kb_b .. "/missing" }, { confirmed = true })
+  ok("[93] set_primary rejects a root that does not exist", okm == false and errm == "root_not_a_directory",
+    tostring(errm))
+  local okf, errf = kb.set_primary(proj, { root = base .. "/a-file" }, { confirmed = true })
+  ok("[93] set_primary rejects a root that is a file", okf == false and errf == "root_not_a_directory",
+    tostring(errf))
+  ok("[93] … neither rejection wrote a record", kb.primary(proj) == nil and #primaries() == 0)
+
+  -- The todo store is untouched by set_primary (ADR §5.5): snapshot the
+  -- resolved dir AND the whole todo namespace before the first real set.
+  local td_before = todo.get_todo_dir()
+  local todo_ns_before = vim.deepcopy(state.namespace("todo"):get_all())
+
+  local oks, errs = kb.set_primary(proj, { workspace = "global", root = kb_b }, { confirmed = true })
+  ok("[93] set_primary with confirmed = true succeeds", oks == true, tostring(errs))
+  ok("[93] core.kb:primary_changed published once, keyed by the real path",
+    #seen == 1 and seen[1].project_root == proj and seen[1].root == kb_b
+      and seen[1].workspace == "global" and seen[1].source == "set" and seen[1].old == nil,
+    vim.inspect(seen))
+  ok("[93] the topic is registered", require("auto-core.events.topics")["core.kb:primary_changed"] ~= nil)
+
+  -- ── primary wins over env ────────────────────────────────────
+  ok("[93] primary wins over env (env still set to another KB)",
+    vim.env.AUTO_AGENTS_KB_ROOT == kb_a and kb.root(proj) == kb_b, tostring(kb.root(proj)))
+  local pr = kb.primary(proj)
+  ok("[93] primary() returns { workspace, root }",
+    pr and pr.workspace == "global" and pr.root == kb_b, vim.inspect(pr))
+  ok("[93] the default project is the session's (workspace root)", kb.root() == kb_b, tostring(kb.root()))
+
+  -- ── realpath: an alias maps to the same single entry ─────────
+  ok("[93] an alias of the project reads the same primary",
+    kb.root(alias) == kb_b and (kb.primary(alias) or {}).root == kb_b, tostring(kb.root(alias)))
+  kb.set_primary(alias, { workspace = "global", root = kb_a }, { confirmed = true })
+  local keys = primaries()
+  ok("[93] setting through the alias rewrites the ONE real-path entry",
+    #keys == 1 and keys[1] == proj and kb.root(proj) == kb_a, vim.inspect(keys))
+  ok("[93] … and the event carries the old value",
+    #seen == 2 and seen[2].old and seen[2].old.root == kb_b and seen[2].project_root == proj,
+    vim.inspect(seen[2]))
+  kb.set_primary(proj, { workspace = "global", root = kb_a }, { confirmed = true })
+  ok("[93] re-setting the same value publishes nothing", #seen == 2, tostring(#seen))
+
+  ok("[93] the todo dir is untouched by set_primary", todo.get_todo_dir() == td_before,
+    tostring(todo.get_todo_dir()) .. " vs " .. tostring(td_before))
+  ok("[93] … and so is the todo state namespace (overrides, known dirs)",
+    vim.deep_equal(state.namespace("todo"):get_all(), todo_ns_before))
+
+  -- ── persisted JSON, keyed by real path ───────────────────────
+  local ns = state.namespace("kb")
+  ns:persist_now()
+  local raw = table.concat(vim.fn.readfile(ns._path), "\n")
+  local okd, decoded = pcall(vim.json.decode, raw)
+  local rec = okd and decoded.primaries and decoded.primaries[proj]
+  ok("[93] the state file holds { workspace, root, set_at } under the real path",
+    rec and rec.root == kb_a and rec.workspace == "global" and type(rec.set_at) == "string",
+    raw)
+
+  -- ── first-run import ─────────────────────────────────────────
+  vim.env.AUTO_AGENTS_KB_ROOT = nil
+  local proj2  = mkdir(base .. "/proj2")
+  local alias2 = base .. "/proj2-alias"
+  vim.uv.fs_symlink(proj2, alias2)
+  wt.set_workspace_root(proj2)
+  aa_answers(function() return kb_b end)
+  local n_before = #seen
+  ok("[93] import: a project without a primary gets auto-agents' answer",
+    kb.root() == kb_b, tostring(kb.root()))
+  local p2 = kb.primary(proj2)
+  ok("[93] import: … recorded as the project's primary (no workspace yet)",
+    p2 and p2.root == kb_b and p2.workspace == nil, vim.inspect(p2))
+  ok("[93] import: published once with source = 'import'",
+    #seen == n_before + 1 and seen[#seen].source == "import" and seen[#seen].project_root == proj2,
+    vim.inspect(seen[#seen]))
+  local logged
+  for _, r in ipairs(require("auto-core.log").recent(10)) do
+    if r.component == "auto-core.kb" and tostring(r.message or r.msg or ""):find(proj2, 1, true) then
+      logged = r
+    end
+  end
+  ok("[93] import: logged on the auto-core.kb component axis", logged ~= nil)
+  ok("[93] import: a second call is a no-op (auto-agents not asked again, no event)",
+    kb.root() == kb_b and aa_calls == 1 and #seen == n_before + 1, "calls=" .. aa_calls)
+  wt.set_workspace_root(alias2)
+  local keys2 = primaries()
+  ok("[93] import: an alias of the same real path is a no-op too",
+    kb.root() == kb_b and aa_calls == 1 and #seen == n_before + 1 and #keys2 == 2,
+    "calls=" .. aa_calls .. " keys=" .. vim.inspect(keys2))
+  ok("[93] import: nothing on disk changed besides the state file",
+    vim.fn.readdir(proj2)[1] == nil and vim.fn.isdirectory(kb_b .. "/.todo-list") == 0,
+    vim.inspect(vim.fn.readdir(proj2)))
+
+  -- A phantom root (auto-agents answers <project>/.auto-agents/kb whether or
+  -- not it exists) is still RETURNED — today's answer — but never recorded.
+  local proj3 = mkdir(base .. "/proj3")
+  wt.set_workspace_root(proj3)
+  aa_answers(function() return proj3 .. "/.auto-agents/kb" end)
+  ok("[93] import: a missing directory is returned as the legacy answer",
+    kb.root() == proj3 .. "/.auto-agents/kb", tostring(kb.root()))
+  ok("[93] import: … but not recorded as the primary", kb.primary(proj3) == nil)
+
+  -- auto-agents answers for the SESSION, so it says nothing about another project.
+  local proj4 = mkdir(base .. "/proj4")
+  aa_answers(function() return kb_a end)
+  kb.root(proj4)
+  ok("[93] import: never recorded for a project that is not the session's",
+    kb.primary(proj4) == nil and kb.primary(proj3) == nil,
+    vim.inspect({ kb.primary(proj4), kb.primary(proj3) }))
+
+  -- env present → the legacy chain answered from env, never auto-agents.
+  local proj5 = mkdir(base .. "/proj5")
+  wt.set_workspace_root(proj5)
+  aa_answers(function() return kb_b end)
+  vim.env.AUTO_AGENTS_KB_ROOT = kb_a
+  ok("[93] import: env answers before auto-agents is asked",
+    kb.root() == kb_a and aa_calls == 0 and kb.primary(proj5) == nil, "calls=" .. aa_calls)
+  vim.env.AUTO_AGENTS_KB_ROOT = nil
+
+  aa_answers(function() error("boom") end)
+  local okb, rb = pcall(kb.root)
+  ok("[93] import: an erroring auto-agents is soft (nil, no throw, nothing recorded)",
+    okb and rb == nil and kb.primary(proj5) == nil, tostring(rb))
+
+  -- ── re-entrancy: auto-agents' shim calls back into auto-core.kb ──
+  -- The shape auto-agents takes for one minor: ask auto-core first, fall back
+  -- to its own legacy resolution. Without the guard the import re-enters
+  -- itself until the C stack gives out.
+  aa_answers(function() return require("auto-core.kb").root() or kb_b end)
+  local okr, rr = pcall(kb.root)
+  ok("[93] re-entrancy: the shim's call-back does not recurse",
+    okr and rr == kb_b and aa_calls == 1, "ok=" .. tostring(okr) .. " calls=" .. aa_calls .. " r=" .. tostring(rr))
+  ok("[93] re-entrancy: … and the import still recorded once",
+    (kb.primary(proj5) or {}).root == kb_b)
+  ok("[93] re-entrancy: the guard is released afterwards (a later import runs)",
+    (function()
+      local proj6 = mkdir(base .. "/proj6")
+      wt.set_workspace_root(proj6)
+      aa_answers(function() return kb_a end)
+      return kb.root() == kb_a and kb.primary(proj6) ~= nil
+    end)())
+
+  -- ── teardown ─────────────────────────────────────────────────
+  events.unsubscribe(h)
+  kb._reset_for_tests()
+  package.loaded["auto-agents.kb"]  = saved_aa_loaded
+  package.preload["auto-agents.kb"] = saved_aa_preload
+  vim.env.AUTO_AGENTS_KB_ROOT  = saved_env.ROOT
+  vim.env.AUTO_AGENTS_KB_READ  = saved_env.READ
+  vim.env.AUTO_AGENTS_KB_WRITE = saved_env.WRITE
+  wt.set_workspace_root(saved_ws)
+  vim.fn.delete(base, "rf")
+  vim.fn.delete(state_tmp, "rf")
 end)()
 
 -- Convention §3: emit the `<P> passed, <F> failed` summary and exit
