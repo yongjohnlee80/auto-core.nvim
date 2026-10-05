@@ -444,6 +444,19 @@ function M.topic(repo, sha)
   return (M.slugify(name) or "review") .. "-" .. tostring(sha):sub(1, 7)
 end
 
+-- The draft's verdicts as the KB schema's review type names them.
+local SCHEMA_VERDICT = {
+  comment = "commented",
+  approved = "approved",
+  change_requested = "change_requested",
+}
+M.SCHEMA_VERDICT = SCHEMA_VERDICT
+
+---yaml_string quotes s as a YAML double-quoted scalar.
+local function yaml_string(s)
+  return '"' .. tostring(s):gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", " ") .. '"'
+end
+
 ---render_markdown produces the PRIMARY artifact.
 ---
 ---Every anchored finding appears with its `path:line`, and so do the UNANCHORED
@@ -454,29 +467,31 @@ function M.render_markdown(opts)
   local d = opts.draft
   local date = os.date("!%Y-%m-%d")
   local n_anchored, n_unanchored = #M.anchored(d), #M.unanchored(d)
-  -- KB_RULES R2: every new doc under `agents/<name>/` carries BOTH YAML
-  -- frontmatter (for tools — kb.frontmatter, obsidian, the cost analyzer) and
-  -- the inline Tags/Abstract preview lines (for LLMs skimming before load).
-  -- They are not redundant and both are required.
+  -- The KB's review type (ADR 1791209946 §4): the generic schema's common
+  -- fields plus the review's own. The abstract is frontmatter now (the inline
+  -- Tags/Abstract preview lines were KB v1's KB_RULES R2).
+  local verdict = d.verdict or "comment"
+  local sha7 = tostring(opts.sha):sub(1, 7)
+  local repo = M.slugify(opts.repo_label or "repo") or "repo"
+  local abstract = ("%s review of %s at %s, r%d: %d anchored finding(s), %d unanchored.")
+    :format(verdict, opts.repo_label or "repo", sha7, opts.revision, n_anchored, n_unanchored)
   local lines = {
     "---",
     "type: review",
+    "status: in-progress",
     ("created: %s"):format(date),
     ("updated: %s"):format(date),
-    "status: open",
-    ("tags: [review, %s, diff-review, %s]"):format(
-      M.slugify(opts.repo_label or "repo") or "repo", d.verdict or "comment"),
+    ("tags: [review, %s, diff-review, %s]"):format(repo, verdict),
+    ("abstract: %s"):format(yaml_string(abstract)),
+    ("reviewer: %s"):format(yaml_string(opts.reviewer or "unknown")),
+    ("subject: %s"):format(yaml_string(("%s @ %s"):format(opts.repo_label or "repo", sha7))),
+    ("verdict: %s"):format(SCHEMA_VERDICT[verdict] or "commented"),
+    ("round: %d"):format(opts.revision),
+    ("repo: %s"):format(yaml_string(opts.repo_label or "repo")),
+    ("head: %s"):format(yaml_string(tostring(opts.sha))),
     "---",
     "",
-    ("# Review — %s @ %s"):format(opts.repo_label or "repo", tostring(opts.sha):sub(1, 7)),
-    "",
-    ("**Tags:** `type:review` `status:open` `owner:%s` `repo:%s` `area:diff-review`")
-      :format(M.slugify(opts.reviewer or "") or "unknown",
-              M.slugify(opts.repo_label or "repo") or "repo"),
-    "",
-    ("**Abstract:** %s review of `%s` at r%d — %d anchored finding(s), %d unanchored.")
-      :format(d.verdict or "comment", tostring(opts.sha):sub(1, 7), opts.revision,
-              n_anchored, n_unanchored),
+    ("# Review — %s @ %s"):format(opts.repo_label or "repo", sha7),
     "",
     ("- **Reviewer:** %s"):format(opts.reviewer or "(unknown)"),
     ("- **Commit:** `%s`"):format(tostring(opts.sha)),

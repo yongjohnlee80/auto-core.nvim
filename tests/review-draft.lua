@@ -97,7 +97,28 @@ ok("render carries the UNANCHORED finding too",
 -- literal 0 left the grep above green, so it was proving less than it looked.
 ok("render's abstract counts BOTH kinds",
   (md or ""):find("1 anchored finding(s), 1 unanchored", 1, true) ~= nil,
-  (md or ""):match("%*%*Abstract:%*%*[^\n]*"))
+  (md or ""):match("abstract:[^\n]*"))
+
+-- The frontmatter is the KB's review type (ADR 1791209946 §4): the common
+-- fields plus reviewer, subject and a verdict from the schema's enum.
+local fm = (md or ""):match("^%-%-%-\n(.-)\n%-%-%-\n") or ""
+local function field(k) return fm:match("\n" .. k .. ": ([^\n]*)") or fm:match("^" .. k .. ": ([^\n]*)") end
+ok("frontmatter: type review", field("type") == "review", fm)
+ok("frontmatter: status from the review enum", field("status") == "in-progress", field("status"))
+ok("frontmatter: the abstract counts both kinds",
+  (field("abstract") or ""):find("1 anchored finding(s), 1 unanchored", 1, true) ~= nil, field("abstract"))
+ok("frontmatter: reviewer", field("reviewer") == '"tester"', field("reviewer"))
+ok("frontmatter: subject names the repo and commit", field("subject") == '"proj @ ' .. SHA:sub(1, 7) .. '"', field("subject"))
+ok("frontmatter: the draft's comment is the schema's commented", field("verdict") == "commented", field("verdict"))
+ok("frontmatter: round is the revision", field("round") == "1", field("round"))
+ok("frontmatter: head is the commit", field("head") == '"' .. SHA .. '"', field("head"))
+ok("no KB v1 inline Tags/Abstract lines", not (md or ""):find("**Tags:**", 1, true) and not (md or ""):find("**Abstract:**", 1, true))
+local quoted = A.render_markdown({ draft = A.peek(SLUG, SHA), sha = SHA, revision = 2, reviewer = 'a "b" \\ c', repo_label = "proj" })
+ok("a quote or backslash in a value stays one YAML string",
+  quoted:find('reviewer: "a \\"b\\" \\\\ c"\n', 1, true) ~= nil, quoted:match("reviewer:[^\n]*"))
+for k, v in pairs({ comment = "commented", approved = "approved", change_requested = "change_requested" }) do
+  ok("verdict " .. k .. " is the schema's " .. v, A.SCHEMA_VERDICT[k] == v)
+end
 
 -- §4 discard actually clears
 A.discard(SLUG, SHA)
