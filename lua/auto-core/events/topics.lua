@@ -372,14 +372,14 @@ local M = {
 
   -- ── doc pinning (md-harpoon — ADR 0006 + auto-core-todos) ───────
   ["doc:pinned"] = {
-    doc = "A document was pinned to one of md-harpoon's slots (or repinned to a different path).",
+    doc = "A document was pinned to one of the preview slots (or repinned to a different path): AutoDoc's preview, or md-harpoon's until it is retired.",
     payload = "{ slot = string, path = string, source_bufnr = integer? }",
-    publishers = { "md-harpoon.nvim" },
+    publishers = { "autodoc.nvim", "md-harpoon.nvim" },
   },
   ["doc:unpinned"] = {
     doc = "A previously-pinned slot was cleared (or the panel was closed).",
     payload = "{ slot = string, path = string? }",
-    publishers = { "md-harpoon.nvim" },
+    publishers = { "autodoc.nvim", "md-harpoon.nvim" },
   },
 }
 
