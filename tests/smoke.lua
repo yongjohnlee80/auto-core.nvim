@@ -14150,6 +14150,25 @@ print("\n[93] auto-core.kb — primary KB, the one resolver, first-run import")
       return kb.root() == kb_a and kb.primary(proj6) ~= nil
     end)())
 
+  -- ── another project, asked for by name (lector mid-stream MF2) ──
+  -- The env var and the import describe the SESSION's project: another project with no primary of
+  -- its own gets nil, never the session's KB.
+  do
+    local session_proj = mkdir(base .. "/proj-session")
+    local other_proj = mkdir(base .. "/proj-other")
+    wt.set_workspace_root(session_proj)
+    kb._reset_for_tests()
+    vim.env.AUTO_AGENTS_KB_ROOT = kb_a
+    ok("[93] another project gets no KB from the session's AUTO_AGENTS_KB_ROOT",
+      kb.root(other_proj) == nil, tostring(kb.root(other_proj)))
+    ok("[93] the session's own project still gets it", kb.root() == kb_a, tostring(kb.root()))
+    vim.env.AUTO_AGENTS_KB_ROOT = nil
+    aa_answers(function() return kb_a end)
+    ok("[93] another project gets no KB from the session's import", kb.root(other_proj) == nil and aa_calls == 0,
+      string.format("%s (auto-agents asked %d times)", tostring(kb.root(other_proj)), aa_calls))
+    ok("[93] and nothing is recorded for it", kb.primary(other_proj) == nil)
+  end
+
   -- ── teardown ─────────────────────────────────────────────────
   events.unsubscribe(h)
   kb._reset_for_tests()

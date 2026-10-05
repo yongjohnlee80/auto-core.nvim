@@ -190,14 +190,18 @@ function M.primary(project_root)
   return _public(_read(_project_key(project_root)))
 end
 
----The KB root for a project: its primary, then `$AUTO_AGENTS_KB_ROOT`,
----then the first-run import, then nil. See the module doc.
+---The KB root for a project: its primary, then (for the session's own
+---project only) `$AUTO_AGENTS_KB_ROOT`, then the first-run import, then
+---nil. See the module doc.
 ---@param project_root string?  default: the session's project
 ---@return string|nil
 function M.root(project_root)
   local key = _project_key(project_root)
   local rec = _read(key)
   if rec then return rec.root end
+  -- `$AUTO_AGENTS_KB_ROOT` and the import both describe the SESSION's project: another project
+  -- asked for by name has its recorded primary or nothing, never the session's KB
+  if key ~= _project_key(nil) then return nil end
   local env = vim.env.AUTO_AGENTS_KB_ROOT
   if type(env) == "string" and env ~= "" then return fs_path.normalize(env) end
   return _import(key)
