@@ -14281,6 +14281,39 @@ print("\n[94] auto-core.kb — managed KB documents: provided per version, synce
   local okn, errn = kb.sync_managed(base .. "/nope")
   ok("[94] a root that is not a directory is refused", not okn and errn == "root_not_a_directory")
 
+  -- a symlinked folder leading out of the KB is never read or written through
+  local outside = base .. "/outside"
+  vim.fn.mkdir(outside, "p")
+  vim.fn.writefile(vim.split(schema_yaml("0.0.1"), "\n"), outside .. "/frontmatter.yaml")
+  local esc = base .. "/esc"
+  vim.fn.mkdir(esc, "p")
+  vim.fn.writefile(vim.split(ops("0.0.1"), "\n"), esc .. "/KB_OPERATIONS.md")
+  vim.uv.fs_symlink(outside, esc .. "/_schema")
+  local _, _, erep = kb.sync_managed(esc)
+  ok("[94] a symlinked folder leading outside the KB is skipped, and the outside file is untouched",
+    vim.tbl_contains(erep.failed, "_schema/frontmatter.yaml")
+      and vim.fn.readfile(outside .. "/frontmatter.yaml")[1] == "# autodoc_version: 0.0.1", vim.inspect(erep))
+  ok("[94] the KB's own file beside it still syncs", vim.tbl_contains(erep.updated, "KB_OPERATIONS.md"))
+
+  -- versions are semver, prereleases ordered below their release
+  kb._reset_for_tests()
+  local function one(v) return { { rel = "KB_OPERATIONS.md", version = v, text = ops(v) } } end
+  local okj = kb.provide_managed("autodoc", { version_key = "autodoc_version", files = one("1.2.3junk") })
+  ok("[94] a version with junk after it is not a version (refused)", not okj)
+  kb.provide_managed("autodoc", { version_key = "autodoc_version", files = one("0.2.0-rc.1") })
+  local _, _, rc = kb.provide_managed("autodoc", { version_key = "autodoc_version", files = one("0.2.0") })
+  ok("[94] a release replaces its stored release candidate", #rc.stored == 1 and kb.managed()["KB_OPERATIONS.md"].version == "0.2.0")
+  local _, _, back = kb.provide_managed("autodoc", { version_key = "autodoc_version", files = one("0.2.0-rc.2") })
+  ok("[94] and a release candidate never replaces its release", #back.stored == 0)
+  local rckb = base .. "/rckb"
+  vim.fn.mkdir(rckb, "p")
+  vim.fn.writefile(vim.split(ops("0.2.0-rc.1"), "\n"), rckb .. "/KB_OPERATIONS.md")
+  local _, _, rcs = kb.sync_managed(rckb)
+  ok("[94] a KB on the release candidate is synced to the release", vim.tbl_contains(rcs.updated, "KB_OPERATIONS.md"), vim.inspect(rcs))
+  kb.provide_managed("autodoc", { version_key = "autodoc_version", files = one("0.2.1-alpha.10") })
+  local _, _, pre = kb.provide_managed("autodoc", { version_key = "autodoc_version", files = one("0.2.1-alpha.9") })
+  ok("[94] prerelease identifiers compare numerically (alpha.9 < alpha.10)", #pre.stored == 0)
+
   events.unsubscribe(h)
   events.unsubscribe(h2)
   kb._reset_for_tests()
