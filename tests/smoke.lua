@@ -14182,6 +14182,104 @@ print("\n[93] auto-core.kb — primary KB, the one resolver, first-run import")
   vim.fn.delete(state_tmp, "rf")
 end)()
 
+print("\n[94] auto-core.kb — managed KB documents: provided per version, synced into a KB")
+;(function()
+  local kb     = require("auto-core.kb")
+  local state  = require("auto-core.state")
+  local events = require("auto-core.events")
+  local state_tmp = vim.fn.tempname()
+  vim.fn.mkdir(state_tmp, "p")
+  state.configure({ persist_dir = state_tmp })
+  assert_kb_state_sandboxed()
+  kb._reset_for_tests()
+
+  local function ops(v, body)
+    return table.concat({ "---", "type: kb", "kind: operations", "autodoc_version: " .. v, "revision: 2", "---", "",
+      body or ("# KB operations " .. v), "" }, "\n")
+  end
+  local function schema_yaml(v) return "# autodoc_version: " .. v .. "\n# schema\nversion: 2\n" end
+  local function files(v) return {
+    { rel = "KB_OPERATIONS.md", version = v, text = ops(v) },
+    { rel = "_schema/frontmatter.yaml", version = v, text = schema_yaml(v) },
+  } end
+  local provided = {}
+  local h = events.subscribe("core.kb:managed_provided", function(p) provided[#provided + 1] = p end)
+
+  -- provide: stored, readable back, announced
+  local okp, errp, rep = kb.provide_managed("autodoc", { version_key = "autodoc_version", files = files("0.1.18") })
+  ok("[94] provide_managed stores a provider's documents", okp and errp == nil and #rep.stored == 2, vim.inspect({ errp, rep }))
+  local m = kb.managed()
+  ok("[94] managed() returns them by path, with version and text",
+    m["KB_OPERATIONS.md"] and m["KB_OPERATIONS.md"].version == "0.1.18" and m["KB_OPERATIONS.md"].text == ops("0.1.18")
+      and m["_schema/frontmatter.yaml"].version == "0.1.18")
+  ok("[94] and publishes core.kb:managed_provided", #provided == 1 and provided[1].files["KB_OPERATIONS.md"] == "0.1.18",
+    vim.inspect(provided))
+  local ns = state.namespace("kb", { persist = "json" })
+  vim.wait(200)
+  local disk = vim.fn.filereadable(ns._path) == 1 and table.concat(vim.fn.readfile(ns._path), "\n") or ""
+  ok("[94] the documents are persisted (a session where the provider never loads still has them)",
+    disk:find("KB_OPERATIONS.md", 1, true) ~= nil, ns._path)
+
+  -- an older provider never rolls them back; an equal version keeps the stored copy
+  local _, _, rep_old = kb.provide_managed("autodoc", { version_key = "autodoc_version", files = files("0.1.17") })
+  ok("[94] an older version is kept out (no rollback)", #rep_old.stored == 0 and kb.managed()["KB_OPERATIONS.md"].version == "0.1.18")
+  local same = { { rel = "KB_OPERATIONS.md", version = "0.1.18", text = ops("0.1.18", "# other text") } }
+  kb.provide_managed("autodoc", { version_key = "autodoc_version", files = same })
+  ok("[94] an equal version keeps the stored copy", kb.managed()["KB_OPERATIONS.md"].text == ops("0.1.18"))
+
+  -- refusals
+  local bad_decl = { { rel = "KB_OPERATIONS.md", version = "0.2.0", text = ops("0.1.18") } }
+  local okb, errb = kb.provide_managed("autodoc", { version_key = "autodoc_version", files = bad_decl })
+  ok("[94] a file whose declared version disagrees is refused", not okb and errb == "invalid_file")
+  local okr = kb.provide_managed("autodoc", { version_key = "autodoc_version",
+    files = { { rel = "../escape.md", version = "9.9.9", text = ops("9.9.9") } } })
+  local oka = kb.provide_managed("autodoc", { version_key = "autodoc_version",
+    files = { { rel = "/etc/escape.md", version = "9.9.9", text = ops("9.9.9") } } })
+  ok("[94] a path outside the KB is refused (.. and absolute)", not okr and not oka)
+  ok("[94] and nothing it refused was stored", kb.managed()["KB_OPERATIONS.md"].version == "0.1.18"
+    and kb.managed()["../escape.md"] == nil)
+
+  -- sync into a KB
+  local base = vim.fn.tempname()
+  local kbroot = base .. "/kb"
+  vim.fn.mkdir(kbroot .. "/_schema", "p")
+  vim.fn.writefile(vim.split(ops("0.1.15", "# old"), "\n"), kbroot .. "/KB_OPERATIONS.md")
+  vim.fn.writefile(vim.split(schema_yaml("0.1.15"), "\n"), kbroot .. "/_schema/frontmatter.yaml")
+  vim.fn.writefile({ "# this KB's own" }, kbroot .. "/AGENTS.md")
+  local synced = {}
+  local h2 = events.subscribe("core.kb:managed_synced", function(p) synced[#synced + 1] = p end)
+  local oks, errs, srep = kb.sync_managed(kbroot)
+  local now = table.concat(vim.fn.readfile(kbroot .. "/KB_OPERATIONS.md"), "\n")
+  ok("[94] sync_managed replaces an older copy with the stored text", oks and errs == nil and #srep.updated == 2
+    and now .. "\n" == ops("0.1.18"), vim.inspect({ errs, srep, now }))
+  ok("[94] it reads a YAML file's version from its leading comment",
+    vim.fn.readfile(kbroot .. "/_schema/frontmatter.yaml")[1] == "# autodoc_version: 0.1.18")
+  ok("[94] it never touches another file", vim.fn.readfile(kbroot .. "/AGENTS.md")[1] == "# this KB's own")
+  ok("[94] and publishes core.kb:managed_synced", #synced == 1 and synced[1].root == kbroot, vim.inspect(synced))
+  local _, _, again = kb.sync_managed(kbroot)
+  ok("[94] a same-version copy is kept", #again.updated == 0 and #again.kept == 2)
+  vim.fn.writefile(vim.split(ops("0.9.0", "# newer"), "\n"), kbroot .. "/KB_OPERATIONS.md")
+  vim.fn.writefile({ "# hand written, no version" }, kbroot .. "/_schema/frontmatter.yaml")
+  local _, _, keep = kb.sync_managed(kbroot)
+  ok("[94] a newer or an unversioned copy is kept", #keep.updated == 0
+    and vim.fn.readfile(kbroot .. "/_schema/frontmatter.yaml")[1] == "# hand written, no version", vim.inspect(keep))
+
+  local bare = base .. "/not-a-kb"
+  vim.fn.mkdir(bare, "p")
+  local _, _, none = kb.sync_managed(bare)
+  ok("[94] a missing file is never created", #none.updated == 0 and #none.missing == 2
+    and vim.fn.filereadable(bare .. "/KB_OPERATIONS.md") == 0)
+  local okn, errn = kb.sync_managed(base .. "/nope")
+  ok("[94] a root that is not a directory is refused", not okn and errn == "root_not_a_directory")
+
+  events.unsubscribe(h)
+  events.unsubscribe(h2)
+  kb._reset_for_tests()
+  ok("[94] reset clears the provided documents", next(kb.managed()) == nil)
+  vim.fn.delete(base, "rf")
+  vim.fn.delete(state_tmp, "rf")
+end)()
+
 -- Convention §3: emit the `<P> passed, <F> failed` summary and exit
 -- EXPLICITLY — os.exit(1) on any failure, os.exit(0) otherwise. Do not
 -- rely on falling off the end for the success exit: an explicit 0 keeps
