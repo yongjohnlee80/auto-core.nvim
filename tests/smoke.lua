@@ -11942,21 +11942,30 @@ print("\n[83] ADR-0058 — auto-core.rpc (async msgpack-RPC client)")
 
   -- ── EOF from the peer settles the epoch ────────────────────────
   -- serverstop() only stops LISTENING; an established connection
-  -- survives it, so the peer has to actually go away. This helper
-  -- accepts once, holds briefly, then closes and EXITS on its own — a
-  -- peer that outlives the test would hang the suite.
-  local probe = vim.fn.serverstart("127.0.0.1:0")
-  local port = tostring(probe):match(":(%d+)$")
-  vim.fn.serverstop(probe)
+  -- survives it, so the peer has to actually go away. The peer is a
+  -- libuv TCP listener in this same Neovim: it accepts once, holds
+  -- briefly, then closes the accepted socket and itself. No external
+  -- interpreter: a `python3` helper made the cell depend on whatever the
+  -- PATH resolves (a version-manager shim that refuses to run, say) and
+  -- fail as "connection refused" with the real cause hidden.
+  local listener = assert(vim.uv.new_tcp())
+  assert(listener:bind("127.0.0.1", 0))
+  local port = listener:getsockname().port
   local peer_addr = "127.0.0.1:" .. tostring(port)
-  local peer_job = vim.fn.jobstart({ "python3", "-c", table.concat({
-    "import socket,time",
-    "s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)",
-    "s.bind(('127.0.0.1'," .. tostring(port) .. ")); s.listen(1)",
-    "c,_=s.accept()",
-    "time.sleep(0.5)",
-    "c.close(); s.close()",
-  }, "\n") })
+  local accepted, hold = nil, nil
+  local function close_peer()
+    if hold and not hold:is_closing() then hold:close() end
+    if accepted and not accepted:is_closing() then accepted:close() end
+    if not listener:is_closing() then listener:close() end
+  end
+  assert(listener:listen(1, function(err)
+    if err or accepted then return end
+    accepted = vim.uv.new_tcp()
+    listener:accept(accepted)
+    accepted:read_start(function() end)
+    hold = vim.uv.new_timer()
+    hold:start(500, 0, close_peer)
+  end))
 
   local c3, eof_reason = nil, nil
   local connected = vim.wait(4000, function()
@@ -11970,7 +11979,7 @@ print("\n[83] ADR-0058 — auto-core.rpc (async msgpack-RPC client)")
     ok("p83: losing the peer reports eof", eof_reason == "eof", tostring(eof_reason))
     ok("p83: the connection closes itself on epoch loss", c3:is_closed() == true)
   end
-  pcall(vim.fn.jobstop, peer_job)
+  close_peer()
 
   conn:close()
   pcall(vim.fn.serverstop, addr)
