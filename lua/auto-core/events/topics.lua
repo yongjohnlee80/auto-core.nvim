@@ -55,6 +55,17 @@ local M = {
       .. "old = { workspace = string?, root = string }?, source = 'set'|'import' }",
     publishers = { "auto-core" },
   },
+  ["core.kb:managed_provided"] = {
+    doc = "A provider (AutoDoc) handed auto-core newer managed KB documents (kb.provide_managed). "
+      .. "`files` maps each stored KB-relative path to its version.",
+    payload = "{ provider = string, files = table<string, string> }",
+    publishers = { "auto-core" },
+  },
+  ["core.kb:managed_synced"] = {
+    doc = "kb.sync_managed replaced a KB's older managed documents with the stored copies.",
+    payload = "{ root = string, updated = string[] }",
+    publishers = { "auto-core" },
+  },
 
   -- ── panel lifecycle ───────────────────────────────────────────
   ["panel:opened"] = {

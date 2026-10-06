@@ -12,6 +12,9 @@
 ---  M.primary(project_root?)                       → { workspace, root } | nil
 ---  M.root(project_root?)                          → root | nil
 ---  M.set_primary(project_root, spec, { confirmed = true }) → ok, err
+---  M.provide_managed(provider, { version_key, files })    → ok, err, report
+---  M.managed()                                            → { [rel] = record }
+---  M.sync_managed(root?)                                  → ok, err, report
 ---
 ---Resolution order of `M.root`:
 ---  1. the project's primary (this module's state);
@@ -51,6 +54,18 @@
 ---split — the same reason `auto-core.trust` stores its capabilities
 ---whole.
 ---
+---**Managed KB documents.** Some files in a KB belong to the tool that
+---ships them, not to the KB: AutoDoc's `KB_OPERATIONS.md` and
+---`_schema/frontmatter.yaml` (ADR 1791209946 §3.1). Their provider hands
+---auto-core the current text on every load (`provide_managed`), and
+---auto-core keeps the newest copy of each, persisted, so the copy is at
+---hand even in a session where the provider never loads. `sync_managed`
+---is the ONE writer that brings a KB's existing copies up to it: a file
+---is replaced only when it exists and declares an older version (under
+---the provider's `version_key`), and nothing is ever created. auto-agents
+---calls it for the primary KB before each spawn, so an agent always
+---starts on the operations document of the installed AutoDoc.
+---
 ---Per [[auto-core-maintenance]] #6 this module never notifies; it
 ---returns `(ok, err)` pairs and consumers own the UX (the confirmation
 ---modal in front of `set_primary` is theirs).
@@ -67,6 +82,13 @@ local STATE_NS = "kb"
 local LOG_COMPONENT = "auto-core.kb"
 
 local TOPIC_CHANGED = "core.kb:primary_changed"
+local TOPIC_MANAGED_PROVIDED = "core.kb:managed_provided"
+local TOPIC_MANAGED_SYNCED = "core.kb:managed_synced"
+
+-- The `kb` namespace key holding the provided managed documents, as one
+-- whole table keyed by KB-relative path (paths contain dots and slashes,
+-- which the state store's nested-key syntax would split).
+local MANAGED_KEY = "managed"
 
 -- True while `_import` is calling out to auto-agents. A nested `M.root`
 -- (auto-agents' shim calling back in) must not start a second import.
@@ -248,11 +270,188 @@ function M.set_primary(project_root, spec, opts)
   return true, nil
 end
 
----Test-only: wipe every recorded primary and the re-entrancy flag. Not
----part of the public API stability contract.
+-- ─── managed KB documents ──────────────────────────────────────────
+
+---@param v any
+---@return integer[]|nil
+local function _semver(v)
+  if type(v) ~= "string" then return nil end
+  local a, b, c = v:match("^v?(%d+)%.(%d+)%.(%d+)")
+  if not a then return nil end
+  return { tonumber(a), tonumber(b), tonumber(c) }
+end
+
+----1, 0 or 1; nil when either side is not a version.
+local function _semver_cmp(a, b)
+  local x, y = _semver(a), _semver(b)
+  if not x or not y then return nil end
+  for i = 1, 3 do
+    if x[i] < y[i] then return -1 end
+    if x[i] > y[i] then return 1 end
+  end
+  return 0
+end
+
+---The version a managed file declares under `key`: a YAML frontmatter or
+---top-level line `key: X` (optionally quoted), or a leading comment line
+---`# key: X` (how a YAML file that has no frontmatter carries it).
+---@param text string|nil
+---@param key string
+---@return string|nil
+local function _declared_version(text, key)
+  if type(text) ~= "string" then return nil end
+  local k = key:gsub("%p", "%%%0")
+  local t = "\n" .. text
+  return t:match("\n" .. k .. ":%s*\"?([^\"\n]-)\"?%s*\n")
+    or t:match("\n#%s*" .. k .. ":%s*([^\n]-)%s*\n")
+end
+
+---A KB-relative path that stays inside the KB: no absolute path, no `..`.
+local function _safe_rel(rel)
+  if type(rel) ~= "string" or rel == "" or rel:sub(1, 1) == "/" or rel:find("\\", 1, true) then
+    return false
+  end
+  for seg in rel:gmatch("[^/]+") do
+    if seg == ".." or seg == "." then return false end
+  end
+  return true
+end
+
+local function _managed_all()
+  local all = _ns():get(MANAGED_KEY)
+  return type(all) == "table" and all or {}
+end
+
+local function _emit(topic, payload)
+  local ok, events = pcall(require, "auto-core.events")
+  if ok and events and type(events.publish) == "function" then
+    pcall(events.publish, topic, payload)
+  end
+end
+
+---Record a provider's current managed KB documents. Each file is kept
+---only when it is newer than the stored copy of the same path (a semver
+---compare; an equal version keeps the stored copy), so an older build
+---loaded alongside a newer one never rolls the documents back.
+---
+---`spec.files[i]` is `{ rel, version, text }`: `rel` is KB-relative,
+---`version` a semver, and `text` must itself declare `version` under
+---`spec.version_key` — the same field `sync_managed` reads back from a
+---KB's copy, so a file whose declaration disagrees is refused rather
+---than stored to be rewritten forever.
+---
+---Reasons on the false path: `"invalid_provider"`, `"invalid_version_key"`,
+---`"invalid_files"`, `"invalid_file"` (with the offending path in the
+---report's `invalid`). Publishes `core.kb:managed_provided` when
+---anything was stored.
+---@param provider string
+---@param spec { version_key: string, files: { rel: string, version: string, text: string }[] }
+---@return boolean ok, string? err, { stored: string[], kept: string[], invalid: string[] }
+function M.provide_managed(provider, spec)
+  local report = { stored = {}, kept = {}, invalid = {} }
+  if type(provider) ~= "string" or provider == "" then return false, "invalid_provider", report end
+  if type(spec) ~= "table" or type(spec.version_key) ~= "string" or not spec.version_key:match("^[%w_%-]+$") then
+    return false, "invalid_version_key", report
+  end
+  if type(spec.files) ~= "table" or #spec.files == 0 then return false, "invalid_files", report end
+  for _, f in ipairs(spec.files) do
+    if type(f) ~= "table" or not _safe_rel(f.rel) or not _semver(f.version) or type(f.text) ~= "string"
+        or _declared_version(f.text, spec.version_key) ~= f.version then
+      report.invalid[#report.invalid + 1] = type(f) == "table" and tostring(f.rel) or "?"
+    end
+  end
+  if #report.invalid > 0 then return false, "invalid_file", report end
+
+  local all = vim.deepcopy(_managed_all())
+  for _, f in ipairs(spec.files) do
+    local cur = all[f.rel]
+    if type(cur) ~= "table" or _semver_cmp(cur.version, f.version) == -1 then
+      all[f.rel] = { provider = provider, version_key = spec.version_key, version = f.version,
+        text = f.text, provided_at = _now_iso() }
+      report.stored[#report.stored + 1] = f.rel
+    else
+      report.kept[#report.kept + 1] = f.rel
+    end
+  end
+  if #report.stored > 0 then
+    _ns():set(MANAGED_KEY, all)
+    local versions = {}
+    for _, rel in ipairs(report.stored) do versions[rel] = all[rel].version end
+    _log_info(string.format("%s provided %s", provider, table.concat(report.stored, ", ")))
+    _emit(TOPIC_MANAGED_PROVIDED, { provider = provider, files = versions })
+  end
+  return true, nil, report
+end
+
+---The stored managed documents, by KB-relative path: `{ provider,
+---version_key, version, text, provided_at }`. A copy; editing it changes
+---nothing.
+---@return table<string, table>
+function M.managed()
+  return vim.deepcopy(_managed_all())
+end
+
+---Bring a KB's managed documents up to the stored copies. For each stored
+---path, the KB's file is replaced (atomically) only when it EXISTS and
+---declares an older version; a missing file stays missing (that KB chose
+---not to have it, or is not a KB), and a same, newer or unreadable
+---declaration is kept. Nothing else in the KB is read or written.
+---
+---Reasons on the false path: `"no_kb_root"` (no root given and the
+---project resolves none), `"root_not_a_directory"`. Publishes
+---`core.kb:managed_synced` when a file was replaced.
+---@param root string?  default: `M.root()`, the session project's KB
+---@return boolean ok, string? err, { root: string?, updated: string[], kept: string[], missing: string[], failed: string[], reasons: table<string,string> }
+function M.sync_managed(root)
+  local report = { root = nil, updated = {}, kept = {}, missing = {}, failed = {}, reasons = {} }
+  if type(root) ~= "string" or root == "" then root = M.root() end
+  if type(root) ~= "string" or root == "" then return false, "no_kb_root", report end
+  root = fs_path.normalize(vim.fn.expand(root))
+  if not fs_path.is_dir(root) then return false, "root_not_a_directory", report end
+  report.root = root
+
+  local all = _managed_all()
+  local rels = vim.tbl_keys(all)
+  table.sort(rels)
+  for _, rel in ipairs(rels) do
+    local rec = all[rel]
+    local path = root .. "/" .. rel
+    if not _safe_rel(rel) or type(rec) ~= "table" or type(rec.text) ~= "string" then
+      report.failed[#report.failed + 1] = rel
+      report.reasons[rel] = "invalid stored record"
+    elseif vim.fn.filereadable(path) ~= 1 then
+      report.missing[#report.missing + 1] = rel
+    else
+      local have = _declared_version(table.concat(vim.fn.readfile(path, "b"), "\n") .. "\n", rec.version_key)
+      local cmp = _semver_cmp(have, rec.version)
+      if cmp == -1 then
+        local ok, err = require("auto-core.fs.atomic").write(path, rec.text)
+        if ok then
+          report.updated[#report.updated + 1] = rel
+          report.reasons[rel] = string.format("%s -> %s", have, rec.version)
+        else
+          report.failed[#report.failed + 1] = rel
+          report.reasons[rel] = tostring(err)
+        end
+      else
+        report.kept[#report.kept + 1] = rel
+        report.reasons[rel] = cmp == nil and "no readable version: kept" or "same or newer version"
+      end
+    end
+  end
+  if #report.updated > 0 then
+    _log_info(string.format("synced %s in %s", table.concat(report.updated, ", "), root))
+    _emit(TOPIC_MANAGED_SYNCED, { root = root, updated = vim.deepcopy(report.updated) })
+  end
+  return true, nil, report
+end
+
+---Test-only: wipe every recorded primary, the provided managed documents
+---and the re-entrancy flag. Not part of the public API stability contract.
 function M._reset_for_tests()
   _importing = false
   _ns():set("primaries", nil)
+  _ns():set(MANAGED_KEY, nil)
 end
 
 return M
