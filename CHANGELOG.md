@@ -32,8 +32,10 @@ Patch. All additive to `auto-core.kb`:
   - a folder that resolves outside the KB (a symlinked `_schema/`) is never
     read or written through, and a managed file that is itself a symlink is
     kept;
-  - versions are strict semver: junk after the version is refused, and a
-    prerelease is older than its release.
+  - versions are strict SemVer: junk, leading zeros and empty identifiers are
+    refused, and a prerelease is older than its release;
+  - a KB copy that declares a malformed version is replaced, and one that
+    declares none is kept.
   auto-agents calls it for the primary KB before each spawn, so an agent always
   starts on the installed AutoDoc's operations document.
 - **New topics:** `core.kb:managed_provided` and `core.kb:managed_synced`.
