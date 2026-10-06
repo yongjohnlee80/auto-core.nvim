@@ -272,22 +272,52 @@ end
 
 -- ─── managed KB documents ──────────────────────────────────────────
 
+---A semantic version (semver.org §2, §9, §10): `MAJOR.MINOR.PATCH`, an optional `-prerelease` of
+---dot-separated identifiers, an optional `+build` (ignored for precedence). Anything else is not a
+---version: `1.2.3junk` is nil, never 1.2.3.
 ---@param v any
----@return integer[]|nil
+---@return { core: integer[], pre: string[]|nil }|nil
 local function _semver(v)
   if type(v) ~= "string" then return nil end
-  local a, b, c = v:match("^v?(%d+)%.(%d+)%.(%d+)")
+  local a, b, c, rest = v:match("^v?(%d+)%.(%d+)%.(%d+)(.*)$")
   if not a then return nil end
-  return { tonumber(a), tonumber(b), tonumber(c) }
+  rest = rest:gsub("%+[%w%.%-]+$", "")
+  local pre = nil
+  if rest ~= "" then
+    local p = rest:match("^%-([%w%.%-]+)$")
+    if not p then return nil end
+    pre = {}
+    for id in (p .. "."):gmatch("([^.]*)%.") do
+      if id == "" then return nil end
+      pre[#pre + 1] = id
+    end
+  end
+  return { core = { tonumber(a), tonumber(b), tonumber(c) }, pre = pre }
 end
 
-----1, 0 or 1; nil when either side is not a version.
+---Semver precedence: -1, 0 or 1; nil when either side is not a version. A prerelease is older than
+---its release (1.2.3-rc.1 < 1.2.3); prerelease identifiers compare numerically when both are numeric,
+---numeric below alphanumeric, else as strings; a shorter set of equal identifiers is older.
 local function _semver_cmp(a, b)
   local x, y = _semver(a), _semver(b)
   if not x or not y then return nil end
   for i = 1, 3 do
-    if x[i] < y[i] then return -1 end
-    if x[i] > y[i] then return 1 end
+    if x.core[i] < y.core[i] then return -1 end
+    if x.core[i] > y.core[i] then return 1 end
+  end
+  if not x.pre and not y.pre then return 0 end
+  if not x.pre then return 1 end
+  if not y.pre then return -1 end
+  for i = 1, math.max(#x.pre, #y.pre) do
+    local p, q = x.pre[i], y.pre[i]
+    if p == nil then return -1 end
+    if q == nil then return 1 end
+    local pn, qn = p:match("^%d+$") and tonumber(p), q:match("^%d+$") and tonumber(q)
+    if pn and qn then
+      if pn ~= qn then return pn < qn and -1 or 1 end
+    elseif pn then return -1
+    elseif qn then return 1
+    elseif p ~= q then return p < q and -1 or 1 end
   end
   return 0
 end
@@ -315,6 +345,18 @@ local function _safe_rel(rel)
     if seg == ".." or seg == "." then return false end
   end
   return true
+end
+
+---The real path of `path`'s parent directory, when it lies inside `real_root` (or is it); nil when a
+---symlink in between leads outside the KB, or the parent does not exist.
+---@param path string
+---@param real_root string
+---@return string|nil
+local function _parent_inside(path, real_root)
+  local parent = vim.uv.fs_realpath(vim.fs.dirname(path))
+  if type(parent) ~= "string" then return nil end
+  if parent == real_root or vim.startswith(parent, real_root .. "/") then return parent end
+  return nil
 end
 
 local function _managed_all()
@@ -409,6 +451,7 @@ function M.sync_managed(root)
   root = fs_path.normalize(vim.fn.expand(root))
   if not fs_path.is_dir(root) then return false, "root_not_a_directory", report end
   report.root = root
+  local real_root = vim.uv.fs_realpath(root) or root
 
   local all = _managed_all()
   local rels = vim.tbl_keys(all)
@@ -421,6 +464,14 @@ function M.sync_managed(root)
       report.reasons[rel] = "invalid stored record"
     elseif vim.fn.filereadable(path) ~= 1 then
       report.missing[#report.missing + 1] = rel
+    elseif not _parent_inside(path, real_root) then
+      -- a symlinked folder leading out of the KB: never read or written through
+      report.failed[#report.failed + 1] = rel
+      report.reasons[rel] = "its folder resolves outside the KB: skipped"
+    elseif (vim.uv.fs_lstat(path) or {}).type == "link" then
+      -- replacing a symlink would turn it into a file; the KB's own choice is kept
+      report.kept[#report.kept + 1] = rel
+      report.reasons[rel] = "a symlink: kept"
     else
       local have = _declared_version(table.concat(vim.fn.readfile(path, "b"), "\n") .. "\n", rec.version_key)
       local cmp = _semver_cmp(have, rec.version)
