@@ -28,7 +28,12 @@ Patch. All additive to `auto-core.kb`:
   stored ones:
   - a file is replaced, atomically, only when it exists and declares an older
     version;
-  - nothing is ever created, and nothing else in the KB is touched.
+  - nothing is ever created, and nothing else in the KB is touched;
+  - a folder that resolves outside the KB (a symlinked `_schema/`) is never
+    read or written through, and a managed file that is itself a symlink is
+    kept;
+  - versions are strict semver: junk after the version is refused, and a
+    prerelease is older than its release.
   auto-agents calls it for the primary KB before each spawn, so an agent always
   starts on the installed AutoDoc's operations document.
 - **New topics:** `core.kb:managed_provided` and `core.kb:managed_synced`.

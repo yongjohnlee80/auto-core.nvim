@@ -325,6 +325,12 @@ kb.sync_managed(root?)       -- ok, err, { root, updated, kept, missing, failed,
 - **Synced only forward.** `sync_managed` replaces a KB's file atomically, and
   only when it exists and declares an older version. It never creates a file,
   and never touches anything else in the KB. `root` defaults to `kb.root()`.
+  - It never reads or writes through a folder that resolves outside the KB (a
+    symlinked `_schema/`, say).
+  - A managed file that is itself a symlink is kept as it is.
+- **Versions are strict semver.** `1.2.3junk` is not a version, and a
+  prerelease is older than its release, so `0.2.0` replaces `0.2.0-rc.1` and
+  never the reverse.
 - **Agents start current.** auto-agents runs `sync_managed` on the primary KB
   before each spawn, so an agent always starts on the installed AutoDoc's
   operations document. The topics are `core.kb:managed_provided` and
