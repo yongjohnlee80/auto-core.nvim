@@ -272,26 +272,47 @@ end
 
 -- ─── managed KB documents ──────────────────────────────────────────
 
----A semantic version (semver.org §2, §9, §10): `MAJOR.MINOR.PATCH`, an optional `-prerelease` of
----dot-separated identifiers, an optional `+build` (ignored for precedence). Anything else is not a
----version: `1.2.3junk` is nil, never 1.2.3.
+---A numeric identifier per semver.org §2: `0`, or digits without a leading zero.
+local function _numeric_ok(id)
+  return id == "0" or id:match("^[1-9]%d*$") ~= nil
+end
+
+---Dot-separated identifiers (semver.org §9, §10): each non-empty and `[0-9A-Za-z-]`; with
+---`numeric_rule`, an all-digit identifier must not have a leading zero (prerelease, not build).
+---@return string[]|nil
+local function _identifiers(str, numeric_rule)
+  local out = {}
+  for id in (str .. "."):gmatch("([^.]*)%.") do
+    if id == "" or not id:match("^[%w%-]+$") then return nil end
+    if numeric_rule and id:match("^%d+$") and not _numeric_ok(id) then return nil end
+    out[#out + 1] = id
+  end
+  return out
+end
+
+---A semantic version (semver.org): `MAJOR.MINOR.PATCH` with no leading zeros, an optional
+---`-prerelease` and an optional `+build` (validated, ignored for precedence). A leading `v` is
+---accepted (tags carry it). Anything else is not a version: `1.2.3junk`, `01.2.3`, `1.2.3-rc.01` and
+---`1.2.3+foo..bar` are all nil.
 ---@param v any
 ---@return { core: integer[], pre: string[]|nil }|nil
 local function _semver(v)
   if type(v) ~= "string" then return nil end
-  local a, b, c, rest = v:match("^v?(%d+)%.(%d+)%.(%d+)(.*)$")
-  if not a then return nil end
-  rest = rest:gsub("%+[%w%.%-]+$", "")
-  local pre = nil
-  if rest ~= "" then
-    local p = rest:match("^%-([%w%.%-]+)$")
-    if not p then return nil end
-    pre = {}
-    for id in (p .. "."):gmatch("([^.]*)%.") do
-      if id == "" then return nil end
-      pre[#pre + 1] = id
-    end
+  local a, b, c, rest = v:gsub("^v", "", 1):match("^(%d+)%.(%d+)%.(%d+)(.*)$")
+  if not a or not (_numeric_ok(a) and _numeric_ok(b) and _numeric_ok(c)) then return nil end
+  local pre_s, build_s = rest:match("^%-([^+]*)%+(.*)$")
+  if not pre_s then
+    local lead = rest:sub(1, 1)
+    if lead == "-" then pre_s = rest:sub(2)
+    elseif lead == "+" then build_s = rest:sub(2)
+    elseif rest ~= "" then return nil end
   end
+  local pre = nil
+  if pre_s then
+    pre = _identifiers(pre_s, true)
+    if not pre then return nil end
+  end
+  if build_s and not _identifiers(build_s, false) then return nil end
   return { core = { tonumber(a), tonumber(b), tonumber(c) }, pre = pre }
 end
 
@@ -475,11 +496,14 @@ function M.sync_managed(root)
     else
       local have = _declared_version(table.concat(vim.fn.readfile(path, "b"), "\n") .. "\n", rec.version_key)
       local cmp = _semver_cmp(have, rec.version)
-      if cmp == -1 then
+      -- a declared but malformed version is a damaged stamp on a managed file: replaced. No
+      -- declaration at all is a hand-written copy: kept.
+      local malformed = have ~= nil and _semver(have) == nil
+      if cmp == -1 or malformed then
         local ok, err = require("auto-core.fs.atomic").write(path, rec.text)
         if ok then
           report.updated[#report.updated + 1] = rel
-          report.reasons[rel] = string.format("%s -> %s", have, rec.version)
+          report.reasons[rel] = string.format("%s%s -> %s", have, malformed and " (malformed)" or "", rec.version)
         else
           report.failed[#report.failed + 1] = rel
           report.reasons[rel] = tostring(err)
