@@ -10,6 +10,53 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.3.1] — 2026-10-06 — managed KB documents: provided per version, synced into the KB
+
+Patch. All additive to `auto-core.kb`:
+
+- **`provide_managed(provider, { version_key, files })`** records a provider's
+  managed KB documents: `KB_OPERATIONS.md` and `_schema/frontmatter.yaml` for
+  AutoDoc. auto-core keeps the newest copy of each path, persisted in the `kb`
+  state namespace, so the documents are at hand even in a session where the
+  provider never loads.
+  - An older version never replaces a stored copy, so loading an older build
+    can't roll the documents back.
+  - A file whose own declared version disagrees with the version it was
+    provided as is refused, as is a path outside the KB.
+- **`managed()`** returns the stored documents.
+- **`sync_managed(root?)`** is the one writer that brings a KB's copies up to the
+  stored ones:
+  - a file is replaced, atomically, only when it exists and declares an older
+    version;
+  - nothing is ever created, and nothing else in the KB is touched.
+  auto-agents calls it for the primary KB before each spawn, so an agent always
+  starts on the installed AutoDoc's operations document.
+- **New topics:** `core.kb:managed_provided` and `core.kb:managed_synced`.
+- **Tests:**
+  - smoke section [94] covers the new API.
+  - p83's vanishing peer is now an in-process libuv listener instead of a
+    `python3` helper. The helper failed wherever `python3` was a shim that
+    refused to run, and showed only "connection refused".
+- **README:** the consumer list drops the archived md-harpoon.nvim and a
+  duplicate worktree.nvim line, and adds AutoDoc.
+
+## [v0.3.0] — 2026-10-06 — auto-core.kb: the primary KB and the one KB resolver
+
+Minor, by Johno's ruling, though every change is additive (ADR 1791209945 §5).
+
+- **`auto-core.kb`:** the project's primary KB (`primary`, `set_primary`, which
+  needs the user's confirmation) and the one KB-root resolver (`root`).
+  - Resolution order: the primary, then `$AUTO_AGENTS_KB_ROOT`, then a one-time
+    import of auto-agents' legacy answer.
+  - `todo/vars.lua`'s `$KB_ROOT` and `todo/init.lua` now delegate to it.
+  - The record is keyed by the project's real path, and another project's root
+    is never the session's KB.
+- **`doc:pinned` / `doc:unpinned`** list autodoc.nvim as a publisher, now that
+  AutoDoc's preview has absorbed md-harpoon.
+- **The review draft's Markdown** carries the KB's v2 review frontmatter.
+- This entry and the `version` string were missing at the tag; v0.3.1 adds
+  them.
+
 ## [v0.2.32] — 2026-09-29 — one worktree picker; listings say which worktrees are gone
 
 Patch. Two additions to `git.worktree`, both additive:
