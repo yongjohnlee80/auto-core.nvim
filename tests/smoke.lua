@@ -14313,6 +14313,20 @@ print("\n[94] auto-core.kb — managed KB documents: provided per version, synce
   kb.provide_managed("autodoc", { version_key = "autodoc_version", files = one("0.2.1-alpha.10") })
   local _, _, pre = kb.provide_managed("autodoc", { version_key = "autodoc_version", files = one("0.2.1-alpha.9") })
   ok("[94] prerelease identifiers compare numerically (alpha.9 < alpha.10)", #pre.stored == 0)
+  for _, bad in ipairs({ "01.2.3", "1.02.3", "1.2.3-rc.01", "1.2.3+foo..bar", "1.2.3-", "1.2.3-rc..1", "1.2.3+" }) do
+    local okb = kb.provide_managed("autodoc", { version_key = "autodoc_version", files = one(bad) })
+    ok("[94] an invalid SemVer is not a version: " .. bad, not okb)
+  end
+  local _, _, good = kb.provide_managed("autodoc", { version_key = "autodoc_version", files = one("0.3.0-rc.0+build.7") })
+  ok("[94] a valid prerelease with build metadata is a version", #good.stored == 1)
+  kb.provide_managed("autodoc", { version_key = "autodoc_version", files = one("1.2.3") })
+  local mal = base .. "/malkb"
+  vim.fn.mkdir(mal, "p")
+  vim.fn.writefile(vim.split(ops("01.2.3"), "\n"), mal .. "/KB_OPERATIONS.md")
+  local _, _, mrep = kb.sync_managed(mal)
+  ok("[94] a KB copy declaring a malformed version (01.2.3) is replaced, not kept as equal to 1.2.3",
+    vim.tbl_contains(mrep.updated, "KB_OPERATIONS.md") and vim.fn.readfile(mal .. "/KB_OPERATIONS.md")[4] == "autodoc_version: 1.2.3",
+    vim.inspect(mrep))
 
   events.unsubscribe(h)
   events.unsubscribe(h2)
