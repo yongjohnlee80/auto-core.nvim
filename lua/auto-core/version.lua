@@ -959,6 +959,12 @@ return {
   -- `prunable` attributes; git.worktree.select is the one worktree list
   -- every picker shows, and choose_active adds a folder step (a project
   -- folder or a typed directory inside the worktree). Additive.
-  version     = "0.2.32",
+  -- v0.3.0: auto-core.kb, the project's primary KB and the one KB-root
+  -- resolver (ADR 1791209945 §5); doc:pinned/unpinned list autodoc.nvim as
+  -- a publisher. A minor by Johno's ruling, though additive. This string
+  -- was not bumped at the tag; v0.3.1 corrects it.
+  -- v0.3.1: auto-core.kb managed KB documents (provide_managed, managed,
+  -- sync_managed; topics core.kb:managed_provided/managed_synced). Additive.
+  version     = "0.3.1",
   api_version = "0.1",
 }

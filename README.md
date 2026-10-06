@@ -8,8 +8,7 @@ introspection, and an agent task-queue infrastructure.
 
 - [`auto-agents.nvim`](https://github.com/yongjohnlee80/auto-agents) — multi-agent orchestration
 - [`auto-finder.nvim`](https://github.com/yongjohnlee80/auto-finder.nvim) — multi-resource panel
-- [`md-harpoon.nvim`](https://github.com/yongjohnlee80/md-harpoon.nvim) — document pinning
-- [`worktree.nvim`](https://github.com/yongjohnlee80/worktree.nvim) — multi-repo workspace
+- [`autodoc`](https://github.com/yongjohnlee80/autodoc) — the knowledge base: its drawer, search and Markdown preview (it absorbed md-harpoon.nvim, now archived), the primary KB through `auto-core.kb`
 - [`worktree.nvim`](https://github.com/yongjohnlee80/worktree.nvim) — multi-repo workspace + absorbed graph dashboard (replaces gitsgraph.nvim)
 - [`remote-sync.nvim`](https://github.com/yongjohnlee80/remote-sync.nvim) — LAN-to-VPS deploy *(migration deferred to a later auto-core minor)*
 - [`gobugger.nvim`](https://github.com/yongjohnlee80/gobugger.nvim) — Go debugger *(migration deferred to a later auto-core minor)*
@@ -300,6 +299,36 @@ KB. It rejects a root that is not an existing directory. Each change publishes
 **The todo store is untouched.** `set_primary` changes only which KB a project
 uses. The todo directory, its overrides and the `todos.*` surface stay as they
 are.
+
+### Managed KB documents (v0.3.1)
+
+Some files in a KB belong to the tool that ships them, not to the KB. AutoDoc
+ships `KB_OPERATIONS.md` and `_schema/frontmatter.yaml`. The provider hands
+auto-core the current text on every load, and auto-core is the one writer that
+keeps each KB's copies up to date:
+
+```lua
+kb.provide_managed("autodoc", { version_key = "autodoc_version", files = {
+  { rel = "KB_OPERATIONS.md", version = "0.1.18", text = "..." },
+} })                         -- ok, err, { stored, kept, invalid }
+kb.managed()                 -- { [rel] = { provider, version_key, version, text, provided_at } }
+kb.sync_managed(root?)       -- ok, err, { root, updated, kept, missing, failed, reasons }
+```
+
+- **Stored per version.** The newest copy of each path is kept, persisted in
+  the `kb` state namespace, so it is available even in a session where the
+  provider never loads.
+  - An older version never replaces it.
+  - A file whose declared version (the `version_key` line in its frontmatter,
+    or a `# key:` comment in YAML) disagrees with the version it is provided as
+    is refused, as is a path outside the KB.
+- **Synced only forward.** `sync_managed` replaces a KB's file atomically, and
+  only when it exists and declares an older version. It never creates a file,
+  and never touches anything else in the KB. `root` defaults to `kb.root()`.
+- **Agents start current.** auto-agents runs `sync_managed` on the primary KB
+  before each spawn, so an agent always starts on the installed AutoDoc's
+  operations document. The topics are `core.kb:managed_provided` and
+  `core.kb:managed_synced`.
 
 ## Logging — the family contract (ADR 0021 / v0.1.11+)
 
