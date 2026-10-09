@@ -965,6 +965,8 @@ return {
   -- was not bumped at the tag; v0.3.1 corrects it.
   -- v0.3.1: auto-core.kb managed KB documents (provide_managed, managed,
   -- sync_managed; topics core.kb:managed_provided/managed_synced). Additive.
-  version     = "0.3.1",
+  -- v0.3.2: todo.scan_async, a cooperative active-first scan for UI
+  -- consumers (#58). Additive; todo.scan is unchanged.
+  version     = "0.3.2",
   api_version = "0.1",
 }
