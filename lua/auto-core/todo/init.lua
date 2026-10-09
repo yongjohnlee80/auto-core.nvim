@@ -481,15 +481,12 @@ end
 ---malformed entries are returned in the order encountered during
 ---the directory walk (bucket-prioritised + lexicographic by
 ---filename within each bucket).
----@return { tasks: table[], malformed: table[] }
-function M.scan()
-  local td  = M._todo_dir()
+---@return fun(file_path: string, bucket: string) load
+---@return { tasks: table[], malformed: table[] } result
+local function scan_reader()
   local tasks_out     = {}
   local malformed_out = {}
-
-  if not fs_path.is_dir(td) then
-    return { tasks = tasks_out, malformed = malformed_out }
-  end
+  local result = { tasks = tasks_out, malformed = malformed_out }
 
   ---@param file_path string
   ---@param bucket string
@@ -537,11 +534,75 @@ function M.scan()
     tasks_out[#tasks_out + 1] = task
   end
 
+  return load, result
+end
+
+---Synchronous read-only scan, retaining malformed entries alongside tasks.
+---@return { tasks: table[], malformed: table[] }
+function M.scan()
+  local td = M._todo_dir()
+  local load, result = scan_reader()
   -- Canonical walk via paths.walk (ADR-0038 Batch C); `load`'s
   -- (file_path, bucket) signature matches the walker callback.
   paths.walk(td, load)
 
-  return { tasks = tasks_out, malformed = malformed_out }
+  return result
+end
+
+---Cooperative scan for UI consumers. Nothing is read before returning.
+---Active buckets are delivered first (`done=false`), then archives
+---(`done=true`). File decoding yields every 8ms or 32 files so growing
+---archives do not monopolize the editor. Results accumulate in one table;
+---consumers retaining an intermediate snapshot should copy it.
+---The directory is captured at invocation; cancel on location changes.
+---@param callback fun(result: table?, done: boolean, err: string?)
+---@return fun() cancel
+function M.scan_async(callback)
+  local td = M._todo_dir()
+  local load, result = scan_reader()
+  local cancelled = false
+  local archived = false
+  local files, index = nil, 1
+
+  local tick
+  tick = function()
+    if cancelled then return end
+    local ok, err = pcall(function()
+      if not files then
+        files = {}
+        local function collect(file, bucket)
+          files[#files + 1] = { file, bucket }
+        end
+        if archived then
+          paths.walk(td, collect, "archived")
+        else
+          for _, bucket in ipairs(paths.FLAT_BUCKETS) do
+            paths.walk(td, collect, bucket)
+          end
+        end
+      end
+      local started, count = vim.uv.hrtime(), 0
+      while index <= #files do
+        local file = files[index]
+        load(file[1], file[2])
+        index, count = index + 1, count + 1
+        if count >= 32 or vim.uv.hrtime() - started >= 8000000 then break end
+      end
+    end)
+    if not ok then
+      cancelled = true
+      callback(nil, true, tostring(err))
+      return
+    end
+    if index > #files then
+      callback(result, archived)
+      if cancelled or archived then return end
+      archived, files, index = true, nil, 1
+    end
+    if not cancelled then vim.defer_fn(tick, 1) end
+  end
+  vim.defer_fn(tick, 1)
+  return function() cancelled = true end
 end
 
 -- ─── public: update ───────────────────────────────────────────

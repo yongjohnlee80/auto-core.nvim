@@ -7594,6 +7594,25 @@ print("\n[58b] todo.scan — partition tasks vs malformed files")
     #listed == 1 and listed[1].id == good_id,
     "got " .. tostring(#listed))
 
+  local stages = {}
+  todo.scan_async(function(snapshot, done, err)
+    stages[#stages + 1] = { snapshot = vim.deepcopy(snapshot), done = done, err = err }
+  end)
+  ok("scan_async returns before delivering results", #stages == 0)
+  ok("scan_async completes", vim.wait(3000, function()
+    return #stages == 2 and stages[2].done
+  end, 5))
+  ok("scan_async delivers active tasks and malformed entries before archives",
+    stages[1] and not stages[1].done and #stages[1].snapshot.tasks == 1
+      and #stages[1].snapshot.malformed == 2)
+  ok("scan_async final result matches scan including malformed archives",
+    stages[2] and stages[2].err == nil and vim.deep_equal(stages[2].snapshot, result))
+  local cancelled_called = false
+  local cancel = todo.scan_async(function() cancelled_called = true end)
+  cancel()
+  vim.wait(20, function() return false end, 5)
+  ok("scan_async cancellation suppresses pending callbacks", not cancelled_called)
+
   -- scan with empty/non-existent todo dir
   vim.fn.delete(td, "rf")
   local empty = todo.scan()
@@ -7601,6 +7620,14 @@ print("\n[58b] todo.scan — partition tasks vs malformed files")
     type(empty) == "table"
       and #empty.tasks == 0
       and #empty.malformed == 0)
+
+  local empty_async
+  todo.scan_async(function(snapshot, done)
+    if done then empty_async = snapshot end
+  end)
+  ok("scan_async missing dir completes with empty result", vim.wait(3000, function()
+    return empty_async ~= nil and vim.deep_equal(empty_async, empty)
+  end, 5))
 
   worktree.set_workspace_root(nil)
   cleanup()
