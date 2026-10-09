@@ -10,6 +10,28 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.3.2] — 2026-10-09 — cooperative todo scanning
+
+Patch. Additive to `auto-core.todo`:
+
+- **`scan_async(callback)`** is a cooperative, read-only scan for UI
+  consumers. It returns a `cancel` function and reads nothing before
+  returning.
+  - Active buckets are delivered first (`done=false`), then archives
+    (`done=true`).
+  - Decoding yields every 32 files or about 8ms, so a growing archive no
+    longer holds the editor for one uninterrupted decode.
+  - The task directory is captured at invocation; cancelling suppresses
+    every later callback.
+  - It uses the same decode, schema validation and canonical walk as
+    `scan()`, malformed files included.
+- `scan()` is unchanged: synchronous and read-only. `refresh()` keeps the
+  reconciliation and auto-archiving.
+- Design and limits: `docs/todo-scanning.md`. This is main-loop scheduling,
+  not worker-thread I/O, and not an index or cache.
+- auto-finder.nvim v0.5.8 uses it to mount the todos panel immediately and
+  show active tasks before archives.
+
 ## [v0.3.1] — 2026-10-06 — managed KB documents: provided per version, synced into the KB
 
 Patch. All additive to `auto-core.kb`:
