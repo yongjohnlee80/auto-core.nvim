@@ -10,10 +10,10 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
-## [Unreleased] — the todo cutover: auto-core.todo forwards to AutoDoc
+## [v0.4.0] — 2026-10-14 — the todo cutover: auto-core.todo forwards to AutoDoc
 
-Minor, released as v0.4.0 (ADR 1791532020 §3 step 3; D4 as amended 2026-10-13: the cutover is a
-minor, and v0.5.0 removes the shim). **Ship it only in the
+Minor (ADR 1791532020 §3 step 3; D4 as amended 2026-10-13: the cutover is a minor,
+and v0.5.0 removes the shim). Needs AutoDoc v0.1.41. **Ship it only in the
 cutover set** (auto-core, auto-finder, auto-agents and autovim's lock together),
 and stop every Neovim before updating.
 

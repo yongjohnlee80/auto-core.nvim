@@ -971,6 +971,11 @@ return {
   -- arrival_subject, arrival_msg_kind, arrival_command, arrival_ok/code/error,
   -- arrival_read_error) and response envelopes carry command, code and from
   -- (#2). Additive; ctx.mailbox is unchanged.
-  version     = "0.3.3",
+  -- v0.4.0: the todo cutover (ADR 1791532020): auto-core.todo forwards to
+  -- AutoDoc's todos.* verbs through a soft require of autodoc.nvim, Lua's own
+  -- write path is deleted, automation and import refuse, and one assignment
+  -- notifier runs per Neovim. A minor by Johno's ruling. The public functions
+  -- keep their names and synchronous shapes, so api_version stays 0.1.
+  version     = "0.4.0",
   api_version = "0.1",
 }
