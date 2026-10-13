@@ -976,6 +976,11 @@ return {
   -- write path is deleted, automation and import refuse, and one assignment
   -- notifier runs per Neovim. A minor by Johno's ruling. The public functions
   -- keep their names and synchronous shapes, so api_version stays 0.1.
-  version     = "0.4.0",
+  -- v0.4.1: the todo shim is removed (ADR 1791532020 step 5): require(
+  -- "auto-core.todo") is gone, with automation, cron, import and the Lua
+  -- format modules. where, daemon, buffers, notifier, vars and paths stay. A
+  -- removal in a patch, by Johno's ruling; the direct clients (auto-finder
+  -- v0.5.10, auto-agents v0.3.6) ship first.
+  version     = "0.4.1",
   api_version = "0.1",
 }
