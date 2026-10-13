@@ -26,7 +26,8 @@
 ---SHA-256 the daemon checks writes against), `path` (store-relative) and
 ---`file_path` (absolute). The first call for a store claims it
 ---(`auto-core.todo.where`). Assignment notices are the notifier's
----(`auto-core.todo.notifier`); `assign` still publishes `core.todo.assignee:changed`.
+---(`auto-core.todo.notifier`); `core.todo.assignee:changed` is no longer
+---published, so an older subscriber cannot deliver a second copy.
 ---@module 'auto-core.todo'
 
 local daemon  = require("auto-core.todo.daemon")
@@ -442,14 +443,7 @@ function M.assign(id, assignee, reason)
   if not ok then return nil, before end
   move_effects(before, after)
   publish("core.todo:changed", { kind = "assign", id = id })
-  if assignee ~= "" then
-    -- auto-agents' subscriber turns this into the recipient's mailbox message.
-    publish("core.todo.assignee:changed", {
-      id = id, title = after.title, file_path = after.file_path, from = before.assignee,
-      to = assignee, reason = reason, at = M._now_iso(), reassigned = before.assignee == assignee,
-    })
-    M._poke_notifier()
-  end
+  if assignee ~= "" then M._poke_notifier() end
   return after
 end
 
