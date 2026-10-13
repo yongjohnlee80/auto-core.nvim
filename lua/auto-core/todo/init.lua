@@ -25,8 +25,8 @@
 ---Tasks come back with the daemon's fields (the same YAML names) plus `rev` (the
 ---SHA-256 the daemon checks writes against), `path` (store-relative) and
 ---`file_path` (absolute). The first call for a store claims it
----(`auto-core.todo.where`). `assign` still publishes `core.todo.assignee:changed`
----for auto-agents' subscriber, which sends the recipient's message.
+---(`auto-core.todo.where`). Assignment notices are the notifier's
+---(`auto-core.todo.notifier`); `assign` still publishes `core.todo.assignee:changed`.
 ---@module 'auto-core.todo'
 
 local daemon  = require("auto-core.todo.daemon")
@@ -240,6 +240,9 @@ function M.add(spec, internal)
   end)
   if not ok then error("auto-core.todo.add: " .. tostring(t), 0) end
   publish("core.todo:changed", { kind = "add", id = t.id })
+  if type(t.assignee) == "string" and t.assignee ~= "" then
+    M._poke_notifier()
+  end
   return t.id
 end
 
@@ -411,7 +414,7 @@ end
 
 ---Assign a task (`nil`, `""` or `vim.NIL` clears it). Assigning an open task
 ---makes it in-progress in the same write (D1). Assigning again, even to the same
----assignee, is a new assignment and is announced again. A direct
+---assignee, is a new assignment: the notifier delivers it again. A direct
 ---`assignee:` edit in the file stays metadata-only and notifies nobody.
 ---@param id string
 ---@param assignee string?
@@ -445,6 +448,7 @@ function M.assign(id, assignee, reason)
       id = id, title = after.title, file_path = after.file_path, from = before.assignee,
       to = assignee, reason = reason, at = M._now_iso(), reassigned = before.assignee == assignee,
     })
+    M._poke_notifier()
   end
   return after
 end
@@ -683,6 +687,14 @@ end
 ---Import was dropped (ADR 1791532020 D3); the KB migration it served is done.
 function M.import()
   error("auto-core.todo.import: import was dropped (ADR 1791532020 D3)", 0)
+end
+
+-- ─── the notifier ────────────────────────────────────────────
+
+---_poke_notifier asks the assignment notifier to poll now (after an assignment
+---this Neovim made).
+function M._poke_notifier()
+  pcall(function() require("auto-core.todo.notifier").poll_soon() end)
 end
 
 -- ─── public: vars submodule (v0.1.40) ─────────────────────────

@@ -71,6 +71,13 @@ M.ui        = ui_mod
 
 local _cfg = { root = nil, autostart = false }
 
+---start_notifier starts the todo assignment notifier (auto-core.todo.notifier),
+---which turns AutoDoc's assignment changes into messages for this instance's
+---agents. It connects only after VimEnter, and not at all without AutoDoc.
+local function start_notifier()
+  pcall(function() require("auto-core.todo.notifier").start() end)
+end
+
 ---Configure the mailbox subsystem. Forwards relevant subsets to
 ---`path`, `router`, and the autostart hook. Accepts:
 ---   root              — host-side fallback root for nvim/user
@@ -111,6 +118,7 @@ function M.configure(opts)
   -- Honor autostart on every configure call (idempotent).
   if _cfg.autostart and not router_mod.is_running() then
     router_mod.start()
+    start_notifier()
   end
 end
 
@@ -239,11 +247,20 @@ function M.recover_stale_all(opts)
   return transport_mod.recover_stale_all(opts)
 end
 
----Start the central router (idempotent).
-function M.start() return router_mod.start() end
+---Start the central router (idempotent), and the todo assignment notifier
+---with it: the Neovim that runs the router hosts the agents (ADR 1791532020
+---§2.5).
+function M.start()
+  local r = router_mod.start()
+  start_notifier()
+  return r
+end
 
----Stop the central router.
-function M.stop() return router_mod.stop() end
+---Stop the central router (and the todo assignment notifier).
+function M.stop()
+  pcall(function() require("auto-core.todo.notifier").stop() end)
+  return router_mod.stop()
+end
 
 ---Refresh the router (open watchers for newly-registered roots,
 ---close watchers for emptied ones).
