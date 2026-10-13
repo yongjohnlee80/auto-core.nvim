@@ -132,7 +132,9 @@ local function claim(at, root, store_id, store)
   m[store_id].roots = m[store_id].roots or {}
   m[store_id].roots[legacy] = os.date("!%Y-%m-%dT%H:%M:%SZ")
   memo_set(m)
-  if fs_path.is_dir(store) and not fs_path.exists(store .. "/" .. M.MARKER) then
+  -- The daemon marks a directory that is a store at the claim, and one that is
+  -- not a store yet (no buckets) at its scaffold.
+  if fs_path.is_dir(store .. "/open") and not fs_path.exists(store .. "/" .. M.MARKER) then
     M.warn_once("marker:" .. store_id, "auto-core.todo: the store " .. store
       .. " is claimed but has no " .. M.MARKER .. " marker")
   end
