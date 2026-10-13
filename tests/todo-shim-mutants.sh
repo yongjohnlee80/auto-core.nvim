@@ -49,6 +49,7 @@ mutants=(
   "$W|shim|{root} even when a workspace owns the store|      at = ws.name|      at = nil"
   "$W|shim|a released store is claimed again|    if mine then|    if false then"
   "$W|shim|the explicit claim trusts the cached claim|  M.reset()\n  local c = locate(root)\n  claim(c.at, root, c.store_id, c.store, true)|  local c = M.ensure(root)\n  if c.claimed then return c end\n  claim(c.at, root, c.store_id, c.store, true)"
+  "$W|shim|an error without a code passes as success|  if err and (tolerate == nil or err.code ~= tolerate) then daemon.fail(err) end|  if err and err.code ~= tolerate then daemon.fail(err) end"
   "$W|shim|the explicit claim does not check the daemon's answer|  if not c.claimed then\n    daemon.fail(|  if false then\n    daemon.fail("
   "$I|shim|a todos.unclaimed answer keeps the stale cache|  if tostring(err):find(\"todos.unclaimed\", 1, true) then where.reset(root) end|  if false then where.reset(root) end"
   "$I|shim|refs cross as the caller wrote them|  absolute_refs(s)\n|  -- absolute_refs(s)\n"

@@ -110,8 +110,11 @@ end
 
 local function memo_set(m) state():set("cutover", m) end
 
+---check raises a daemon error, except one whose code is `tolerate`. An error
+---without a code (the transport's: AutoDoc missing, a client failure) is never
+---tolerated: `nil ~= nil` would have let it pass as success.
 local function check(err, tolerate)
-  if err and err.code ~= tolerate then daemon.fail(err) end
+  if err and (tolerate == nil or err.code ~= tolerate) then daemon.fail(err) end
 end
 
 ---claim claims the At's store with legacy_workspace = root, and records it.
