@@ -10,6 +10,26 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [v0.3.3] — 2026-10-13 — the wake names the arrival
+
+Patch. Additive to `auto-core.mailbox`:
+
+- **The wake ctx carries the arriving message's facts** (`router.dispatch_wake`):
+  `arrival_from` and `arrival_from_bare`, `arrival_subject`, `arrival_msg_kind`,
+  `arrival_command`, and for responses `arrival_ok`, `arrival_code` and
+  `arrival_error`. `arrival_read_error` is set when the file is already gone.
+  `ctx.mailbox` (the recipient) is unchanged, so older consumers behave as
+  before.
+- **Response envelopes** (`complete`, `fail`, stale recovery) carry `command`,
+  `code` and `from`. The bootstrap doc always promised `code` on failure.
+- **`outbox_undeliverable`** carries `subject`, and `path` on `decode_failed`.
+- **The router log's** `wake_dispatched` and `response_arrival` entries carry the
+  sender, subject, command and outcome.
+- **The bootstrap doc** tells agents to poll `responses/` rather than wait for a
+  nudge. Its revision changes, so agents re-ingest it once.
+- auto-agents uses these facts to name the real sender in its notices and to
+  stay silent when there is nothing to read (auto-agents #22).
+
 ## [v0.3.2] — 2026-10-09 — cooperative todo scanning
 
 Patch. Additive to `auto-core.todo`:
