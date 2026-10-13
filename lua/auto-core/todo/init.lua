@@ -1,12 +1,12 @@
 ---auto-core.todo — a forwarding shim to AutoDoc's todo system (ADR 1791532020).
 ---
 ---AutoDoc's daemon owns the todo format, its rules and every write. From
----auto-core v0.3.4 this module keeps its public functions and their synchronous
+---auto-core v0.4.0 this module keeps its public functions and their synchronous
 ---shape, so auto-agents' mailbox verbs and auto-finder keep working, but each
 ---call goes to the daemon's `todos.*` verbs (protocol 20) and waits for the
 ---answer, bounded (`auto-core.todo.daemon`). Lua's own write path is deleted, not
 ---bypassed: there is no Lua fallback, so without AutoDoc every call answers
----"AutoDoc required". The shim itself goes at v0.4.0 (ADR §3 step 5).
+---"AutoDoc required". The shim itself goes at v0.5.0 (ADR §3 step 5).
 ---
 ---  M.add(spec)               create a task; returns its id (raises on error)
 ---  M.get(id)                 one task, or (nil, err)

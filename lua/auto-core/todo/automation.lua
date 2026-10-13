@@ -1,6 +1,6 @@
 ---ADR-0035 Phase 2 — automation engine for `.todo-list/automated/`
----templates. **Removed by ADR 1791532020 (v0.3.4):** the engine never starts,
----`fire` refuses, and nothing here writes a task. What stays until v0.4.0 is the
+---templates. **Removed by ADR 1791532020 (v0.4.0):** the engine never starts,
+---`fire` refuses, and nothing here writes a task. What stays until v0.5.0 is the
 ---DSL validator, the trust shim and the hook registry. The description below is
 ---the engine as it was.
 ---
@@ -473,9 +473,9 @@ end
 -- ── removed: firing, the scheduler and the managed-field writer ──────
 --
 -- ADR 1791532020 removes automation: AutoDoc's daemon owns every todo write, and
--- nothing in auto-core may write a task. From v0.3.4 the engine never starts,
+-- nothing in auto-core may write a task. From v0.4.0 the engine never starts,
 -- `fire` refuses, and its direct file writer is gone. The validator, the trust
--- shim and the hook registry stay (they write no task) until v0.4.0 deletes this
+-- shim and the hook registry stay (they write no task) until v0.5.0 deletes this
 -- module with `cron.lua`.
 
 M.REMOVED = "automation was removed (ADR 1791532020)"
