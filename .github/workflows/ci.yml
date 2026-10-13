@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # a run by hand: the repo was recreated with Actions off, so a check needs no push
+  workflow_dispatch:
 
 # Least privilege: this job only reads the tree.
 permissions:
