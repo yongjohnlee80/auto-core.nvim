@@ -15,7 +15,9 @@
 ---
 ---A claim runs once per root (recorded in state `todo.cutover`, by store id). A
 ---store this Neovim claimed and later finds unclaimed was released on purpose (a
----rollback): it is never claimed again until `:AutoCoreTodoClaim`.
+---rollback): the implicit first-call claim never claims it again. Only the
+---explicit claim (`M.claim`, `:AutoCoreTodoClaim`) does, and it always asks the
+---daemon: the cached resolution may be stale (another client released the store).
 ---
 ---Every function here except `local_dir`, `cached` and `reset` runs inside
 ---`daemon.run`.
@@ -108,26 +110,20 @@ end
 
 local function memo_set(m) state():set("cutover", m) end
 
----forget_release clears the rollback guard for a store, so the next call claims
----it again (:AutoCoreTodoClaim).
----@param store_id string
-function M.forget_release(store_id)
-  local m = memo_get()
-  m[store_id] = nil
-  memo_set(m)
-  M.reset()
-end
-
 local function check(err, tolerate)
   if err and err.code ~= tolerate then daemon.fail(err) end
 end
 
 ---claim claims the At's store with legacy_workspace = root, and records it.
-local function claim(at, root, store_id, store)
+---`fresh` replaces the store's record with this root alone, so every other root
+---runs its legacy rewrite again (the roll-forward after a rollback, when the old
+---auto-core may have written legacy refs meanwhile).
+local function claim(at, root, store_id, store, fresh)
   local legacy = realpath(root)
   local _, err = daemon.rpc("todos.claim", { at, { legacy_workspace = legacy } })
   check(err)
   local m = memo_get()
+  if fresh then m[store_id] = nil end
   m[store_id] = m[store_id] or { roots = {} }
   m[store_id].roots = m[store_id].roots or {}
   m[store_id].roots[legacy] = os.date("!%Y-%m-%dT%H:%M:%SZ")
@@ -165,14 +161,10 @@ local function offer_vars(at, store_id)
   end
 end
 
----ensure resolves a root to its store, claiming it on the first call. Runs inside
----daemon.run; raises on a daemon error.
----@param root string
+---locate maps a root to its At, makes the daemon agree about the root, opens
+---the store and asks for its state: steps 1-4 of the rule, no claim.
 ---@return table ctx { root, at, store, store_id, claimed, released, writable }
-function M.ensure(root)
-  local c = _ctx[root]
-  if c then return c end
-
+local function locate(root)
   local S = realpath(M.local_dir(root))
   local at
   local list, lerr = daemon.rpc("workspace.list", {})
@@ -209,9 +201,21 @@ function M.ensure(root)
 
   local r, rerr = daemon.rpc("todos.resolve", { at })
   check(rerr)
-  c = { root = root, at = at, store = r.store, store_id = r.store_id,
-        writable = r.writable, claimed = r.claimed == true, released = false }
+  return { root = root, at = at, store = r.store, store_id = r.store_id,
+           writable = r.writable, claimed = r.claimed == true, released = false }
+end
 
+---ensure resolves a root to its store, claiming it on the first call (the
+---implicit claim, which never claims a store this Neovim saw released). Runs
+---inside daemon.run; raises on a daemon error.
+---@param root string
+---@return table ctx { root, at, store, store_id, claimed, released, writable }
+function M.ensure(root)
+  local c = _ctx[root]
+  if c then return c end
+
+  c = locate(root)
+  local at, r = c.at, { store = c.store, store_id = c.store_id }
   local mine = memo_get()[r.store_id]
   if not c.claimed then
     if mine then
@@ -231,6 +235,29 @@ function M.ensure(root)
   end
 
   offer_vars(at, r.store_id) -- best effort: its rpc errors are ignored, never raised
+  _ctx[root] = c
+  return c
+end
+
+---claim is the EXPLICIT claim (:AutoCoreTodoClaim): it always sends
+---todos.claim, whatever this Neovim cached or recorded, and answers what the
+---daemon says. It is the deliberate override of the rollback guard. The cache
+---for every root is dropped and this root's is rebuilt from the daemon's answer.
+---Runs inside daemon.run; raises on a daemon error or when the daemon still
+---reports the store unclaimed.
+---@param root string
+---@return table ctx
+function M.claim(root)
+  M.reset()
+  local c = locate(root)
+  claim(c.at, root, c.store_id, c.store, true)
+  local r, rerr = daemon.rpc("todos.resolve", { c.at })
+  check(rerr)
+  c.store, c.writable, c.claimed = r.store, r.writable, r.claimed == true
+  if not c.claimed then
+    daemon.fail("the daemon answered todos.claim, but " .. tostring(r.store) .. " is still not claimed")
+  end
+  offer_vars(c.at, c.store_id)
   _ctx[root] = c
   return c
 end
