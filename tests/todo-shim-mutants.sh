@@ -52,6 +52,8 @@ mutants=(
   "$I|shim|a stale write is retried|    local task, err = daemon.rpc(\"todos.update\", { ctx.at, id, cur.rev, p })|    local task, err = daemon.rpc(\"todos.update\", { ctx.at, id, cur.rev, p })\n    if err and err.code == daemon.STALE then\n      cur = get_task(ctx, id)\n      task, err = daemon.rpc(\"todos.update\", { ctx.at, id, cur.rev, p })\n    end"
   "$I|shim|assignee:changed is published again|  publish(\"core.todo:changed\", { kind = \"assign\", id = id })|  publish(\"core.todo:changed\", { kind = \"assign\", id = id })\n  publish(\"core.todo.assignee:changed\", { id = id, to = assignee })"
   "$I|shim|update forwards assignee|  if patch.assignee ~= nil then|  if false then"
+  "$I|shim|set_todo_dir publishes core.todo:changed|  op(function() return true end) -- resolve (and claim) the new store now|  op(function() return true end) -- resolve (and claim) the new store now\n  publish(\"core.todo:changed\", { kind = \"set_dir\" })"
+  "$I|shim|a store not created yet lists as an error|  if err and err.code == daemon.NOT_A_STORE then return {} end|  if false then return {} end"
   "$W|required|the AutoDoc-required notice repeats|  if _warned[key] then return end|  if false then return end"
   "$D|required|a fast event waits|  if vim.in_fast_event() then|  if false then"
   "$N|notifier|a failed send is acked past|            stopped = true\n            break|            stopped = false"
