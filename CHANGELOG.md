@@ -53,6 +53,9 @@ v0.5.10 and auto-agents v0.3.6**, the direct clients. Earlier ones still call
   - The notifier suite uses a fixture client.
   - The v0.4.0 cutover rehearsal is retired.
   - smoke drops the sections for the removed modules.
+- **Docs:** `docs/todo-scanning.md` is removed. It described
+  `auto-core.todo.scan` and `scan_async`, which went with the shim; a client
+  lists the store with the daemon's `todos.list`.
 
 ## [v0.4.0] — 2026-10-14 — the todo cutover: auto-core.todo forwards to AutoDoc
 

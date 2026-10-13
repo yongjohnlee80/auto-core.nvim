@@ -169,11 +169,9 @@ end
 ---Visit every task file under `td` in stable order — FLAT_BUCKETS
 ---order, then `archived/YYYY/MM` ascending, lexicographic within
 ---each leaf dir — invoking `on_file(file_path, bucket)` per `.md`
----file. This is THE walk implementation behind `todo.list` /
----`todo.scan` / refresh's file enumeration; the prior three
----hand-rolled copies in `todo/init.lua` drifted independently
----(and the same duplication class shipped the v0.1.47
----override-dir bug in automation's managed-field writer).
+---file. A read-only layout helper: since the cutover AutoDoc's daemon
+---lists the store (`todos.list`), and auto-core's own list/scan/refresh
+---(this walk's callers until v0.4.1) went with the shim.
 ---
 ---`bucket_filter` narrows the walk: a flat status name visits only
 ---that bucket dir; `"archived"` visits only the archived tree; nil
