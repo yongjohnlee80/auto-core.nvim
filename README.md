@@ -377,8 +377,13 @@ todo.move_store(new_dir)                    -- the claim and the change log move
 **Assignment notices.** `auto-core.todo.notifier` turns the daemon's `assign`
 changes into mailbox messages. It starts with the mailbox router, is the
 consumer `auto-core:<instance_id>` (one per Neovim), and delivers only to the
-agents registered in its own instance; an assignee it does not host is skipped
-and acked (the task file is the record). It polls `todos.changes` when the
+agents registered in its own instance. An assignee not registered here yet is
+**held** for a grace window counted from the notifier's start
+(`require("auto-core.todo.notifier").GRACE_MS`, 10 min), so an agent spawned after
+Neovim started still gets the catch-up: the cursor stops before the held change,
+later changes are still delivered, and a new mailbox registration polls at once.
+Past the window it is skipped and acked with one audit line (the task file is the
+record). `user` and `autodoc:*` are skipped at once. It polls `todos.changes` when the
 session connects, right after an assignment made here, and every 5 s while
 connected (the daemon never pushes). Each message's id is `todo-<store_id>-<seq>`:
 a resend after a crash carries the same id, and a sender finding it already

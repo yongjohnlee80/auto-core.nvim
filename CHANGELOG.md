@@ -42,7 +42,10 @@ and stop every Neovim before updating.
   `automation.lua`, `cron.lua` and `import.lua` stay loadable until v0.4.0.
 - **The assignment notifier** (`auto-core.todo.notifier`) turns AutoDoc's
   `assign` changes into mailbox messages: the consumer `auto-core:<instance_id>`,
-  delivering only to agents registered in this Neovim, ids
+  delivering only to agents registered in this Neovim (one not registered yet is
+  held for `GRACE_MS`, 10 min from the notifier's start, and delivered when it
+  registers; later changes still go out meanwhile; past the window it is skipped
+  and acked with an audit line), ids
   `todo-<store_id>-<seq>`, at-least-once (written before the ack; a delivered id
   is not written again). It starts with the mailbox router and polls on connect,
   after an assignment made here, and every 5 s while connected.
