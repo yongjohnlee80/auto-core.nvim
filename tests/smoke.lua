@@ -7110,7 +7110,7 @@ print("\n[57] todo.header — canonical comment block")
     not header.is_present(""))
 end)()
 
--- ─────────── 58-64, 66-68, 70-74, 75(g), 85, 86: removed in v0.3.4 ───────────
+-- ─────────── 58-64, 66-68, 70-74, 75(g), 85, 86: removed in v0.4.0 ───────────
 -- These sections tested auto-core.todo's own Lua writer (CRUD, status, refresh,
 -- set_todo_dir, import, assign, automation firing, buffers following a move).
 -- ADR 1791532020 moved every todo write to AutoDoc's daemon and deleted that

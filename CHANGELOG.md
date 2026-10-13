@@ -12,7 +12,8 @@ cycle plus a major bump.
 
 ## [Unreleased] — the todo cutover: auto-core.todo forwards to AutoDoc
 
-Patch, released as v0.3.4 (ADR 1791532020 §3 step 3, D4). **Ship it only in the
+Minor, released as v0.4.0 (ADR 1791532020 §3 step 3; D4 as amended 2026-10-13: the cutover is a
+minor, and v0.5.0 removes the shim). **Ship it only in the
 cutover set** (auto-core, auto-finder, auto-agents and autovim's lock together),
 and stop every Neovim before updating.
 
@@ -41,7 +42,7 @@ and stop every Neovim before updating.
   Lua resolves); `vars.set`/`vars.remove` also set AutoDoc's user vars.
 - **Removed behaviour:** the `automated` status, `automation.fire` (refuses),
   `automation.start` (a no-op), automation's own file writer, and `import` (D3).
-  `automation.lua`, `cron.lua` and `import.lua` stay loadable until v0.4.0.
+  `automation.lua`, `cron.lua` and `import.lua` stay loadable until v0.5.0.
 - **The assignment notifier** (`auto-core.todo.notifier`) turns AutoDoc's
   `assign` changes into mailbox messages: the consumer `auto-core:<instance_id>`,
   delivering only to agents registered in this Neovim (one not registered yet is

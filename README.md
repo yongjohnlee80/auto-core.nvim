@@ -340,12 +340,12 @@ kb.sync_managed(root?)       -- ok, err, { root, updated, kept, missing, failed,
 
 ## `todo` — a shim over AutoDoc's todo system (ADR 1791532020)
 
-From v0.3.4 **AutoDoc's daemon owns the todo system**: the task format, its
+From v0.4.0 **AutoDoc's daemon owns the todo system**: the task format, its
 rules and every write. `auto-core.todo` keeps its public functions and their
 synchronous shape, so auto-agents' `todos.*` mailbox verbs and auto-finder keep
 working, but each call goes to the daemon's `todos.*` verbs (protocol 20) and
 waits for the answer, bounded. auto-core no longer writes a task file. The shim
-itself goes at v0.4.0.
+itself goes at v0.5.0.
 
 - **AutoDoc is required.** auto-core reaches the daemon through autodoc.nvim's
   todos client, by a soft `require` (no plugin spec declares it). Without
@@ -395,8 +395,9 @@ after their highest value is carried into a live one).
 `core.todo.assignee:changed` is no longer published. `vim.g.auto_core_todo_notifier
 = false` turns the notifier off.
 
-**Rollback.** Stop every Neovim, restore the previous lock (a caret alone still
-selects v0.3.4), then `autodoc --call todos.release '["<workspace>"]'`. A store
+**Rollback.** Stop every Neovim, put autovim's caret back on `^0.3.0` and restore the
+previous lock (that caret selects v0.3.3, the last release without the shim),
+then `autodoc --call todos.release '["<workspace>"]'`. A store
 this Neovim claimed and later finds released is never claimed again;
 `:AutoCoreTodoClaim` claims it on purpose: it always sends the claim to the daemon
 and reports the daemon's answer, even when this Neovim still believes the store is

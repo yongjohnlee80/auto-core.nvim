@@ -1,4 +1,4 @@
--- tests/todo-shim.lua — auto-core.todo v0.3.4 forwards to a REAL AutoDoc daemon
+-- tests/todo-shim.lua — auto-core.todo v0.4.0 forwards to a REAL AutoDoc daemon
 -- (ADR 1791532020 §3 step 3; design note 2026-10-13 §3, §4).
 --
 -- Run through tests/todo-daemon.sh (it builds nothing; it needs

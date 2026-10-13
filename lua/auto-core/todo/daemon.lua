@@ -4,7 +4,7 @@
 ---write. auto-core.todo forwards to its `todos.*` verbs through autodoc.nvim's
 ---client, reached by a SOFT require (Johno, 2026-10-13): no plugin spec declares
 ---the dependency, as `auto-core.kb` soft-requires `auto-agents.kb` during its own
----transition. The edge goes with the shim at auto-core v0.4.0.
+---transition. The edge goes with the shim at auto-core v0.5.0.
 ---
 ---There is no Lua fallback (ADR §4): without AutoDoc every call answers
 ---"AutoDoc required". A fallback would be a second implementation.

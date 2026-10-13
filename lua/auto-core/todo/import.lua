@@ -1,7 +1,7 @@
 ---Import handlers for the auto-core todo task store (ADR-0031 §3.4).
 ---
----**Dropped by ADR 1791532020 (D3), v0.3.4:** `import` refuses. The KB migration
----it served finished on 2026-05-26. The parser stays until v0.4.0 removes the
+---**Dropped by ADR 1791532020 (D3), v0.4.0:** `import` refuses. The KB migration
+---it served finished on 2026-05-26. The parser stays until v0.5.0 removes the
 ---module.
 ---
 ---v1 supports three source kinds:
