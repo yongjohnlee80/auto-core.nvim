@@ -119,10 +119,14 @@ without re-reading the entire doc. The summary should cover:
    auto-core's router handles delivery. Stamp `from` with the
    value of `$AUTO_AGENTS_MAILBOX_ID`.
 4. **Waiting for a response.** If your message had a
-   `correlation_id`, poll `responses/<correlation_id>.json` (or
-   wait for your next wake, which auto-core fires when a response
-   arrives). The response envelope is
-   `{ ok, reply_to, correlation_id, value, error, completed_at }`.
+   `correlation_id`, poll `responses/<correlation_id>.json`
+   yourself. auto-core still dispatches a wake hook when a response
+   arrives, but the host may stay silent for a **successful**
+   response (auto-agents types a notice only for a failed one), so
+   don't wait for a nudge to read a reply you asked for. The
+   response envelope is
+   `{ ok, reply_to, correlation_id, value, error, code, command, from, completed_at }`
+   (`code` on failure; `command` names the command it answers).
 5. **Reporting review outcomes.** Replies to review/feedback
    requests use `kind = "response"` with a `value` field carrying
    the outcome (`approved`, `change_requested`, etc) — exact
@@ -277,6 +281,7 @@ the same shape regardless of which command produced it:
   "ok":             false,
   "code":           "<short_machine_readable_code>",
   "error":          "<human-readable explanation>",
+  "command":        "<the command you sent>",
   "reply_to":       "<your message id>",
   "correlation_id": "<your correlation_id>",
   "completed_at":   "<ISO 8601 UTC>"

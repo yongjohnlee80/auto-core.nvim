@@ -293,6 +293,54 @@ end
 
 -- ── wake-hook dispatch ────────────────────────────────────
 
+---@param v any
+---@return string?
+local function nonempty_string(v)
+  if type(v) == "string" and v ~= "" then return v end
+  return nil
+end
+
+---The facts a wake hook needs about the ARRIVING file, read from the JSON
+---the router already decoded. Without them the hook only knows which
+---mailbox it fired for (`ctx.mailbox`, the recipient), and every notice
+---named the recipient as the sender (KB todo 2026-10-13, "no false check
+---your inbox notifications").
+---
+---For an inbox arrival `doc` is the message; for a responses arrival it is
+---the response envelope (`ok`, `command`, `code`, `error`). Missing or
+---malformed fields are simply absent. Never raises.
+---@param kind "inbox"|"responses"
+---@param doc  table?   -- decoded message / envelope, or nil when unreadable
+---@param read_err string?
+---@return table facts
+local function arrival_facts(kind, doc, read_err)
+  local f = {}
+  if read_err then f.read_error = tostring(read_err) end
+  if type(doc) ~= "table" then return f end
+  f.from     = nonempty_string(doc.from)
+  if f.from then
+    local ok_b, bare = pcall(mb_path.bare_id, f.from)
+    f.from_bare = ok_b and nonempty_string(bare) or f.from
+  end
+  f.subject  = nonempty_string(doc.subject)
+  f.msg_kind = nonempty_string(doc.kind)
+  f.command  = nonempty_string(doc.command)
+  if kind == "responses" then
+    if type(doc.ok) == "boolean" then f.ok = doc.ok end
+    f.code = nonempty_string(doc.code)
+    local e = doc.error
+    if type(e) == "string" then
+      f.error = nonempty_string(e)
+    elseif type(e) == "table" then
+      f.error = nonempty_string(e.message) or nonempty_string(e.error)
+        or vim.inspect(e)
+    elseif e ~= nil and e ~= vim.NIL then
+      f.error = tostring(e)
+    end
+  end
+  return f
+end
+
 ---Build a synthetic command message for wake-hook dispatch. The
 ---host-side executioner is bypassed — we go directly through the
 ---command registry. If the wake command isn't registered (because
@@ -301,7 +349,9 @@ end
 ---@param rec   AutoCoreMailboxRecord
 ---@param kind  "inbox"|"responses"
 ---@param mid   string
-local function dispatch_wake(rec, kind, mid)
+---@param facts table?  -- arrival_facts() of the arriving file
+local function dispatch_wake(rec, kind, mid, facts)
+  facts = facts or {}
   local wake = rec.wake
   if type(wake) ~= "table" or type(wake.command) ~= "string" then
     -- No wake configured on this mailbox. Emit at DEBUG so triage
@@ -363,6 +413,28 @@ local function dispatch_wake(rec, kind, mid)
     -- cf. handle_response's response path).
     arrival_path = (rec.subs and rec.subs[kind])
       and (rec.subs[kind] .. "/" .. mid .. ".json") or nil,
+    -- The arriving file's own facts (additive; a hook that predates them
+    -- ignores them, and a hook reading them against an older router finds
+    -- nil and keeps its old behaviour). `mailbox` above is the RECIPIENT
+    -- the hook fired for; `arrival_from` is who actually sent the file.
+    --   arrival_from / arrival_from_bare — the message's `from` (inbox) or
+    --     the executor that wrote the envelope (responses, when stamped)
+    --   arrival_subject  — the message's `subject`
+    --   arrival_msg_kind — the message's `kind` ("message", "command", …)
+    --   arrival_command  — the command name (an inbox command message, or
+    --     the command a response answers)
+    --   arrival_ok / arrival_code / arrival_error — a response's outcome
+    --   arrival_read_error — the file could not be read or decoded (for
+    --     example it was already archived); the other fields are then nil
+    arrival_from       = facts.from,
+    arrival_from_bare  = facts.from_bare,
+    arrival_subject    = facts.subject,
+    arrival_msg_kind   = facts.msg_kind,
+    arrival_command    = facts.command,
+    arrival_ok         = facts.ok,
+    arrival_code       = facts.code,
+    arrival_error      = facts.error,
+    arrival_read_error = facts.read_error,
     -- ADR 0023 Track A — agent-side drift detection. Carries the
     -- LIVE host's authoritative identity for the addressed mailbox
     -- so a resumed agent (whose AUTO_AGENTS_* env is fork-frozen
@@ -392,6 +464,11 @@ local function dispatch_wake(rec, kind, mid)
       arrival_id     = mid,
       command        = wake.command,
       synthesized_id = msg.id,
+      arrival_from   = facts.from,
+      arrival_subject = facts.subject,
+      arrival_command = facts.command,
+      arrival_ok     = facts.ok,
+      arrival_error  = facts.error,
     },
   })
   commands.handle_message(msg, ctx)
@@ -414,6 +491,7 @@ local function route_outbox(rec, mid)
         id     = mid,
         reason = "decode_failed",
         error  = derr,
+        path   = src,
       })
     end
     return
@@ -428,6 +506,7 @@ local function route_outbox(rec, mid)
       id     = mid,
       reason = "recipient_unregistered",
       path   = src,
+      subject = nonempty_string(msg.subject),
     })
     return
   end
@@ -443,6 +522,7 @@ local function route_outbox(rec, mid)
       reason = "rename_failed",
       error  = err,
       path   = src,
+      subject = nonempty_string(msg.subject),
     })
     return
   end
@@ -581,7 +661,7 @@ handle_inbox = function(rec, mid)
     execute_command(rec, mid, msg)
     return
   end
-  dispatch_wake(rec, "inbox", mid)
+  dispatch_wake(rec, "inbox", mid, arrival_facts("inbox", msg, err))
 end
 
 ---@param rec AutoCoreMailboxRecord
@@ -590,6 +670,12 @@ local function handle_response(rec, cor)
   local seen = seen_set(rec.subs.responses)
   if seen[cor] then return end
   seen[cor] = true
+  -- Read the envelope once so the wake hook can tell a success from an
+  -- error (and name the command) without re-reading it. A response the
+  -- sender already consumed reads as an error here, which is reported in
+  -- the facts rather than raised.
+  local env, rerr = transport.read_from(rec.id, "responses", cor)
+  local facts = arrival_facts("responses", env, rerr)
   events.publish("core.mailbox:response_received", {
     mailbox        = rec.bare_id,
     mailbox_full   = rec.id,
@@ -604,9 +690,14 @@ local function handle_response(rec, cor)
       arrival_kind   = "responses",
       arrival_id     = cor,
       correlation_id = cor,
+      ok             = facts.ok,
+      command        = facts.command,
+      code           = facts.code,
+      error          = facts.error,
+      read_error     = facts.read_error,
     },
   })
-  dispatch_wake(rec, "responses", cor)
+  dispatch_wake(rec, "responses", cor, facts)
 end
 
 ---@param rec AutoCoreMailboxRecord

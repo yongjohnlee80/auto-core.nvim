@@ -199,6 +199,7 @@ run_standalone "review draft domain (auto-core.review.draft)" tests/review-draft
 run_standalone "float offsets + repo_at" tests/float-offset-and-repo-at.lua
 run_standalone "ui.modal confirm (ADR-0195 P1)" tests/adr0195-ui-modal.lua
 run_standalone "fs.scan + dir:dirty + git.status v2 (ADR-0200)" tests/adr0200-fs-scan.lua
+run_standalone "mailbox wake ctx: arrival sender, subject, response outcome" tests/mailbox-wake-ctx.lua
 run_pty
 run_bench
 
