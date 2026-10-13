@@ -279,9 +279,13 @@ local function poll_store(store)
   end
 end
 
+local _waiters = {} -- done callbacks of the requests the running poll answers
+
 ---poll_all polls every claimed store, one poll at a time; a request during a poll
----runs one more after it.
+---runs one more after it. done (optional) runs once the poll that covers this
+---request has finished.
 function M.poll_all(done)
+  if done then _waiters[#_waiters + 1] = done end
   if _polling then
     _again = true
     return
@@ -301,9 +305,11 @@ function M.poll_all(done)
     if not ok then warn("poll", "poll failed: " .. tostring(err)) end
     if _again then
       _again = false
-      return M.poll_all(done)
+      return M.poll_all()
     end
-    if done then done() end
+    local waiters = _waiters
+    _waiters = {}
+    for _, w in ipairs(waiters) do pcall(w) end
   end)
 end
 
@@ -419,7 +425,7 @@ function M._configure(cfg) _cfg = cfg or {} end
 
 function M._reset_for_tests()
   M.stop()
-  _cfg, _floors, _backoff, _polling, _again = {}, {}, nil, false, false
+  _cfg, _floors, _backoff, _polling, _again, _waiters = {}, {}, nil, false, false, {}
 end
 
 return M
