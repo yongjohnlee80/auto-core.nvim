@@ -131,7 +131,7 @@ if phase == "assign-crash" or phase == "assign-resume" then
   local todo = require("auto-core.todo")
   local notifier = require("auto-core.todo.notifier")
   local daemon = require("auto-core.todo.daemon")
-  notifier._configure({ poll_ms = false, watermark_path = R .. "/state-notifier.json" })
+  notifier._configure({ poll_ms = false, watermark_dir = R .. "/state-notifier" })
   if phase == "assign-crash" then
     -- the ack never reaches the daemon: this Neovim dies right after the send
     local armed = false

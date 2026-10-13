@@ -66,6 +66,13 @@ mutants=(
   "$N|notifier|the watermark passes a held change|      if handled and not held then acked = seq end|      acked = seq"
   "$N|notifier|the ack passes a held change|    if acked then\n      if ack(at, acked) then bump_watermark(store.id, acked) end|    if acked then\n      ack(at, changes[#changes] and changes[#changes].seq or acked)\n      if true then bump_watermark(store.id, acked) end"
   "$N|notifier|the held change's re-read is written twice|  if delivered(rec, mid) then return \"done\" end|  if false then return \"done\" end"
+  "$N|notifier|the watermark is one shared read-modify-write file|  local path = watermark_dir() .. \"/\" .. inst .. \".json\"\n  -- Its own file seeds the map once (the same instance after a restart): only\n  -- this instance writes it, so reading it is no read-modify-write of another's.\n  local w = vim.deepcopy(_own[inst] or read_json(path) or {})|  local path = watermark_dir() .. \"/shared.json\"\n  local w = read_json(path) or {}"
+  "$N|notifier|a pruner removes before carrying the maximum|  if not write_own(inst, maximum(files)) then return {} end -- carry the maximum first|  -- the maximum is not carried"
+  "$N|notifier|a process prunes its own file|  if name == own_name then return false end|  if false then return false end"
+  "$N|notifier|a live process's file is pruned|  return pid ~= nil and not alive(pid)|  return true"
+  "$N|notifier|a file past the consumer silence is kept|  if os.time() - f.mtime > SILENCE_S then return true end|  if false then return true end"
+  "$N|notifier|a read is not repeated when the listing changed|    if table.concat(list_names(dir), |    if true or table.concat(list_names(dir), "
+  "$N|notifier|a new process does not prune|  if floor == nil then prepare_once() end|  if false then prepare_once() end"
 )
 
 killed=0; survived=0; broken=0; i=0

@@ -48,7 +48,10 @@ and stop every Neovim before updating.
   and acked with an audit line), ids
   `todo-<store_id>-<seq>`, at-least-once (written before the ack; a delivered id
   is not written again). It starts with the mailbox router and polls on connect,
-  after an assignment made here, and every 5 s while connected.
+  after an assignment made here, and every 5 s while connected. A new Neovim
+  starts after the highest change any Neovim here handled: each writes only its
+  own watermark file (`stdpath("state")/auto-core/todo_notifier/<instance>.json`)
+  and the maximum across them is read, so concurrent Neovims never move it back.
 - **`core.todo.assignee:changed` is no longer published.** The notifier is the
   only sender, so auto-agents' older subscriber cannot deliver a second copy.
 - **Tests:** `tests/todo-shim-required.lua` (no AutoDoc; in `run-all.sh`),
