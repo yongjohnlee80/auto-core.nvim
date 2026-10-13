@@ -285,6 +285,90 @@ run("rollback guard", function()
   ok("claimed again", r2 and r2.claimed == true)
 end)
 
+section("another client releases the store this Neovim cached as claimed (review r0, P2 1)")
+-- The release goes through the test's own session (env.call), as AutoDoc's GUI
+-- or an agent's `autodoc --call todos.release` would: this Neovim's cache is
+-- never told.
+local function counting()
+  local n = { claim = 0 }
+  daemon._set_transport(function(method, params, cb)
+    if method == "todos.claim" then n.claim = n.claim + 1 end
+    daemon._real_request(method, params, cb)
+  end)
+  return n
+end
+local function release_elsewhere()
+  todo.list({ status = "open" })
+  local c = where.cached(proj)
+  ok("fixture: this Neovim cached the store as claimed", c and c.claimed == true, vim.inspect(c))
+  local _, rerr = env.call("todos.release", { "kb" })
+  ok("fixture: another client released it", rerr == nil and not env.exists(store .. "/.autodoc-owner"),
+    rerr and rerr.message)
+end
+
+run("the explicit claim asks the daemon", function()
+  release_elsewhere()
+  local n = counting()
+  local okc, cerr = todo.claim()
+  daemon._set_transport(nil)
+  ok("todo.claim answers true", okc == true, cerr)
+  ok("… having sent todos.claim to the daemon", n.claim == 1, n.claim)
+  ok("the marker came back", env.exists(store .. "/.autodoc-owner"))
+  local r = env.call("todos.resolve", { "kb" })
+  ok("the daemon reports the store claimed", r and r.claimed == true, vim.inspect(r))
+  local c = where.cached(proj)
+  ok("the cache holds the daemon's answer", c and c.claimed == true and c.released == false, vim.inspect(c))
+  local okadd, id = pcall(todo.add, { title = "Written after the explicit claim" })
+  ok("writes work again", okadd and type(id) == "string", id)
+end)
+
+run("the explicit claim answers what the daemon says", function()
+  todo.list({ status = "open" })
+  daemon._set_transport(function(method, params, cb)
+    if method == "todos.claim" then return cb(nil, { message = "injected: the claim was refused" }) end
+    daemon._real_request(method, params, cb)
+  end)
+  local okc, cerr = todo.claim()
+  daemon._set_transport(nil)
+  ok("a refused claim is (false, the daemon's error), not the cached claim",
+    okc == false and tostring(cerr):find("injected: the claim was refused", 1, true), cerr)
+  release_elsewhere()
+  daemon._set_transport(function(method, params, cb)
+    if method == "todos.claim" then return cb({}, nil) end -- answered, but never applied
+    daemon._real_request(method, params, cb)
+  end)
+  local okc2, cerr2 = todo.claim()
+  daemon._set_transport(nil)
+  ok("a claim the daemon does not report applied is (false, err)",
+    okc2 == false and tostring(cerr2):find("still not claimed", 1, true), cerr2)
+  local okc3, cerr3 = todo.claim()
+  ok("fixture: claimed again for the cells after", okc3 == true, cerr3)
+end)
+
+run("the implicit path never claims it again; the cache learns the release", function()
+  release_elsewhere()
+  local n = counting()
+  local list = todo.list({ status = "open" })
+  ok("reads still work", type(list) == "table" and #list > 0, #list)
+  local okadd, aerr = pcall(todo.add, { title = "Refused after the release" })
+  ok("a write answers todos.unclaimed", not okadd and tostring(aerr):find("todos.unclaimed", 1, true), aerr)
+  local c = where.cached(proj)
+  ok("that answer dropped the stale claimed cache", c == nil or c.claimed == false, vim.inspect(c))
+  todo.list({ status = "open" })
+  local c2 = where.cached(proj)
+  ok("the next call resolves again and sees the release", c2 and c2.claimed == false and c2.released == true,
+    vim.inspect(c2))
+  pcall(todo.add, { title = "Refused again" })
+  pcall(todo.refresh)
+  daemon._set_transport(nil)
+  ok("nothing on the implicit path sent todos.claim", n.claim == 0, n.claim)
+  local r = env.call("todos.resolve", { "kb" })
+  ok("the store is still unclaimed, with no marker", r and r.claimed == false
+    and not env.exists(store .. "/.autodoc-owner"), vim.inspect(r))
+  local okc, cerr = todo.claim()
+  ok("fixture: claimed again for the cells after", okc == true, cerr)
+end)
+
 section("vars, import, automation")
 run("vars", function()
   local okv = todo.vars.set("SHIMVAR", proj)

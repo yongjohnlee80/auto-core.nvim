@@ -28,7 +28,9 @@ and stop every Neovim before updating.
   the Neovim root, so legacy `$WORKSPACE` refs are rewritten once). The daemon
   writes `.todo-list/.autodoc-owner`. A store this Neovim claimed and later finds
   released is never claimed again; `:AutoCoreTodoClaim` (and `todo.claim()`)
-  claims it on purpose, `todo.release()` releases it.
+  claims it on purpose, always asking the daemon and answering what it says;
+  `todo.release()` releases it. A write answered `todos.unclaimed` (another
+  client released the store) drops the cached claim, so the next call sees it.
 - **New:** `todo.remove_malformed(path)`, `todo.move_store(dir)`, `todo.claim()`,
   `todo.release()`; tasks carry `rev`, `path` and `file_path`; `known_dirs`
   entries carry `claimed` and `store_id`.

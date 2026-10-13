@@ -398,7 +398,9 @@ after their highest value is carried into a live one).
 **Rollback.** Stop every Neovim, restore the previous lock (a caret alone still
 selects v0.3.4), then `autodoc --call todos.release '["<workspace>"]'`. A store
 this Neovim claimed and later finds released is never claimed again;
-`:AutoCoreTodoClaim` claims it on purpose.
+`:AutoCoreTodoClaim` claims it on purpose: it always sends the claim to the daemon
+and reports the daemon's answer, even when this Neovim still believes the store is
+claimed.
 
 ## Logging — the family contract (ADR 0021 / v0.1.11+)
 

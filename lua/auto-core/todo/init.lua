@@ -75,14 +75,28 @@ local function report(err)
   end
 end
 
+---forget_if_unclaimed drops a root's cached resolution when the daemon answered
+---todos.unclaimed: another client released the store after this Neovim cached
+---its claim, so the next call resolves again and sees the release (the implicit
+---path still never claims it again).
+---@param root string
+---@param err any
+local function forget_if_unclaimed(root, err)
+  if tostring(err):find("todos.unclaimed", 1, true) then where.reset(root) end
+end
+
 ---op runs fn(ctx) for the session's store, inside the daemon coroutine, and
 ---waits. Returns (true, ...) or (false, err).
 ---@param fn fun(ctx: table): ...
 local function op(fn)
+  local root = where.root()
   local res = { daemon.sync(function()
-    return fn(where.ensure(where.root()))
+    return fn(where.ensure(root))
   end) }
-  if not res[1] then report(res[2]) end
+  if not res[1] then
+    report(res[2])
+    forget_if_unclaimed(root, res[2])
+  end
   return unpack(res)
 end
 
@@ -537,6 +551,7 @@ function M._refresh_async()
       publish("core.todo:refreshed", { summary = s, at = M._now_iso() })
     else
       report(s)
+      forget_if_unclaimed(root, s)
     end
   end)
 end
@@ -652,19 +667,19 @@ function M._upsert_known() end
 
 -- ─── public: the cutover ─────────────────────────────────────
 
----Claim this project's store again after a rollback released it
----(:AutoCoreTodoClaim). Returns (true) or (false, err).
+---Claim this project's store on purpose (:AutoCoreTodoClaim), e.g. after a
+---rollback released it. It always sends todos.claim and answers what the daemon
+---says, never a cached state: another client may have released the store since
+---this Neovim cached its claim. Returns (true) or (false, err).
 ---@return boolean ok, string? err
 function M.claim()
   local root = where.root()
-  local ok, c = op(function(ctx) return ctx end)
-  if not ok then return false, c end
-  if c.claimed then return true end
-  where.forget_release(c.store_id)
-  local ok2, c2 = op(function(ctx) return ctx end)
-  if not ok2 then return false, c2 end
-  where.reset(root)
-  return c2.claimed and true or false, (not c2.claimed) and "the store is still not claimed" or nil
+  local ok, err = daemon.sync(function() return where.claim(root) end)
+  if not ok then
+    report(err)
+    return false, err
+  end
+  return true
 end
 
 ---Release this project's store: the daemon only reads it again (the rollback,
