@@ -241,13 +241,20 @@ run("own store", function()
   local other = env.tmp .. "/other"
   vim.fn.mkdir(other, "p")
   env.set_project(env.tmp .. "/proj2", nil)
+  local empty = todo.list()
+  ok("a project with no store yet lists as empty, not as an error", type(empty) == "table" and #empty == 0)
+  local okr, rs = pcall(todo.refresh)
+  ok("… and refreshes to a zero summary", okr and rs.scanned == 0, rs)
   local id = todo.add({ title = "First in a new project" })
   local store2 = env.tmp .. "/proj2/.todo-list"
   ok("the first add scaffolded <root>/.todo-list", env.exists(store2 .. "/open/" .. id .. ".md"))
   ok("… and the claim's marker is there", env.exists(store2 .. "/.autodoc-owner"))
   ok("the At is {root}", type(where.cached(env.tmp .. "/proj2").at) == "table")
+  local events_before = #seen["core.todo:changed"]
   todo.set_todo_dir(other)
   ok("set_todo_dir points the project at an existing directory", todo.get_todo_dir() == other, todo.get_todo_dir())
+  ok("… and publishes no core.todo:changed, as before the cutover",
+    #seen["core.todo:changed"] == events_before, #seen["core.todo:changed"] - events_before)
   local id2 = todo.add({ title = "In the other directory" })
   ok("a task lands there (scaffolded on first add)", env.exists(other .. "/open/" .. id2 .. ".md"))
   local moved = todo.move_store(env.tmp .. "/moved")

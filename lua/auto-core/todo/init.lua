@@ -138,10 +138,14 @@ local function get_task(ctx, id)
   return decorate(ctx, t)
 end
 
+---list_page lists one page. A store that does not exist yet (a project with no
+---task, before the first add scaffolds it) lists as empty, as Lua's store did:
+---it is not an error.
 local function list_page(ctx, opts)
   local params = { ctx.at }
   if opts and next(opts) ~= nil then params[2] = opts end
   local l, err = daemon.rpc("todos.list", params)
+  if err and err.code == daemon.NOT_A_STORE then return {} end
   if err then daemon.fail(err) end
   return l or {}
 end
@@ -500,6 +504,7 @@ end
 
 local function refresh_body(ctx)
   local s, err = daemon.rpc("todos.refresh", { ctx.at })
+  if err and err.code == daemon.NOT_A_STORE then s, err = {}, nil end -- nothing to reconcile yet
   if err then daemon.fail(err) end
   s = s or {}
   return {
@@ -560,7 +565,8 @@ function M.set_todo_dir(path)
   where.set_override(root, dir ~= "" and dir or nil)
   where.reset(root)
   op(function() return true end) -- resolve (and claim) the new store now
-  publish("core.todo:changed", { kind = "set_dir", dir = dir })
+  -- No event, as before the cutover: a view notices the new directory on its
+  -- own (get_todo_dir), and an event here would reload it mid-action.
 end
 
 ---The store directory for this project. It never waits: before the daemon has
