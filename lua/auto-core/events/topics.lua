@@ -266,7 +266,7 @@ local M = {
   },
   ["core.mailbox:outbox_undeliverable"] = {
     doc = "Outbox routing failed (recipient unregistered, rename failed, decode failed). File left in sender's outbox/ for retry.",
-    payload = "{ from = string, to = string?, id = string, reason = string, error = string?, path = string? }",
+    payload = "{ from = string, from_full = string, to = string?, id = string, reason = string, error = string?, path = string?, subject = string? }",
     publishers = { "auto-core" },
   },
   ["core.mailbox:message_queued"] = {

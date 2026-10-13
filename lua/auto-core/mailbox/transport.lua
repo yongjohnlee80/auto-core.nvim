@@ -100,6 +100,24 @@ local function response_file(id, correlation_id)
   return subdir_for(id, "responses") .. "/" .. correlation_id .. ".json"
 end
 
+---The command name a response envelope answers: the original message's
+---`command` when it was a command, else nil.
+---@param original table
+---@return string?
+local function envelope_command(original)
+  if type(original) ~= "table" or original.kind ~= "command" then return nil end
+  local c = original.command
+  if type(c) == "string" and c ~= "" then return c end
+  return nil
+end
+
+---@param code any
+---@return string?
+local function envelope_code(code)
+  if type(code) == "string" and code ~= "" then return code end
+  return nil
+end
+
 -- ── public API ───────────────────────────────────────────────
 
 ---@class AutoCoreMailboxSendResult
@@ -585,6 +603,13 @@ function M.complete(mailbox_id, message_id, response)
       correlation_id = cor,
       value          = response.value,
       error          = response.error,
+      -- `code` was documented in the bootstrap doc's failure envelope but
+      -- never written. `command` and `from` (additive) let the sender's
+      -- wake hook name the command that failed and who answered it,
+      -- without finding the original in the executor's archive.
+      code           = response.code,
+      command        = envelope_command(original),
+      from           = mailbox_id,
       completed_at   = original.completed_at,
     }
     local rwok, rwerr = atomic_write(response_path, vim.json.encode(envelope))
@@ -651,6 +676,9 @@ function M.fail(mailbox_id, message_id, err_info, opts)
       reply_to       = message_id,
       correlation_id = cor,
       error          = err_msg,
+      code           = type(err_info) == "table" and envelope_code(err_info.code) or nil,
+      command        = envelope_command(original),
+      from           = mailbox_id,
       completed_at   = original.completed_at,
     }
     local rwok, rwerr = atomic_write(response_path, vim.json.encode(envelope))
@@ -781,6 +809,9 @@ function M.recover_stale(mailbox_id, opts)
                   reply_to       = mid,
                   correlation_id = cor,
                   error          = "stale_processing_timeout",
+                  code           = "stale_processing_timeout",
+                  command        = envelope_command(msg),
+                  from           = mailbox_id,
                   completed_at   = msg.completed_at,
                 }
                 local rwok = atomic_write(resp_path, vim.json.encode(envelope))
