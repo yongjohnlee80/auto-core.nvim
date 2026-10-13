@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# tests/todo-shim-mutants.sh — every rule of the todo shim and the assignment
-# notifier (ADR 1791532020; design note 2026-10-13) must be load-bearing in its
-# suite.
+# tests/todo-where-mutants.sh — every rule of what auto-core keeps of the todo
+# system (the store resolution and claim, the daemon door, the assignment
+# notifier; ADR 1791532020 r12) must be load-bearing in its suite.
 #
 # Copies the tree, applies ONE mutation, runs the suite that owns the rule, and
 # requires it to FAIL. The unmutated copy must pass all three suites first (an
@@ -10,7 +10,7 @@
 # reason).
 #
 # Needs AUTOCORE_TEST_AUTODOC and AUTOCORE_TEST_AUTODOC_BIN (tests/todo-daemon.sh).
-# Run on VM43: bash tests/todo-shim-mutants.sh
+# Run on VM43: bash tests/todo-where-mutants.sh
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 : "${AUTOCORE_TEST_AUTODOC:?}" "${AUTOCORE_TEST_AUTODOC_BIN:?}"
@@ -18,10 +18,10 @@ SRC="$PWD"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-# run_suite <dir> <shim|notifier|required>
+# run_suite <dir> <where|notifier|required>
 run_suite() {
   if [ "$2" = required ]; then
-    (cd "$1" && timeout 120 nvim --headless -u NONE -l tests/todo-shim-required.lua 2>&1)
+    (cd "$1" && timeout 120 nvim --headless -u NONE -l tests/todo-where-required.lua 2>&1)
   else
     (cd "$1" && bash tests/todo-daemon.sh "$2" 2>&1)
   fi
@@ -29,7 +29,7 @@ run_suite() {
 summary_of() { printf '%s\n' "$1" | grep -oE '[0-9]+ passed, [0-9]+ failed' | tail -1; }
 
 cp -r "$SRC" "$WORK/base"
-for s in required shim notifier; do
+for s in required where notifier; do
   out="$(run_suite "$WORK/base" "$s")"
   summary="$(summary_of "$out")"
   if [ -z "$summary" ] || [ "${summary##*, }" != "0 failed" ]; then
@@ -38,27 +38,18 @@ for s in required shim notifier; do
   echo "baseline $s: $summary"
 done
 
-I=lua/auto-core/todo/init.lua
 W=lua/auto-core/todo/where.lua
 N=lua/auto-core/todo/notifier.lua
 D=lua/auto-core/todo/daemon.lua
 # file|suite|name|old|new — literal strings; old must occur exactly once in file.
 mutants=(
-  "$W|shim|the first call does not claim|      claim(at, root, r.store_id, r.store)\n      c.claimed = true|      c.claimed = false"
-  "$W|shim|the claim drops legacy_workspace|{ at, { legacy_workspace = legacy } }|{ at }"
-  "$W|shim|{root} even when a workspace owns the store|      at = ws.name|      at = nil"
-  "$W|shim|a released store is claimed again|    if mine then|    if false then"
-  "$W|shim|the explicit claim trusts the cached claim|  M.reset()\n  local c = locate(root)\n  claim(c.at, root, c.store_id, c.store, true)|  local c = M.ensure(root)\n  if c.claimed then return c end\n  claim(c.at, root, c.store_id, c.store, true)"
-  "$W|shim|an error without a code passes as success|  if err and (tolerate == nil or err.code ~= tolerate) then daemon.fail(err) end|  if err and err.code ~= tolerate then daemon.fail(err) end"
-  "$W|shim|the explicit claim does not check the daemon's answer|  if not c.claimed then\n    daemon.fail(|  if false then\n    daemon.fail("
-  "$I|shim|a todos.unclaimed answer keeps the stale cache|  if tostring(err):find(\"todos.unclaimed\", 1, true) then where.reset(root) end|  if false then where.reset(root) end"
-  "$I|shim|refs cross as the caller wrote them|  absolute_refs(s)\n|  -- absolute_refs(s)\n"
-  "$I|shim|a stale write is retried|    local task, err = daemon.rpc(\"todos.update\", { ctx.at, id, cur.rev, p })|    local task, err = daemon.rpc(\"todos.update\", { ctx.at, id, cur.rev, p })\n    if err and err.code == daemon.STALE then\n      cur = get_task(ctx, id)\n      task, err = daemon.rpc(\"todos.update\", { ctx.at, id, cur.rev, p })\n    end"
-  "$I|shim|assignee:changed is published again|  publish(\"core.todo:changed\", { kind = \"assign\", id = id })|  publish(\"core.todo:changed\", { kind = \"assign\", id = id })\n  publish(\"core.todo.assignee:changed\", { id = id, to = assignee })"
-  "$I|shim|update forwards assignee|  if patch.assignee ~= nil then|  if false then"
-  "$I|shim|set_todo_dir publishes core.todo:changed|  op(function() return true end) -- resolve (and claim) the new store now|  op(function() return true end) -- resolve (and claim) the new store now\n  publish(\"core.todo:changed\", { kind = \"set_dir\" })"
-  "$I|shim|a store not created yet lists as an error|  if err and err.code == daemon.NOT_A_STORE then return {} end|  if false then return {} end"
-  "$W|required|the AutoDoc-required notice repeats|  if _warned[key] then return end|  if false then return end"
+  "$W|where|the first call does not claim|      claim(at, root, r.store_id, r.store)\n      c.claimed = true|      c.claimed = false"
+  "$W|where|the claim drops legacy_workspace|{ at, { legacy_workspace = legacy } }|{ at }"
+  "$W|where|{root} even when a workspace owns the store|      at = ws.name|      at = nil"
+  "$W|where|a released store is claimed again|    if mine then|    if false then"
+  "$W|where|the explicit claim trusts the cached claim|  M.reset()\n  local c = locate(root)\n  claim(c.at, root, c.store_id, c.store, true)|  local c = M.ensure(root)\n  if c.claimed then return c end\n  claim(c.at, root, c.store_id, c.store, true)"
+  "$W|where|an error without a code passes as success|  if err and (tolerate == nil or err.code ~= tolerate) then daemon.fail(err) end|  if err and err.code ~= tolerate then daemon.fail(err) end"
+  "$W|where|the explicit claim does not check the daemon's answer|  if not c.claimed then\n    daemon.fail(|  if false then\n    daemon.fail("
   "$D|required|a fast event waits|  if vim.in_fast_event() then|  if false then"
   "$N|notifier|a failed send is acked past|            stopped = true\n            break|            stopped = false"
   "$N|notifier|past the window a recipient is still held|  return \"skip\"\nend\n\nlocal function ack|  return \"hold\"\nend\n\nlocal function ack"

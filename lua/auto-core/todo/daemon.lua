@@ -1,10 +1,13 @@
----auto-core.todo.daemon — the one door from auto-core.todo to AutoDoc's daemon.
+---auto-core.todo.daemon — auto-core's one door to AutoDoc's daemon for todos.
 ---
 ---AutoDoc owns the todo system (ADR 1791532020): the format, the rules and every
----write. auto-core.todo forwards to its `todos.*` verbs through autodoc.nvim's
----client, reached by a SOFT require (Johno, 2026-10-13): no plugin spec declares
----the dependency, as `auto-core.kb` soft-requires `auto-agents.kb` during its own
----transition. The edge goes with the shim at auto-core v0.5.0.
+---write. auto-core keeps two things that need the daemon: the store resolution
+---(`auto-core.todo.where`, which the direct clients — auto-finder's panel and
+---auto-agents' todos.* verbs — share) and the assignment notifier
+---(`auto-core.todo.notifier`, ADR §2.5). Both reach the daemon here, through
+---autodoc.nvim's client, by a SOFT require (Johno, 2026-10-13): no plugin spec
+---declares the dependency. The edge is permanent and stays soft (ADR r12): the
+---forwarding shim `auto-core.todo` went at v0.4.1, the notifier stays.
 ---
 ---There is no Lua fallback (ADR §4): without AutoDoc every call answers
 ---"AutoDoc required". A fallback would be a second implementation.
@@ -23,7 +26,7 @@ local M = {}
 -- resolution and claim, and the verb itself.
 M.WAIT_MS = 15000
 
-M.REQUIRED = "AutoDoc required: auto-core.todo forwards to AutoDoc's daemon "
+M.REQUIRED = "AutoDoc required: the todo store is AutoDoc's daemon's "
   .. "(ADR 1791532020). Install autodoc (v0.1.39 or later) and its binary."
 
 -- The daemon's public codes, by number (autodoc core/todo/module.go, rpc).
@@ -182,7 +185,7 @@ function M.rpc(method, params)
   return M.normalize(box.r), M.normalize(box.e)
 end
 
----fail raises err (a daemon error or a string) as auto-core.todo's message.
+---fail raises err (a daemon error or a string) as a "<code name>: <message>" string.
 ---@param err any
 function M.fail(err)
   error(M.format(err), 0)
@@ -195,7 +198,7 @@ end
 ---@return boolean ok, any ...
 function M.sync(fn, wait_ms)
   if vim.in_fast_event() then
-    return false, "auto-core.todo: called from a fast event; vim.schedule the call"
+    return false, "auto-core.todo.daemon: called from a fast event; vim.schedule the call"
   end
   local finished, res = false, nil
   M.run(fn, function(...) finished, res = true, { n = select("#", ...), ... } end)

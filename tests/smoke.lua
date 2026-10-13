@@ -6635,371 +6635,10 @@ vim.api.nvim_set_option_value("signcolumn",     saved.signcolumn,     {})
 vim.api.nvim_set_option_value("foldcolumn",     saved.foldcolumn,     {})
 end)()
 
--- ─────────────────────── 54. todo.yaml — strict-subset YAML adapter (ADR 0031 §2) ─
-print("\n[54] todo.yaml — strict-subset decode / encode")
-;(function()
-  local ok_req, yaml = pcall(require, "auto-core.todo.yaml")
-  ok("auto-core.todo.yaml loads", ok_req, tostring(yaml))
-  if ok_req then
+-- [54] (todo.yaml) and [55] (todo.schema): removed in v0.4.1 with the Lua format
+-- modules; AutoDoc owns the format (ADR 1791532020 §2.2).
 
-    -- ── decode: happy path ────────────────────────────────────
-    local src_basic = table.concat({
-      "id: 2026-05-25-foo",
-      "version: 1",
-      "status: open",
-      "title: Test task",
-      "tags:",
-      "  - workflow",
-      "  - testing",
-      "",
-    }, "\n")
-    local r = yaml.decode(src_basic)
-    ok("decode: minimal task succeeds", r.ok, r.err)
-    ok("decode: id round-trips",
-      r.ok and r.value and r.value.id == "2026-05-25-foo",
-      r.ok and ("got " .. tostring(r.value and r.value.id)))
-    ok("decode: version stays numeric",
-      r.ok and r.value and r.value.version == 1)
-    ok("decode: tags is a sequence of two items",
-      r.ok and r.value and type(r.value.tags) == "table"
-        and r.value.tags[1] == "workflow" and r.value.tags[2] == "testing")
-
-    -- ── decode: strict-subset rejections ──────────────────────
-    local rej_anchor = yaml.decode("foo: &my_anchor 42\nbar: *my_anchor\n")
-    ok("decode: rejects YAML anchor",
-      (not rej_anchor.ok) and rej_anchor.err and rej_anchor.err:find("anchor"),
-      rej_anchor.err)
-
-    local rej_alias = yaml.decode("foo: 42\nbar: *some_alias\n")
-    ok("decode: rejects YAML alias (no anchor in scope)",
-      (not rej_alias.ok) and rej_alias.err and rej_alias.err:find("alias"),
-      rej_alias.err)
-
-    local rej_merge = yaml.decode(table.concat({
-      "base: &b",
-      "  k: v",
-      "child:",
-      "  <<: *b",
-      "  k2: v2",
-      "",
-    }, "\n"))
-    ok("decode: rejects YAML merge key `<<:`",
-      (not rej_merge.ok) and rej_merge.err
-        and (rej_merge.err:find("merge") or rej_merge.err:find("anchor")),
-      rej_merge.err)
-
-    local rej_tag = yaml.decode("created: !!timestamp 2026-05-25T12:00:00Z\n")
-    ok("decode: rejects YAML explicit tag `!!type`",
-      (not rej_tag.ok) and rej_tag.err and rej_tag.err:find("explicit tag"),
-      rej_tag.err)
-
-    -- ── decode: block-scalar bodies are exempt from the check ─
-    -- A `description: |` block whose body contains `&foo` is content,
-    -- not a YAML anchor — must not be rejected.
-    local block_with_ampersand = table.concat({
-      "id: 2026-05-25-bar",
-      "description: |",
-      "  Free-form prose. Mentioning &foo and *bar and !!baz",
-      "  here is just text; these are not YAML constructs.",
-      "",
-    }, "\n")
-    local r_block = yaml.decode(block_with_ampersand)
-    ok("decode: forbidden markers inside `|` block scalar bodies do NOT reject",
-      r_block.ok, r_block.err)
-    ok("decode: block-scalar body preserves the literal content",
-      r_block.ok and r_block.value
-        and type(r_block.value.description) == "string"
-        and r_block.value.description:find("&foo")
-        and r_block.value.description:find("*bar")
-        and r_block.value.description:find("!!baz"))
-
-    -- ── encode: happy path ────────────────────────────────────
-    local enc_basic = yaml.encode({
-      id      = "2026-05-25-foo",
-      version = 1,
-      status  = "open",
-      title   = "Test task",
-    })
-    ok("encode: emits a string", type(enc_basic) == "string")
-    -- Date-shaped strings are double-quoted by the encoder (round-trip
-    -- safe given the strict subset disables native timestamp coercion).
-    ok("encode: contains the id line (quoted because date-shaped)",
-      enc_basic:find('id: "2026%-05%-25%-foo"') ~= nil, enc_basic)
-    ok("encode: contains the version line",
-      enc_basic:find("version: 1") ~= nil, enc_basic)
-    ok("encode: ends with a trailing newline",
-      enc_basic:sub(-1) == "\n", "tail=" .. string.format("%q", enc_basic:sub(-5)))
-
-    -- ── encode: multi-line strings use `|` literal block ──────
-    local enc_multi = yaml.encode({
-      notes = "line one\nline two\nline three",
-    })
-    ok("encode: multi-line string uses `|` block scalar",
-      enc_multi:find("notes: |\n") ~= nil, enc_multi)
-    -- Top-level key is at column 0, so its block-scalar body is at
-    -- indent+2 = 2 spaces.
-    ok("encode: block-scalar body lines are indented 2 spaces",
-      enc_multi:find("\n  line one\n") ~= nil
-        and enc_multi:find("\n  line two\n") ~= nil, enc_multi)
-
-    -- ── encode: ISO datetime is quoted ────────────────────────
-    local enc_ts = yaml.encode({
-      created = "2026-05-25T14:32:00-07:00",
-    })
-    ok("encode: ISO 8601 timestamp is double-quoted (round-trip safe)",
-      enc_ts:find('created: "2026%-05%-25T14:32:00%-07:00"') ~= nil, enc_ts)
-
-    -- ── encode: sequence of mappings (errors[] shape) ─────────
-    local enc_errors = yaml.encode({
-      errors = {
-        { field = "blocked[0]", code = "not-found", message = "missing",
-          detected = "2026-05-25T22:00:00-07:00" },
-      },
-    })
-    -- First entry: `- code: not-found` (alphabetical order) inline
-    -- after the dash; remaining keys indented by two spaces.
-    ok("encode: list-of-mappings emits `- key: value` on first key",
-      enc_errors:find("\n  %- code: not%-found\n") ~= nil, enc_errors)
-    ok("encode: list-of-mappings indents subsequent keys to align",
-      enc_errors:find("\n    detected:") ~= nil
-        and enc_errors:find("\n    field: ") ~= nil
-        and enc_errors:find("\n    message: missing") ~= nil, enc_errors)
-
-    -- ── round-trip ────────────────────────────────────────────
-    local round_input = {
-      id          = "2026-05-25-rt",
-      version     = 1,
-      status      = "open",
-      title       = "Round-trip test",
-      description = "First line.\nSecond line.",
-      tags        = { "a", "b", "c" },
-      blocked     = { "2026-05-20-prereq" },
-    }
-    local round_yaml = yaml.encode(round_input)
-    local round_dec  = yaml.decode(round_yaml)
-    ok("round-trip: decode succeeds on encode output",
-      round_dec.ok, round_dec.err)
-    if round_dec.ok then
-      local v = round_dec.value
-      ok("round-trip: id preserved", v.id == round_input.id)
-      ok("round-trip: version preserved", v.version == round_input.version)
-      ok("round-trip: status preserved", v.status == round_input.status)
-      ok("round-trip: title preserved", v.title == round_input.title)
-      -- Block scalar with `|` includes a trailing newline by spec.
-      ok("round-trip: description preserved (modulo block-scalar trailing \\n)",
-        v.description == round_input.description
-          or v.description == (round_input.description .. "\n"),
-        "got " .. string.format("%q", tostring(v.description)))
-      ok("round-trip: tags preserved",
-        type(v.tags) == "table"
-          and v.tags[1] == "a" and v.tags[2] == "b" and v.tags[3] == "c")
-      ok("round-trip: blocked preserved",
-        type(v.blocked) == "table" and v.blocked[1] == "2026-05-20-prereq")
-    end
-
-    -- ── decode: non-string source rejected cleanly ────────────
-    local rej_type = yaml.decode(42)
-    ok("decode: non-string source returns ok=false with type error",
-      (not rej_type.ok) and rej_type.err and rej_type.err:find("string"),
-      rej_type.err)
-  end
-end)()
-
--- ─────────────────────── 55. todo.schema — v1 validator (ADR 0031 §2) ────
-print("\n[55] todo.schema — v1 schema validation")
-;(function()
-  local ok_req, schema = pcall(require, "auto-core.todo.schema")
-  ok("auto-core.todo.schema loads", ok_req, tostring(schema))
-  if not ok_req then return end
-
-  -- ── blank() produces a valid skeleton ────────────────────────
-  local b = schema.blank()
-  ok("schema.blank() returns a table", type(b) == "table")
-  ok("schema.blank() has version 1", b.version == 1)
-  ok("schema.blank() has status 'open'", b.status == "open")
-  ok("schema.blank() has matching id/created/updated/status_changed",
-    type(b.id) == "string" and type(b.created) == "string"
-    and b.updated == b.created and b.status_changed == b.created)
-  local r_blank = schema.validate(b)
-  ok("validate(blank()) succeeds", r_blank.ok, r_blank.err)
-
-  -- ── full happy-path task ─────────────────────────────────────
-  local full = schema.blank({
-    id          = "2026-05-25-implement-todo-system",
-    title       = "Implement the todo system",
-    description = "Multi-line goal.",
-    priority    = "high",
-    tags        = { "auto-core", "workflow" },
-    adr         = { "shared/adrs/0031-auto-core-per-project-todo-task-system.md" },
-    review      = {
-      "$KB_ROOT/shared/reviews/repo-a.md",
-      "$KB_ROOT/shared/reviews/repo-b.md",
-    },
-    blocked     = { "2026-05-20-prereq" },
-  })
-  ok("validate(full happy task) succeeds", schema.validate(full).ok)
-
-  -- ── review is a string_list (multi-repo / multi-agent reviews) ──
-  ok("validate accepts multi-entry review list",
-    schema.validate(schema.blank({
-      title  = "two reviews",
-      review = { "a.md", "b.md" },
-    })).ok)
-  local bad_review = schema.blank({ title = "bad review", review = { "ok", 7 } })
-  local r_rv = schema.validate(bad_review)
-  ok("validate rejects non-string in review list",
-    (not r_rv.ok) and r_rv.field == "review", r_rv.err)
-
-  -- ── required-field absence ───────────────────────────────────
-  local missing_id = schema.blank()
-  missing_id.id = nil
-  local r_mid = schema.validate(missing_id)
-  ok("validate rejects missing required id",
-    (not r_mid.ok) and r_mid.field == "id" and r_mid.err:find("missing"), r_mid.err)
-
-  local missing_title = schema.blank()
-  missing_title.title = nil
-  local r_mt = schema.validate(missing_title)
-  ok("validate rejects missing required title",
-    (not r_mt.ok) and r_mt.field == "title", r_mt.err)
-
-  -- ── unknown top-level key ────────────────────────────────────
-  local bogus = schema.blank()
-  bogus.surprise_field = "noooo"
-  local r_un = schema.validate(bogus)
-  ok("validate rejects unknown top-level key",
-    (not r_un.ok) and r_un.err:find("unknown top%-level key"), r_un.err)
-
-  -- ── enum violations ──────────────────────────────────────────
-  local bad_status = schema.blank()
-  bad_status.status = "in_progress"  -- wrong enum
-  local r_st = schema.validate(bad_status)
-  ok("validate rejects invalid status enum",
-    (not r_st.ok) and r_st.field == "status", r_st.err)
-
-  local bad_prio = schema.blank({ priority = "urgent" })
-  local r_pr = schema.validate(bad_prio)
-  ok("validate rejects invalid priority enum",
-    (not r_pr.ok) and r_pr.field == "priority", r_pr.err)
-
-  -- ── type violations ──────────────────────────────────────────
-  local bad_tags = schema.blank({ tags = { "ok", 42 } })
-  local r_tg = schema.validate(bad_tags)
-  ok("validate rejects non-string in tags list",
-    (not r_tg.ok) and r_tg.field == "tags", r_tg.err)
-
-  local bad_version = schema.blank()
-  bad_version.version = 2
-  local r_v = schema.validate(bad_version)
-  ok("validate rejects version mismatch",
-    (not r_v.ok) and r_v.field == "version" and r_v.err:find("v1"), r_v.err)
-
-  local bad_dt = schema.blank()
-  bad_dt.created = "2026-05-25"  -- date only, no time/offset
-  local r_dt = schema.validate(bad_dt)
-  ok("validate rejects datetime without time + offset",
-    (not r_dt.ok) and r_dt.field == "created", r_dt.err)
-
-  -- ── lifecycle consistency invariants ─────────────────────────
-  local completed_no_ts = schema.blank({ status = "completed" })
-  -- blank() defaults status='open' so completed_at is unset; force the
-  -- override and expect a failure for missing completed_at.
-  completed_no_ts.completed_at = nil
-  local r_c1 = schema.validate(completed_no_ts)
-  ok("validate rejects status=completed without completed_at",
-    (not r_c1.ok) and r_c1.err:find("completed_at must be set"), r_c1.err)
-
-  local open_with_completed_at = schema.blank()
-  open_with_completed_at.completed_at = "2026-05-25T12:00:00Z"
-  local r_c2 = schema.validate(open_with_completed_at)
-  ok("validate rejects status=open with completed_at set",
-    (not r_c2.ok) and r_c2.err:find("completed_at must be nil"), r_c2.err)
-
-  local archived_no_ts = schema.blank({
-    status       = "archived",
-    completed_at = "2026-05-01T10:00:00Z",
-  })
-  archived_no_ts.archived_at = nil
-  local r_a1 = schema.validate(archived_no_ts)
-  ok("validate rejects status=archived without archived_at",
-    (not r_a1.ok) and r_a1.err:find("archived_at must be set"), r_a1.err)
-
-  local completed_ok = schema.blank({
-    status       = "completed",
-    completed_at = "2026-05-20T10:00:00-07:00",
-  })
-  ok("validate accepts status=completed with completed_at set",
-    schema.validate(completed_ok).ok)
-
-  local archived_ok = schema.blank({
-    status       = "archived",
-    completed_at = "2026-05-20T10:00:00Z",
-    archived_at  = "2026-06-17T10:00:00Z",
-  })
-  ok("validate accepts status=archived with both completed_at + archived_at set",
-    schema.validate(archived_ok).ok)
-
-  -- ── errors[] shape ───────────────────────────────────────────
-  local with_errors = schema.blank({
-    errors = {
-      {
-        field    = "blocked[0]",
-        code     = "not-found",
-        message  = "Task '2026-05-20-prereq' does not exist",
-        detected = "2026-05-25T22:00:00-07:00",
-      },
-    },
-  })
-  ok("validate accepts well-formed errors[] entry", schema.validate(with_errors).ok)
-
-  local bad_err_code = schema.blank({
-    errors = {
-      { field = "blocked[0]", code = "made-up-code",
-        message = "x", detected = "2026-05-25T22:00:00-07:00" },
-    },
-  })
-  local r_be = schema.validate(bad_err_code)
-  ok("validate rejects unknown errors[].code",
-    (not r_be.ok) and r_be.err:find("code"), r_be.err)
-
-  local extra_key_in_err = schema.blank({
-    errors = {
-      { field = "wip", code = "not-found", message = "x",
-        detected = "2026-05-25T22:00:00-07:00", extra = "boo" },
-    },
-  })
-  local r_ek = schema.validate(extra_key_in_err)
-  ok("validate rejects unknown keys inside errors[] entry",
-    (not r_ek.ok) and r_ek.err:find("unknown key"), r_ek.err)
-
-  -- ── non-table input is rejected cleanly ──────────────────────
-  local r_nt = schema.validate("not a table")
-  ok("validate rejects non-table input",
-    (not r_nt.ok) and r_nt.err:find("mapping"), r_nt.err)
-
-  -- ── decode + validate end-to-end ─────────────────────────────
-  -- Confirms the schema validator wires to the YAML decoder cleanly.
-  local yaml = require("auto-core.todo.yaml")
-  local src = table.concat({
-    'id: "2026-05-25-e2e"',
-    "version: 1",
-    'created: "2026-05-25T14:32:00-07:00"',
-    'updated: "2026-05-25T14:32:00-07:00"',
-    'status_changed: "2026-05-25T14:32:00-07:00"',
-    "status: open",
-    "title: End-to-end YAML+schema test",
-    "description: minimum viable task",
-    "",
-  }, "\n")
-  local dec = yaml.decode(src)
-  ok("e2e: yaml.decode succeeds", dec.ok, dec.err)
-  if dec.ok then
-    ok("e2e: schema.validate of decoded value succeeds",
-      schema.validate(dec.value).ok)
-  end
-end)()
-
--- ─────────────────────── 56. todo.paths + todo.header (ADR 0031 §1+§2) ───
+-- ─────────────────────── 56. todo.paths (ADR 0031 §1) ───────────────────
 print("\n[56] todo.paths — dir resolver + bucket helpers + id slug")
 ;(function()
   local ok_p, paths = pcall(require, "auto-core.todo.paths")
@@ -7078,188 +6717,18 @@ print("\n[56] todo.paths — dir resolver + bucket helpers + id slug")
   ok("make_id raises on non-ISO created", not ok_no_date)
 end)()
 
-print("\n[57] todo.header — canonical comment block")
-;(function()
-  local ok_h, header = pcall(require, "auto-core.todo.header")
-  ok("auto-core.todo.header loads", ok_h, tostring(header))
-  if not ok_h then return end
-
-  local block = header.emit()
-  ok("emit() returns a string", type(block) == "string")
-  ok("first line is the canonical HTML-comment opener",
-    block:match("^<!%-%- ─── auto%-core%.todo schema v1") ~= nil,
-    "first line: " .. (block:match("^[^\n]*") or ""))
-  ok("HAND-EDIT FREELY clause is present",
-    block:find("HAND%-EDIT FREELY") ~= nil)
-  ok("DO NOT HAND-EDIT clause is present",
-    block:find("DO NOT HAND%-EDIT") ~= nil)
-  ok("emit() does not trail with a blank line",
-    block:sub(-1) ~= "\n")
-  ok("emit() ends with the canonical HTML-comment closer",
-    block:match("─── %-%->%s*$") ~= nil,
-    "last bytes: " .. block:sub(-30))
-
-  -- ── is_present recognizes its own output ────────────────────
-  ok("is_present recognizes emit()'s output",
-    header.is_present(block .. "\n\nid: foo\n"))
-  ok("is_present returns false on non-headered body",
-    not header.is_present("id: 2026-05-25-foo\nversion: 1\n"))
-  ok("is_present returns false on non-string input",
-    not header.is_present(42))
-  ok("is_present returns false on empty string",
-    not header.is_present(""))
-end)()
+-- [57] (todo.header): removed in v0.4.1 with the Lua format modules.
 
 -- ─────────── 58-64, 66-68, 70-74, 75(g), 85, 86: removed in v0.4.0 ───────────
 -- These sections tested auto-core.todo's own Lua writer (CRUD, status, refresh,
 -- set_todo_dir, import, assign, automation firing, buffers following a move).
 -- ADR 1791532020 moved every todo write to AutoDoc's daemon and deleted that
--- writer; the shim and the assignment notifier are tested against a real daemon
--- by tests/todo-shim.lua and tests/todo-notifier.lua (tests/todo-daemon.sh), and
--- without AutoDoc by tests/todo-shim-required.lua.
+-- writer. What auto-core keeps (the store resolution and claim, buffers, the
+-- commands, the assignment notifier) is tested against a real daemon by
+-- tests/todo-where.lua and tests/todo-notifier.lua (tests/todo-daemon.sh), and
+-- without AutoDoc by tests/todo-where-required.lua.
 
--- ─────────────────────── 58a. todo.md — tolerant scalar→list coercion ─────
-print("\n[58a] todo.md — scalar→list coercion for list-of-string fields")
-;(function()
-  local ok_md, md = pcall(require, "auto-core.todo.md")
-  if not ok_md then return end
-
-  local src_adr = table.concat({
-    "---",
-    "id: 2026-05-26-coerce-adr",
-    "version: 1",
-    "status: open",
-    "title: Coerce scalar adr",
-    "description: ''",
-    "created: 2026-05-26T00:00:00Z",
-    "updated: 2026-05-26T00:00:00Z",
-    "status_changed: 2026-05-26T00:00:00Z",
-    "adr: shared/adrs/0031-foo.md",
-    "---",
-    "",
-    "# Coerce scalar adr",
-    "",
-  }, "\n")
-  local r = md.decode(src_adr)
-  ok("md.decode accepts scalar adr without error", r.ok, tostring(r.err))
-  ok("scalar adr coerced into list",
-    r.value and type(r.value.adr) == "table",
-    "got type " .. type(r.value and r.value.adr))
-  ok("coerced adr has length 1",
-    r.value and #r.value.adr == 1,
-    "got " .. tostring(r.value and #r.value.adr))
-  ok("coerced adr[1] preserves the original string value",
-    r.value and r.value.adr[1] == "shared/adrs/0031-foo.md",
-    "got " .. tostring(r.value and r.value.adr[1]))
-
-  local src_blocked = src_adr
-    :gsub("adr: shared/adrs/0031%-foo%.md", "blocked: 2026-01-01-other")
-  local r2 = md.decode(src_blocked)
-  ok("scalar blocked coerced into 1-element list",
-    r2.ok and type(r2.value.blocked) == "table" and #r2.value.blocked == 1
-      and r2.value.blocked[1] == "2026-01-01-other")
-
-  local src_tags = src_adr
-    :gsub("adr: shared/adrs/0031%-foo%.md", "tags: imported")
-  local r3 = md.decode(src_tags)
-  ok("scalar tags coerced into 1-element list",
-    r3.ok and type(r3.value.tags) == "table" and #r3.value.tags == 1
-      and r3.value.tags[1] == "imported")
-
-  -- review went list-valued in v0.2.x; a legacy scalar `review:` must
-  -- still read as a 1-element list (back-compat with pre-list files).
-  local src_review = src_adr
-    :gsub("adr: shared/adrs/0031%-foo%.md", "review: shared/reviews/x.md")
-  local r_rv = md.decode(src_review)
-  ok("scalar review coerced into 1-element list",
-    r_rv.ok and type(r_rv.value.review) == "table" and #r_rv.value.review == 1
-      and r_rv.value.review[1] == "shared/reviews/x.md",
-    tostring(r_rv.err))
-
-  local src_list = table.concat({
-    "---",
-    "id: 2026-05-26-already-list",
-    "version: 1",
-    "status: open",
-    "title: Already a list",
-    "description: ''",
-    "created: 2026-05-26T00:00:00Z",
-    "updated: 2026-05-26T00:00:00Z",
-    "status_changed: 2026-05-26T00:00:00Z",
-    "adr:",
-    "  - shared/adrs/0031-foo.md",
-    "  - shared/adrs/0032-bar.md",
-    "---",
-    "",
-  }, "\n")
-  local r4 = md.decode(src_list)
-  ok("list form still passes through unchanged",
-    r4.ok and #r4.value.adr == 2
-      and r4.value.adr[1] == "shared/adrs/0031-foo.md"
-      and r4.value.adr[2] == "shared/adrs/0032-bar.md")
-
-  -- Empty-string scalar must NOT coerce into { "" }.
-  local src_empty = src_adr:gsub("adr: shared/adrs/0031%-foo%.md", "adr: ''")
-  local r5 = md.decode(src_empty)
-  ok("empty-string scalar is not coerced into {\"\"}",
-    r5.ok and (r5.value.adr == nil
-      or r5.value.adr == ""
-      or (type(r5.value.adr) == "table" and #r5.value.adr == 0)))
-end)()
-
--- ─────────────────────── 58c. todo.schema — educational list error ─────────
-print("\n[58c] todo.schema — educational error messages for list fields")
-;(function()
-  local ok_schema, schema = pcall(require, "auto-core.todo.schema")
-  if not ok_schema then return end
-
-  local task_num = schema.blank({
-    id    = "2026-05-26-bad",
-    title = "bad",
-    adr   = 42,
-  })
-  local v = schema.validate(task_num)
-  ok("number in list slot is rejected", not v.ok)
-  ok("error field names the offending key", v.field == "adr",
-    "got " .. tostring(v.field))
-  ok("error mentions the YAML list form as a hint",
-    v.err and v.err:find("YAML list form", 1, true) ~= nil,
-    "got: " .. tostring(v.err))
-
-  local task_map = schema.blank({
-    id      = "2026-05-26-bad2",
-    title   = "bad2",
-    blocked = { not_a_seq = "x" },
-  })
-  local v2 = schema.validate(task_map)
-  ok("mapping in list slot is rejected", not v2.ok)
-  ok("mapping-error message also includes the list-form hint",
-    v2.err and v2.err:find("YAML list form", 1, true) ~= nil,
-    "got: " .. tostring(v2.err))
-
-  local task_mixed = schema.blank({
-    id    = "2026-05-26-bad3",
-    title = "bad3",
-    tags  = { "ok", 99 },
-  })
-  local v3 = schema.validate(task_mixed)
-  ok("list with non-string item is rejected", not v3.ok)
-  ok("item-error message also includes the list-form hint",
-    v3.err and v3.err:find("YAML list form", 1, true) ~= nil,
-    "got: " .. tostring(v3.err))
-end)()
-
--- auto-core.kb keeps its records in the `kb` state namespace. Every section
--- that wipes them (kb._reset_for_tests) first proves that namespace is NOT the
--- developer's real state file under stdpath("state") — a reset there would
--- erase the user's recorded primaries. Loud (an abort, which run-all reports as
--- a missing summary) rather than a skipped cell: it must never be green.
-local function assert_kb_state_sandboxed()
-  local ns = require("auto-core.state").namespace("kb", { persist = "json" })
-  local real = vim.fn.stdpath("state")
-  assert(type(ns._path) == "string" and not vim.startswith(ns._path, real),
-    "auto-core.kb state is NOT sandboxed: " .. tostring(ns._path))
-end
+-- [58a] (todo.md) and [58c] (todo.schema): removed in v0.4.1 with the Lua format modules.
 
 -- ─────────────────────── 65. todo.vars — variable store + $VAR resolver (v0.1.40) ──
 print("\n[65] todo.vars — variable store + $VAR resolver")
@@ -7407,80 +6876,7 @@ print("\n[65] todo.vars — variable store + $VAR resolver")
   package.loaded["auto-core.todo.vars"] = nil
 end)()
 
--- ───────────────────── 69. ADR-0035 Phase 2 — cron parser ──────────
-print("\n[69] ADR-0035 Phase 2 — cron parser")
-;(function()
-  local cron = require("auto-core.todo.cron")
-
-  -- 69a. parse — happy path for the standard tokens.
-  local p, err = cron.parse("0 8 * * *")
-  ok("parse `0 8 * * *` succeeds", p ~= nil, "err: " .. tostring(err))
-
-  ok("parse `*/15 * * * *` succeeds (step)",
-    cron.parse("*/15 * * * *") ~= nil)
-  ok("parse `0 0-6 * * 1-5` succeeds (range)",
-    cron.parse("0 0-6 * * 1-5") ~= nil)
-  ok("parse `15,30,45 * * * *` succeeds (list)",
-    cron.parse("15,30,45 * * * *") ~= nil)
-  ok("parse `0 8 * * 2#1` succeeds (dow ordinal — first Tuesday)",
-    cron.parse("0 8 * * 2#1") ~= nil)
-  ok("parse accepts `7` as Sunday alias",
-    cron.parse("0 0 * * 7") ~= nil)
-
-  -- 69b. parse — rejection paths.
-  ok("parse rejects empty string",
-    select(2, cron.parse("")) ~= nil)
-  ok("parse rejects too few fields",
-    select(2, cron.parse("0 0 *")) ~= nil)
-  ok("parse rejects too many fields",
-    select(2, cron.parse("0 0 * * * *")) ~= nil)
-  ok("parse rejects out-of-range minute",
-    select(2, cron.parse("60 0 * * *")) ~= nil)
-  ok("parse rejects out-of-range hour",
-    select(2, cron.parse("0 24 * * *")) ~= nil)
-  ok("parse rejects malformed dow ordinal",
-    select(2, cron.parse("0 0 * * 2#")) ~= nil)
-  ok("parse rejects ordinal K out of range",
-    select(2, cron.parse("0 0 * * 2#6")) ~= nil)
-  ok("parse rejects non-string input",
-    select(2, cron.parse(nil)) ~= nil)
-
-  -- 69c. matches — every-minute pattern always matches.
-  local star = cron.parse("* * * * *")
-  ok("matches `* * * * *` always true",
-    cron.matches(star, os.time()))
-
-  -- 69d. matches — specific minute. Fabricate a components table
-  -- to avoid wall-clock flakiness.
-  local at_0800 = {
-    year = 2026, month = 5, day = 30,  -- a Saturday
-    hour = 8, min = 0, sec = 0, wday = 7,  -- wday: Sat (Lua 7=Sat)
-  }
-  local at_0801 = vim.deepcopy(at_0800); at_0801.min = 1
-  local p_eight = cron.parse("0 8 * * *")
-  ok("matches `0 8 * * *` at 08:00", cron.matches(p_eight, at_0800))
-  ok("does NOT match `0 8 * * *` at 08:01", not cron.matches(p_eight, at_0801))
-
-  -- 69e. dow ordinal — first Tuesday of June 2026 is the 2nd.
-  -- (June 1, 2026 is a Monday; June 2 is a Tuesday → first Tuesday.)
-  local first_tue_jun = {
-    year = 2026, month = 6, day = 2,
-    hour = 8, min = 0, sec = 0, wday = 3,  -- Tue (Lua 3=Tue)
-  }
-  local second_tue_jun = vim.deepcopy(first_tue_jun); second_tue_jun.day = 9
-  local p_ordinal = cron.parse("0 8 * * 2#1")
-  ok("dow ordinal: first Tuesday at 08:00 → matches",
-    cron.matches(p_ordinal, first_tue_jun))
-  ok("dow ordinal: second Tuesday at 08:00 → does NOT match",
-    not cron.matches(p_ordinal, second_tue_jun))
-
-  -- 69f. parse_and_match convenience.
-  local m, perr = cron.parse_and_match("* * * * *", os.time())
-  ok("parse_and_match returns true for `* * * * *`", m == true and perr == nil)
-  local m_bad, perr_bad = cron.parse_and_match("not cron", os.time())
-  ok("parse_and_match returns (false, err) for malformed",
-    m_bad == false and type(perr_bad) == "string")
-end)()
+-- [69] (todo.cron): removed in v0.4.1 with automation (ADR 1791532020).
 
 -- ─────────────── 75. ADR-0038 Batches A-C ────────────────
 print("\n[75] ADR-0038 — scope-local wo writes, response_write_failed, poll re-arm, entry cache, UI debounce")
@@ -7782,30 +7178,8 @@ end)()
   vim.fn.delete(repo, "rf")
 end)()
 
--- ── (c) shared frontmatter catalog: schema owns the order; md
---        consumes it; load-time drift check already ran (module
---        loaded = invariant held).
-;(function()
-  local schema = require("auto-core.todo.schema")
-  local order = schema.FRONTMATTER_ORDER
-  ok("p76(c): schema exports FRONTMATTER_ORDER",
-    type(order) == "table" and #order >= 20)
-  ok("p76(c): identity first, errors last (emission convention intact)",
-    order[1] == "id" and order[#order] == "errors")
-  -- Encode/decode roundtrip through md still healthy (the emitter
-  -- consumes the shared order).
-  local md = require("auto-core.todo.md")
-  local task = require("auto-core.todo.schema").blank({
-    id = "2026-06-11-p76-roundtrip", created = "2026-06-11T00:00:00Z",
-    updated = "2026-06-11T00:00:00Z", status_changed = "2026-06-11T00:00:00Z",
-    status = "open", title = "p76", description = "body",
-  })
-  local enc = md.encode(task)
-  local dec = md.decode(enc)
-  ok("p76(c): md encode/decode roundtrip via the shared catalog",
-    dec.ok and dec.value and dec.value.id == "2026-06-11-p76-roundtrip",
-    vim.inspect(dec))
-end)()
+-- ── (c) the shared frontmatter catalog (todo.schema + todo.md): removed in
+--        v0.4.1 with the Lua format modules (ADR 1791532020).
 
 -- ── (d) router bookkeeping prune: seen ids whose files left the
 --        subdir are swept on refresh(); totals are observable.
@@ -7943,13 +7317,11 @@ print("\n[77] ADR-0048 Phase 1 — events.register_topics (dynamic plugin topics
     events.topic_spec("run.job:started") == nil)
 end)()
 
-print("\n[78] ADR-0048 Phase 1 — auto-core.trust + todo.bash legacy migration")
+print("\n[78] ADR-0048 Phase 1 — auto-core.trust")
 
 ;(function()
   local trust = require("auto-core.trust")
-  local automation = require("auto-core.todo.automation")
   trust._reset_for_tests()
-  automation._reset_trust_migration_for_tests()
 
   -- (a) defaults: unwritten capability is fully off.
   local s = trust.state("run.exec")
@@ -7990,54 +7362,12 @@ print("\n[78] ADR-0048 Phase 1 — auto-core.trust + todo.bash legacy migration"
   ok("p78(e): disabled capability check returns 'disabled'",
     ok_dis == false and why_dis == "disabled")
 
-  -- (f) legacy migration: pre-promotion state persisted under the
-  -- automation namespace seeds capability todo.bash exactly once.
-  trust._reset_for_tests()
-  automation._reset_trust_migration_for_tests()
-  local legacy = require("auto-core.state").namespace(
-    "auto-core.todo.automation", { persist = "json" })
-  legacy:set("bash_enabled", true)
-  legacy:set("bash_allowlist", { "^echo " })
-  legacy:set("bash_first_run_acknowledged", true)
-  local ts = automation.trust_state()
-  ok("p78(f): legacy bash_enabled migrates", ts.bash_enabled == true)
-  ok("p78(f): legacy allowlist migrates",
-    type(ts.bash_allowlist) == "table" and ts.bash_allowlist[1] == "^echo ")
-  ok("p78(f): legacy ack migrates", ts.bash_first_run_acknowledged == true)
-  ok("p78(f): migration lands in trust store",
-    trust.state("todo.bash").enabled == true)
+  -- (f)-(h) tested automation's legacy todo.bash migration into the trust
+  -- store; they went with automation in v0.4.1 (ADR 1791532020). auto-core.trust
+  -- stays: auto-run uses it.
 
-  -- (g) post-migration: automation API round-trips through the trust
-  -- store, legacy ns is no longer consulted.
-  legacy:set("bash_enabled", false)  -- direct legacy write → must be inert now
-  ok("p78(g): legacy ns writes are inert post-migration",
-    automation.trust_state().bash_enabled == true)
-  automation.set_trust({ bash_enabled = false, bash_allowlist = false })
-  ok("p78(g): set_trust round-trips via trust store",
-    automation.trust_state().bash_enabled == false
-    and trust.state("todo.bash").enabled == false
-    and trust.state("todo.bash").allowlist == nil)
-  local ok_bad2, err_bad2 = automation.set_trust({ bash_allowlist = "nope" })
-  ok("p78(g): automation error strings preserved",
-    ok_bad2 == false and err_bad2 == "bash_allowlist must be a list of strings or nil")
-
-  -- (h) fresh state (no legacy values) does NOT phantom-migrate:
-  -- defaults stay all-off and enable still requires ack.
+  -- teardown: leave the store clean for any later section.
   trust._reset_for_tests()
-  automation._reset_trust_migration_for_tests()
-  legacy:set("bash_enabled", false)
-  legacy:set("bash_allowlist", nil)
-  legacy:set("bash_first_run_acknowledged", false)
-  local ts2 = automation.trust_state()
-  ok("p78(h): clean legacy state → no phantom migration",
-    ts2.bash_enabled == false and ts2.bash_first_run_acknowledged == false)
-  local ok3, err3 = automation.set_trust({ bash_enabled = true })
-  ok("p78(h): ack gate still enforced through the shim",
-    ok3 == false and err3 == "trust_not_acknowledged")
-
-  -- teardown: leave both stores clean for any later section.
-  trust._reset_for_tests()
-  automation._reset_trust_migration_for_tests()
 end)()
 
 print("\n[79] ADR-0050 — git.watch drops `index`; git.status uses --no-optional-locks")
@@ -10832,7 +10162,7 @@ print("\n[93] auto-core.kb — primary KB, the one resolver, first-run import")
   local state  = require("auto-core.state")
   local events = require("auto-core.events")
   local wt     = require("auto-core.git.worktree")
-  local todo   = require("auto-core.todo")
+  local where  = require("auto-core.todo.where")
 
   ok("[93] the facade exposes it", core.kb == kb)
 
@@ -10928,7 +10258,7 @@ print("\n[93] auto-core.kb — primary KB, the one resolver, first-run import")
 
   -- The todo store is untouched by set_primary (ADR §5.5): snapshot the
   -- resolved dir AND the whole todo namespace before the first real set.
-  local td_before = todo.get_todo_dir()
+  local td_before = where.local_dir(where.root())
   local todo_ns_before = vim.deepcopy(state.namespace("todo"):get_all())
 
   local oks, errs = kb.set_primary(proj, { workspace = "global", root = kb_b }, { confirmed = true })
@@ -10960,8 +10290,8 @@ print("\n[93] auto-core.kb — primary KB, the one resolver, first-run import")
   kb.set_primary(proj, { workspace = "global", root = kb_a }, { confirmed = true })
   ok("[93] re-setting the same value publishes nothing", #seen == 2, tostring(#seen))
 
-  ok("[93] the todo dir is untouched by set_primary", todo.get_todo_dir() == td_before,
-    tostring(todo.get_todo_dir()) .. " vs " .. tostring(td_before))
+  ok("[93] the todo dir is untouched by set_primary", where.local_dir(where.root()) == td_before,
+    tostring(where.local_dir(where.root())) .. " vs " .. tostring(td_before))
   ok("[93] … and so is the todo state namespace (overrides, known dirs)",
     vim.deep_equal(state.namespace("todo"):get_all(), todo_ns_before))
 

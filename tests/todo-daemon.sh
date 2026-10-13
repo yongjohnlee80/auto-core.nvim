@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# tests/todo-daemon.sh — the suites that run auto-core.todo against a REAL AutoDoc
-# daemon (ADR 1791532020): tests/todo-shim.lua and tests/todo-notifier.lua.
+# tests/todo-daemon.sh — the suites that run auto-core's todo surface against a
+# REAL AutoDoc daemon (ADR 1791532020): tests/todo-where.lua (the store resolution,
+# the claim, buffers, vars and the commands) and tests/todo-notifier.lua.
 #
 #   AUTOCORE_TEST_AUTODOC=/path/to/autodoc            a checkout (its lua/ is autodoc.nvim)
 #   AUTOCORE_TEST_AUTODOC_BIN=/path/to/autodoc/binary  built from it, protocol >= 20
-#   tests/todo-daemon.sh [shim|notifier]
+#   tests/todo-daemon.sh [where|notifier]
 #
 # Each suite runs in its own HOME and XDG dirs, and starts its own daemon from
 # its own config (socket, state and data under a temp root), so nothing reaches a
@@ -53,7 +54,7 @@ run_suite() {
 }
 
 only="${1:-}"
-[ -z "$only" ] || [ "$only" = shim ]     && run_suite "todo shim (real daemon)" tests/todo-shim.lua
+[ -z "$only" ] || [ "$only" = where ]    && run_suite "todo where (real daemon)" tests/todo-where.lua
 [ -z "$only" ] || [ "$only" = notifier ] && run_suite "todo notifier (real daemon)" tests/todo-notifier.lua
 echo "──────────────────────────────────────────────"
 [ "$overall" -eq 0 ] && echo "todo-daemon: OK" || echo "todo-daemon: FAILED"

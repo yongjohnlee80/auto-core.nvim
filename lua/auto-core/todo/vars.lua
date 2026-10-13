@@ -41,9 +41,8 @@
 ---     replaces the `$VAR` segment.
 ---  2. Path starts with `~` or `/` → absolute, expand and return.
 ---  3. Otherwise (plain relative) → caller's responsibility
----     (auto-core.todo's refresh treats these as KB-relative for
----     backwards compat; auto-finder's panel tries multi-root
----     candidates). This module returns `{ ok = true, path = <rel>,
+---     (AutoDoc treats these as KB-relative, ADR 1791532020 D2).
+---     This module returns `{ ok = true, path = <rel>,
 ---     unresolved = false }` so the caller can layer its own logic.
 ---
 ---@module 'auto-core.todo.vars'

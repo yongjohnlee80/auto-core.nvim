@@ -3,10 +3,11 @@
 ---Per ADR-0031 §3.1, workspace resolution is auto-core's
 ---responsibility — callers of this module receive resolved absolute
 ---paths; they do not pass `workspace_root` or `cwd`. The override
----layer (state namespace `todo.dir_overrides`) wires in via the
----public API surface in `auto-core.todo` (task 9); functions here
----accept an optional explicit override so callers can short-circuit
----the state lookup when they already know the answer.
+---layer (state namespace `todo.dir_overrides`) wires in through
+---`auto-core.todo.where`; functions here accept an optional explicit
+---override so callers can short-circuit the state lookup when they
+---already know the answer. AutoDoc's daemon owns the store itself
+---(ADR 1791532020); nothing here writes to it.
 ---@module 'auto-core.todo.paths'
 
 local fs_path = require("auto-core.fs.path")
@@ -78,8 +79,9 @@ function M.default_todo_dir(ws_root)
 end
 
 ---INTERNAL — pure helper. **External callers MUST NOT use this to
----"get the active todo-dir".** Call `require("auto-core.todo")
----.get_todo_dir()` instead — it is the single override-aware
+---"get the active todo-dir".** Resolve the store through
+---`auto-core.todo.where` (`where.ensure`, or `where.cached` /
+---`where.local_dir` when it must not wait) — the single override-aware
 ---resolver (the one source of truth) every component shares.
 ---
 ---Why this warning exists (2026-06-01 bug, see
@@ -93,9 +95,9 @@ end
 ---
 ---This function takes an EXPLICIT `override` and stays pure (no
 ---state access) precisely so it's testable; the stateful entry
----`auto-core.todo.get_todo_dir()` reads `dir_overrides` and
+---`auto-core.todo.where.local_dir()` reads `dir_overrides` and
 ---delegates here with the resolved value. If you find yourself
----about to call `resolve_todo_dir(nil)`, you want `get_todo_dir()`.
+---about to call `resolve_todo_dir(nil)`, you want `where`.
 ---@param override string?  REQUIRED for external use; nil = workspace fallback (internal only)
 ---@return string absolute path
 function M.resolve_todo_dir(override)
@@ -219,9 +221,8 @@ end
 
 ---Absolute path of the on-disk file backing `id`, searching every
 ---bucket of `td` (flat buckets first, then archived YYYY/MM); nil
----when no bucket holds the file. Shared by `todo.init` and
----`todo.automation` — previously each carried its own copy
----(ADR-0038 Batch C).
+---when no bucket holds the file. (Its Lua writers went with the
+---cutover, ADR 1791532020; a read-only helper.)
 ---@param td string  resolved todo dir
 ---@param id string
 ---@return string?
