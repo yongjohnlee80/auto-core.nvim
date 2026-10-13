@@ -53,7 +53,9 @@ local before = snapshot()
 
 local toasts = {}
 local real_notify = vim.notify
-vim.notify = function(msg, level, opts) toasts[#toasts + 1] = tostring(msg); return real_notify(msg, level, opts) end
+-- Recorded, not passed on: under `nvim -l` an ERROR-level notify inside a
+-- :command raises (E5113), and these cells read the message, not the screen.
+vim.notify = function(msg) toasts[#toasts + 1] = tostring(msg) end
 local function has_required(s) return tostring(s):find("AutoDoc required", 1, true) ~= nil end
 
 section("the forwarding shim is gone")
