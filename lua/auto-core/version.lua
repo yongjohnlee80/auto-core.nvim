@@ -967,6 +967,10 @@ return {
   -- sync_managed; topics core.kb:managed_provided/managed_synced). Additive.
   -- v0.3.2: todo.scan_async, a cooperative active-first scan for UI
   -- consumers (#58). Additive; todo.scan is unchanged.
-  version     = "0.3.2",
+  -- v0.3.3: the mailbox wake ctx carries the arrival's facts (arrival_from,
+  -- arrival_subject, arrival_msg_kind, arrival_command, arrival_ok/code/error,
+  -- arrival_read_error) and response envelopes carry command, code and from
+  -- (#2). Additive; ctx.mailbox is unchanged.
+  version     = "0.3.3",
   api_version = "0.1",
 }
