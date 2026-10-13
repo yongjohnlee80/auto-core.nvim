@@ -55,11 +55,15 @@ mutants=(
   "$W|required|the AutoDoc-required notice repeats|  if _warned[key] then return end|  if false then return end"
   "$D|required|a fast event waits|  if vim.in_fast_event() then|  if false then"
   "$N|notifier|a failed send is acked past|            stopped = true\n            break|            stopped = false"
-  "$N|notifier|no duplicate check before writing|  if delivered(rec, mid) then return \"done\" end|  if false then return \"done\" end"
   "$N|notifier|a recipient not hosted here holds the cursor|          if rec and send(at, store, rec, M.message_id(store.id, seq),|          if (not rec) or send(at, store, rec, M.message_id(store.id, seq),"
   "$N|notifier|a new consumer replays the retained log|  if floor == nil then floor = M.watermark(store.id) end|  if floor == nil then floor = 0 end"
   "$N|notifier|a resync notifies nobody|        local rec = M.local_recipient(row.assignee)|        local rec = nil"
   "$N|notifier|the timer keeps running while disconnected|local function on_disconnected()\n  stop_timer(_timer); _timer = nil|local function on_disconnected()"
+  "$N|notifier|an unregistered recipient is not held|  if _started_at and now_ms() - _started_at < grace then return \"hold\" end|  if false then return \"hold\" end"
+  "$N|notifier|no poll when a mailbox registers|        vim.schedule(function() if _running then M.poll_all() end end)|        vim.schedule(function() end)"
+  "$N|notifier|the watermark passes a held change|      if handled and not held then acked = seq end|      acked = seq"
+  "$N|notifier|the ack passes a held change|    if acked then\n      if ack(at, acked) then bump_watermark(store.id, acked) end|    if acked then\n      ack(at, changes[#changes] and changes[#changes].seq or acked)\n      if true then bump_watermark(store.id, acked) end"
+  "$N|notifier|the held change's re-read is written twice|  if delivered(rec, mid) then return \"done\" end|  if false then return \"done\" end"
 )
 
 killed=0; survived=0; broken=0; i=0
