@@ -10,6 +10,50 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+## [Unreleased] — the todo cutover: auto-core.todo forwards to AutoDoc
+
+Patch, released as v0.3.4 (ADR 1791532020 §3 step 3, D4). **Ship it only in the
+cutover set** (auto-core, auto-finder, auto-agents and autovim's lock together),
+and stop every Neovim before updating.
+
+- **`auto-core.todo` is a forwarding shim.** Every public function keeps its name
+  and its synchronous shape and calls AutoDoc's `todos.*` verbs (protocol 20)
+  through autodoc.nvim's client, reached by a soft `require`; it waits for the
+  answer, bounded (15 s). **Lua's own write path is deleted**: the renderer, the
+  atomic writer, the move, the reference validator, the refresh loop and the
+  `known_dirs` upsert.
+- **AutoDoc is required.** Without autodoc.nvim (v0.1.39+) and its binary, every
+  function answers "AutoDoc required", once as a notice; nothing is written.
+- **The first call claims the store** (`todos.claim`, with `legacy_workspace` =
+  the Neovim root, so legacy `$WORKSPACE` refs are rewritten once). The daemon
+  writes `.todo-list/.autodoc-owner`. A store this Neovim claimed and later finds
+  released is never claimed again; `:AutoCoreTodoClaim` (and `todo.claim()`)
+  claims it on purpose, `todo.release()` releases it.
+- **New:** `todo.remove_malformed(path)`, `todo.move_store(dir)`, `todo.claim()`,
+  `todo.release()`; tasks carry `rev`, `path` and `file_path`; `known_dirs`
+  entries carry `claimed` and `store_id`.
+- **Changed:** assigning an open task makes it in-progress (D1); `update` refuses
+  `assignee`; `set_todo_dir` needs an existing directory; `refresh` never reads
+  the archive and reports `malformed` (and `skipped`, the same count);
+  `get_todo_dir` never waits (before the daemon answers once it is the directory
+  Lua resolves); `vars.set`/`vars.remove` also set AutoDoc's user vars.
+- **Removed behaviour:** the `automated` status, `automation.fire` (refuses),
+  `automation.start` (a no-op), automation's own file writer, and `import` (D3).
+  `automation.lua`, `cron.lua` and `import.lua` stay loadable until v0.4.0.
+- **The assignment notifier** (`auto-core.todo.notifier`) turns AutoDoc's
+  `assign` changes into mailbox messages: the consumer `auto-core:<instance_id>`,
+  delivering only to agents registered in this Neovim, ids
+  `todo-<store_id>-<seq>`, at-least-once (written before the ack; a delivered id
+  is not written again). It starts with the mailbox router and polls on connect,
+  after an assignment made here, and every 5 s while connected.
+- **`core.todo.assignee:changed` is no longer published.** The notifier is the
+  only sender, so auto-agents' older subscriber cannot deliver a second copy.
+- **Tests:** `tests/todo-shim-required.lua` (no AutoDoc; in `run-all.sh`),
+  `tests/todo-shim.lua` and `tests/todo-notifier.lua` against a real daemon
+  (`tests/todo-daemon.sh`), `tests/todo-shim-mutants.sh`, and the cutover
+  rehearsal on a copy of a store (`tests/todo-cutover-rehearsal.sh`). The smoke
+  sections that tested the deleted Lua writer are removed.
+
 ## [v0.3.3] — 2026-10-13 — the wake names the arrival
 
 Patch. Additive to `auto-core.mailbox`:
