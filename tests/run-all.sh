@@ -200,6 +200,17 @@ run_standalone "float offsets + repo_at" tests/float-offset-and-repo-at.lua
 run_standalone "ui.modal confirm (ADR-0195 P1)" tests/adr0195-ui-modal.lua
 run_standalone "fs.scan + dir:dirty + git.status v2 (ADR-0200)" tests/adr0200-fs-scan.lua
 run_standalone "mailbox wake ctx: arrival sender, subject, response outcome" tests/mailbox-wake-ctx.lua
+run_standalone "todo shim without AutoDoc (ADR 1791532020)" tests/todo-shim-required.lua
+# The shim and the assignment notifier against a REAL AutoDoc daemon: they need an
+# autodoc checkout and its binary (tests/todo-daemon.sh). Without them the run says
+# so; it is not a pass.
+if [ -n "${AUTOCORE_TEST_AUTODOC_BIN:-}" ] && [ -n "${AUTOCORE_TEST_AUTODOC:-}" ]; then
+  echo "── todo shim + notifier (real AutoDoc daemon) ─"
+  if bash tests/todo-daemon.sh | sed 's/^/ /'; [ "${PIPESTATUS[0]}" -ne 0 ]; then overall=1; fi
+else
+  echo "── todo shim + notifier (real AutoDoc daemon) ─"
+  echo "   ⚠ NOT RUN: set AUTOCORE_TEST_AUTODOC and AUTOCORE_TEST_AUTODOC_BIN (tests/todo-daemon.sh)"
+fi
 run_pty
 run_bench
 
