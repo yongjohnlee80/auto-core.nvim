@@ -6730,6 +6730,18 @@ end)()
 
 -- [58a] (todo.md) and [58c] (todo.schema): removed in v0.4.1 with the Lua format modules.
 
+-- auto-core.kb keeps its records in the `kb` state namespace. Every section
+-- that wipes them (kb._reset_for_tests) first proves that namespace is NOT the
+-- developer's real state file under stdpath("state") — a reset there would
+-- erase the user's recorded primaries. Loud (an abort, which run-all reports as
+-- a missing summary) rather than a skipped cell: it must never be green.
+local function assert_kb_state_sandboxed()
+  local ns = require("auto-core.state").namespace("kb", { persist = "json" })
+  local real = vim.fn.stdpath("state")
+  assert(type(ns._path) == "string" and not vim.startswith(ns._path, real),
+    "auto-core.kb state is NOT sandboxed: " .. tostring(ns._path))
+end
+
 -- ─────────────────────── 65. todo.vars — variable store + $VAR resolver (v0.1.40) ──
 print("\n[65] todo.vars — variable store + $VAR resolver")
 ;(function()
