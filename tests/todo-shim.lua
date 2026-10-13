@@ -178,11 +178,14 @@ run("assign: D1, events, never assignee:changed", function()
 end)
 
 run("a stale rev is an error, never retried", function()
-  -- Between the shim's todos.get and its write, edit the file by hand.
+  -- Between the shim's todos.get and its write, edit the file by hand, ONCE: a
+  -- shim that re-read and retried would then succeed, and must not.
   local file = store .. "/deferred/2026-10-01-deferred.md"
+  local edited = false
   daemon._set_transport(function(method, params, cb)
     daemon._real_request(method, params, function(r, e)
-      if method == "todos.get" then
+      if method == "todos.get" and not edited then
+        edited = true
         env.write(file, env.read(file) .. "\nA hand edit.\n")
       end
       cb(r, e)

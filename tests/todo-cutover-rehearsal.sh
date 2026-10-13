@@ -21,7 +21,7 @@ export AUTOCORE_TEST_AUTODOC AUTOCORE_TEST_AUTODOC_BIN
 R="$(mktemp -d "${TMPDIR:-/tmp}/todo-rehearsal.XXXXXX")"
 export REH_ROOT="$R"
 stop_daemons() { pkill -f "^$AUTOCORE_TEST_AUTODOC_BIN --serve" 2>/dev/null || true; }
-trap 'stop_daemons; rm -rf "$R"' EXIT
+trap 'stop_daemons; rm -rf "$R" 2>/dev/null' EXIT
 mkdir -p "$R/kb" "$R/nvim-plugins" "$R/home" "$R/xdg/config" "$R/xdg/data" "$R/xdg/state" "$R/xdg/cache" "$R/run" "$R/tmp"
 chmod 700 "$R/run"
 cp -a "$REH_STORE" "$R/kb/.todo-list"
