@@ -118,7 +118,8 @@ timer:start(1, 0, function()
   timer:close()
 end)
 vim.wait(2000, function() return fast_err ~= nil end, 10)
-ok("a call in a fast event is refused, not waited", tostring(fast_err):find("fast event", 1, true), fast_err)
+ok("a call in a fast event is refused by the shim's own guard, before any work",
+  tostring(fast_err):find("auto-core.todo: called from a fast event", 1, true), fast_err)
 
 section("the removed surfaces refuse")
 local oki, ierr = pcall(todo.import, "/x", {})
