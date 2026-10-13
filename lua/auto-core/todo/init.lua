@@ -1,279 +1,216 @@
----auto-core.todo — per-project task store (ADR-0031).
+---auto-core.todo — a forwarding shim to AutoDoc's todo system (ADR 1791532020).
 ---
----This module is the canonical write path for tasks. Family plugins
----(auto-finder, auto-agents) and host scripts should call into here
----rather than touching YAML files directly.
+---AutoDoc's daemon owns the todo format, its rules and every write. From
+---auto-core v0.3.4 this module keeps its public functions and their synchronous
+---shape, so auto-agents' mailbox verbs and auto-finder keep working, but each
+---call goes to the daemon's `todos.*` verbs (protocol 20) and waits for the
+---answer, bounded (`auto-core.todo.daemon`). Lua's own write path is deleted, not
+---bypassed: there is no Lua fallback, so without AutoDoc every call answers
+---"AutoDoc required". The shim itself goes at v0.4.0 (ADR §3 step 5).
 ---
----Phase 1 surface (task 4 — Core CRUD):
----  M.add(spec)               create a new task; returns its id
----  M.get(id)                 read + validate one task by id
----  M.list(opts)              filter tasks; returns array
----  M.update(id, patch)       update hand-editable content fields
----  M.remove(id)              hard-delete a task
+---  M.add(spec)               create a task; returns its id (raises on error)
+---  M.get(id)                 one task, or (nil, err)
+---  M.list(opts)              tasks, filtered ({status, tag, assignee, priority, has_errors})
+---  M.scan() / M.scan_async   tasks and malformed files
+---  M.update(id, patch)       hand-editable fields (not status, not assignee)
+---  M.status(id, new) / M.archive(id)
+---  M.assign(id, who, reason) assigning an open task makes it in-progress (D1)
+---  M.remove(id)
+---  M.remove_malformed(path)  delete one malformed file
+---  M.move_store(dir)         move the store directory; its claim moves with it
+---  M.refresh()               reconcile the active buckets
+---  M.set_todo_dir / get_todo_dir / known_dirs
+---  M.claim() / M.release()   the cutover's claim and its rollback
 ---
----Coming in later phases: status / archive / refresh / set_todo_dir /
----known_dirs / import — see ADR-0031 §3.2 for the full surface.
+---Tasks come back with the daemon's fields (the same YAML names) plus `rev` (the
+---SHA-256 the daemon checks writes against), `path` (store-relative) and
+---`file_path` (absolute). The first call for a store claims it
+---(`auto-core.todo.where`). `assign` still publishes `core.todo.assignee:changed`
+---for auto-agents' subscriber, which sends the recipient's message.
 ---@module 'auto-core.todo'
 
-local md     = require("auto-core.todo.md")
-local schema = require("auto-core.todo.schema")
-local paths  = require("auto-core.todo.paths")
+local daemon  = require("auto-core.todo.daemon")
+local where   = require("auto-core.todo.where")
+local buffers = require("auto-core.todo.buffers")
 local fs_path = require("auto-core.fs.path")
 
--- The component axis for this module's log records. It is an AXIS, not a
--- prefix: log.warn(component, msg) takes the component FIRST, so passing a
--- formatted message there makes every emission its own unique component
--- value -- unusable as the filter an operator actually reaches for. Same
--- idiom as mailbox/router.lua's LOG_COMPONENT.
+-- The component axis for this module's log records (an axis, not a prefix:
+-- log.warn(component, msg) takes the component first).
 local LOG_COMPONENT = "auto-core.todo"
 
 local M = {}
 
--- ─── Field-policy catalog (kept in sync with schema.lua) ──────
+M.AUTOMATION_REMOVED = "automation was removed (ADR 1791532020)"
 
----Top-level fields a hand-editor (or `update()` caller) may modify.
----Anything outside this set is system-managed and refused by update().
----@type table<string, true>
-local HAND_EDITABLE = {
-  title       = true,
-  description = true,
-  due         = true,
-  priority    = true,
-  assignee    = true,
-  tags        = true,
-  adr         = true,
-  review      = true,
-  blocked     = true,
-  -- Note: `status` IS hand-editable per ADR §2 (direct edits honored,
-  -- side effects API-gated). But status changes have lifecycle-
-  -- timestamp side effects (completed_at, archived_at) owned by
-  -- M.status(). So `update()` rejects status patches and asks the
-  -- caller to use M.status(id, new). Direct edits in the .md file
-  -- frontmatter remain free.
-  --
-  -- Removed in v0.1.36 (MD pivot): notes, wip, pr, links. These all
-  -- now live as free-form markdown in the body (the description
-  -- field) — natural placement and not required by auto-finder
-  -- (which consumes frontmatter only).
+-- The daemon's statuses; `automated` went with automation.
+local STATUSES = {
+  open = true, ["in-progress"] = true, deferred = true, completed = true, archived = true,
 }
 
--- ─── time helpers ─────────────────────────────────────────────
+-- The fields add accepts from a spec (the daemon's Spec).
+local SPEC_FIELDS = {
+  "id", "title", "description", "status", "due", "priority", "assignee",
+  "tags", "adr", "review", "blocked",
+}
 
----Current wall-clock as ISO 8601 with explicit local offset, e.g.
----`"2026-05-25T14:32:00-07:00"`. Falls back to UTC `"Z"` if the host
----libc can't produce a `%z` offset.
+-- ─── helpers ──────────────────────────────────────────────────
+
+local function publish(topic, payload)
+  local ok, events = pcall(require, "auto-core.events")
+  if ok and events and type(events.publish) == "function" then
+    pcall(events.publish, topic, payload)
+  end
+end
+
+---report tells the user once per session when AutoDoc is unreachable; other
+---errors are only returned.
+---@param err string
+local function report(err)
+  err = tostring(err)
+  if err:find("AutoDoc required", 1, true) then
+    where.warn_once("required", err)
+  elseif err:find("did not answer", 1, true) or err:find("older than protocol 20", 1, true) then
+    where.warn_once("unreachable", "auto-core.todo: " .. err)
+  end
+end
+
+---op runs fn(ctx) for the session's store, inside the daemon coroutine, and
+---waits. Returns (true, ...) or (false, err).
+---@param fn fun(ctx: table): ...
+local function op(fn)
+  local res = { daemon.sync(function()
+    return fn(where.ensure(where.root()))
+  end) }
+  if not res[1] then report(res[2]) end
+  return unpack(res)
+end
+
+---Current wall-clock as ISO 8601 with its local offset, e.g.
+---`"2026-05-25T14:32:00-07:00"`.
 ---@return string
 function M._now_iso()
   local s = os.date("%Y-%m-%dT%H:%M:%S%z", os.time())
   if type(s) ~= "string" then
-    -- os.date() with `*t` returns a table — the absence of a leading `*`
-    -- in the format above means we should always get a string, but
-    -- defensively handle the API's loose typing.
     return tostring(os.date("!%Y-%m-%dT%H:%M:%SZ", os.time()))
   end
-  -- Convert "+0700" / "-0700" → "+07:00" / "-07:00" for strict ISO.
   s = s:gsub("([+%-]%d%d)(%d%d)$", "%1:%2")
-  -- Some libcs return empty offset; normalize to "Z" (UTC).
-  if not s:match("[Z+%-]%d?%d?:?%d?%d?$") then
-    s = s .. "Z"
-  end
+  if not s:match("[Z+%-]%d?%d?:?%d?%d?$") then s = s .. "Z" end
   return s
 end
 
--- ─── filesystem helpers ───────────────────────────────────────
-
----Atomic write — delegates to the shared `fs.atomic.write` primitive
----(ADR-0038 Batch E — previously one of three drifting inline
----copies). Creates the parent directory if missing (bucket dirs are
----created lazily on first write).
----@param final_path string
----@param text string
----@return boolean ok, string? err
-local function atomic_write(final_path, text)
-  return require("auto-core.fs.atomic").write(final_path, text, { mkdir = true })
-end
-
----Read a UTF-8 file into a string. Returns `(text, nil)` on success,
----`(nil, err)` otherwise.
----@param path string
----@return string? text, string? err
-local function read_file(path)
-  local fd, open_err = vim.uv.fs_open(path, "r", 0)
-  if not fd then return nil, "fs_open: " .. tostring(open_err) end
-  local stat, stat_err = vim.uv.fs_fstat(fd)
-  if not stat then
-    pcall(vim.uv.fs_close, fd)
-    return nil, "fs_fstat: " .. tostring(stat_err)
+---decorate adds the absolute file_path to a daemon task.
+local function decorate(ctx, t)
+  if type(t) == "table" and type(t.path) == "string" and type(ctx.store) == "string" then
+    t.file_path = ctx.store .. "/" .. t.path
   end
-  local data, read_err = vim.uv.fs_read(fd, stat.size, 0)
-  pcall(vim.uv.fs_close, fd)
-  if not data then return nil, "fs_read: " .. tostring(read_err) end
-  return data
+  return t
 end
 
--- ─── state namespace (ADR-0031 §3.3, [[auto-family-state-ownership]]) ─
-
----Lazy-cached handle to `auto-core.state.namespace('todo', {persist='json'})`.
----Keys layered under this namespace:
----  • `dir_overrides[<workspace_root>] -> <path>`
----  • `known_dirs[<absolute_dir>]      -> {workspace_roots, todo_dir, last_touched}`
----@type any?
-local _state_handle = nil
-
----@return any   the auto-core.state namespace for todos
-local function state()
-  if _state_handle then return _state_handle end
-  local ok, mod = pcall(require, "auto-core.state")
-  if not ok or type(mod) ~= "table" or type(mod.namespace) ~= "function" then
-    error("auto-core.todo: auto-core.state module unavailable")
-  end
-  _state_handle = mod.namespace("todo", { persist = "json" })
-  return _state_handle
-end
-
----Read the dir override for a given workspace root, or nil if unset.
----@param ws_root string
----@return string?
-local function get_override(ws_root)
-  local overrides = state():get("dir_overrides") or {}
-  local v = overrides[ws_root]
-  if type(v) == "string" and v ~= "" then return v end
-  return nil
-end
-
----Upsert the known-dirs registry. `workspace_roots` is a list so one
----override dir can serve multiple workspaces (per ADR-0031 §3.3 +
----lector round-2 caution). On every call we append the current
----workspace root if it isn't already in the list and refresh
----`last_touched`.
----@param td string         absolute todo dir
----@param ws_root string    current workspace root
----@param now string        ISO timestamp
-local function upsert_known(td, ws_root, now)
-  local ns        = state()
-  local known     = ns:get("known_dirs") or {}
-  local entry     = known[td]
-  if not entry then
-    entry = { workspace_roots = {}, todo_dir = td, last_touched = now }
-  else
-    entry.todo_dir     = td       -- defensive: ensure invariant
-    entry.last_touched = now
-    entry.workspace_roots = entry.workspace_roots or {}
-  end
-  local seen = false
-  for _, r in ipairs(entry.workspace_roots) do
-    if r == ws_root then seen = true; break end
-  end
-  if not seen then
-    table.insert(entry.workspace_roots, ws_root)
-  end
-  known[td] = entry
-  ns:set("known_dirs", known)
-end
-
--- ─── current todo-dir resolver ────────────────────────────────
-
----Resolve the absolute todo dir for the current workspace. Honors
----a per-workspace override from the state namespace; falls back to
----`<workspace_root>/.todo-list/`.
----@return string
-function M._todo_dir()
-  local ws = paths.workspace_root()
-  local override = get_override(ws)
-  return paths.resolve_todo_dir(override)
-end
-
----Expose the upsert helper to internal callers (M.add / M.refresh /
----future M.import). Kept on M with a leading underscore — internal,
----but reachable from the same module via `M._upsert_known`.
----@param td string
----@param now string
-function M._upsert_known(td, now)
-  upsert_known(td, paths.workspace_root(), now)
-end
-
--- ─── render: validate + encode + header ───────────────────────
-
----Validate the task and emit the canonical MD+frontmatter
----representation (frontmatter + HTML-comment header + H1 +
----description body, terminated by a final newline).
----@param t table
----@return string text, string? err
-local function render_task(t)
-  local v = schema.validate(t)
-  if not v.ok then
-    return "", "schema: " .. tostring(v.err)
-  end
-  return md.encode(t), nil
-end
-
--- ─── id resolution: walk buckets to find a task file ──────────
-
----Returns the absolute path of the on-disk file backing `id` if one
----exists in any bucket of the current todo dir; `nil` otherwise.
----@param td string  resolved todo dir
----@param id string
----@return string?
-local function find_task_path(td, id)
-  -- Canonical implementation lives in paths.find_task_file — shared
-  -- with todo.automation so the bucket inventory + archive layout
-  -- have exactly one source of truth (ADR-0038 Batch C).
-  return paths.find_task_file(td, id)
-end
-
--- ─── public: add ──────────────────────────────────────────────
-
--- normalize `adr` / `review` document references to the portable
--- `$VAR/...` symbolic form on write (cross-machine-symbolic-refs
--- convention). The symbolization logic itself lives in
--- `auto-core.todo.vars.symbolize_path` (v0.1.47) so the same rules
--- back both this writer-side normalization AND display consumers
--- (the auto-agents diff panel winbar). See that function for the
--- full rule set: KB_ROOT → WORKSPACE → user vars → HOME, longest
--- prefix wins; absolute kept only when no known root contains it.
-local function symbolize_ref(p)
-  return require("auto-core.todo.vars").symbolize_path(p)
-end
-
----Rewrite a task's `adr[]` + `review` reference fields in place to
----the portable symbolic form. Idempotent — symbolic refs pass
----through untouched. Returns true iff any field was changed (so
----refresh can decide whether the file needs a rewrite).
----@param task table
----@return boolean changed
-local function normalize_ref_paths(task)
-  local changed = false
-  if type(task.adr) == "table" then
-    for i, p in ipairs(task.adr) do
-      local np = symbolize_ref(p)
-      if np ~= p then task.adr[i] = np; changed = true end
+---absolute_refs resolves `$VAR/…` in adr/review with Lua's vars: callers build
+---refs with Neovim's meaning of a var, and the daemon symbolizes an absolute path
+---its own way (design note §3, "refs cross the wire absolute"). An unresolved
+---var and a bare relative ref pass through.
+---@param t table spec or patch (modified in place)
+local function absolute_refs(t)
+  local ok, vars = pcall(require, "auto-core.todo.vars")
+  if not ok then return end
+  for _, field in ipairs({ "adr", "review" }) do
+    local v = t[field]
+    if type(v) == "string" then v = { v }; t[field] = v end
+    if type(v) == "table" then
+      for i, p in ipairs(v) do
+        if type(p) == "string" and p:sub(1, 1) == "$" then
+          local r = vars.resolve_path(p)
+          if r and r.ok and type(r.path) == "string" and r.path:sub(1, 1) == "/" then
+            v[i] = r.path
+          end
+        end
+      end
     end
   end
-  if type(task.review) == "table" then
-    for i, p in ipairs(task.review) do
-      local np = symbolize_ref(p)
-      if np ~= p then task.review[i] = np; changed = true end
-    end
-  end
-  return changed
 end
 
----Create a new task. `spec` is a partial that must at minimum
----provide `title`; everything else takes sensible defaults.
----
----Returns the generated id on success. Errors loudly on validation
----or write failure.
----
----**Reference-validation contract (ADR-0038 S5, decided
----document-only):** `add` validates SHAPE (schema) but NOT reference
----EXISTENCE — `adr:` / `review:` paths and `blocked:` ids that don't
----resolve are accepted here and surfaced later as `errors[]` entries
----by `refresh()` / `scan()` (read-side validation). This is
----deliberate: writes stay cheap, and broken refs are a render-time
----concern the panel reports without blocking task capture.
----
+---get_task reads one task inside the coroutine; raises on error.
+local function get_task(ctx, id)
+  local t, err = daemon.rpc("todos.get", { ctx.at, id })
+  if err then daemon.fail(err) end
+  return decorate(ctx, t)
+end
+
+local function list_page(ctx, opts)
+  local params = { ctx.at }
+  if opts and next(opts) ~= nil then params[2] = opts end
+  local l, err = daemon.rpc("todos.list", params)
+  if err then daemon.fail(err) end
+  return l or {}
+end
+
+local function filters_of(opts)
+  local f = {}
+  if type(opts) == "table" then
+    if type(opts.tag) == "string" then f.tag = opts.tag end
+    if type(opts.assignee) == "string" then f.assignee = opts.assignee end
+    if type(opts.priority) == "string" then f.priority = opts.priority end
+    if opts.has_errors then f.has_errors = true end
+  end
+  return f
+end
+
+local function with(f, buckets)
+  local o = vim.deepcopy(f)
+  if buckets then o.buckets = buckets end
+  return o
+end
+
+local function malformed_entry(ctx, m)
+  local rel = tostring(m.path or "")
+  return {
+    file_path = (ctx.store or "") .. "/" .. rel,
+    bucket    = rel:match("^([^/]+)/") or "",
+    filename  = fs_path.basename(rel),
+    err       = tostring(m.reason or "malformed"),
+  }
+end
+
+---collect lists into out: the active buckets (or one status) and, when asked,
+---the archive month by month. Runs inside the coroutine.
+---@param ctx table
+---@param out { tasks: table[], malformed: table[] }
+---@param status string? one status, or nil for every bucket
+---@param f table filters
+---@param part "active"|"archive"|"all"
+local function collect(ctx, out, status, f, part)
+  local function add(listing)
+    for _, t in ipairs(daemon.list_of(listing.tasks)) do
+      out.tasks[#out.tasks + 1] = decorate(ctx, t)
+    end
+    for _, m in ipairs(daemon.list_of(listing.malformed)) do
+      out.malformed[#out.malformed + 1] = malformed_entry(ctx, m)
+    end
+  end
+  if status and status ~= "archived" then
+    add(list_page(ctx, with(f, { status })))
+    return
+  end
+  if not status and part ~= "archive" then
+    add(list_page(ctx, f))
+  end
+  if part == "active" and not status then return end
+  local months = list_page(ctx, { buckets = { "archived" } })
+  for _, p in ipairs(daemon.list_of(months.partitions)) do
+    if type(p) == "table" and type(p.month) == "string" then
+      add(list_page(ctx, with(f, { "archived/" .. p.month })))
+    end
+  end
+end
+
+-- ─── public: add / get / list / scan ─────────────────────────
+
+---Create a task. `spec.title` is required. Returns the id; raises on error, as
+---it always did. With an assignee it is an assignment: an open task becomes
+---in-progress and the assignee is told (D1, ADR §2.3).
 ---@param spec table
----@param internal { origin: string? }?  -- auto-core-INTERNAL managed-field injection (ADR-0038 Batch C); external callers omit
+---@param internal table? no longer accepted (it carried automation's origin)
 ---@return string id
 function M.add(spec, internal)
   if type(spec) ~= "table" then
@@ -282,338 +219,116 @@ function M.add(spec, internal)
   if type(spec.title) ~= "string" or spec.title == "" then
     error("auto-core.todo.add: spec.title is required (non-empty string)")
   end
-
-  local now = M._now_iso()
-  local id  = spec.id or paths.make_id(now, spec.title)
-
-  local task = schema.blank({
-    id             = id,
-    created        = now,
-    updated        = now,
-    status_changed = now,
-    status         = spec.status or "open",
-    title          = spec.title,
-    description    = spec.description or "",
-  })
-
-  -- Copy any other hand-editable fields the caller supplied.
-  for k, v in pairs(spec) do
-    if HAND_EDITABLE[k] then task[k] = v end
+  if spec.status == "automated" or (type(internal) == "table" and internal.origin ~= nil) then
+    error("auto-core.todo.add: " .. M.AUTOMATION_REMOVED)
   end
-
-  -- Managed-field injection for auto-core-INTERNAL callers (ADR-0038
-  -- Batch C): automation's clone-on-fire previously created the clone
-  -- and immediately re-read + re-wrote the whole file just to stamp
-  -- `origin`. Accepting it here folds the backref into this one
-  -- atomic write — one fewer round-trip per fire, and the backref is
-  -- crash-durable from birth. `internal` is NOT part of the
-  -- hand-editable surface; external callers (the `todos.add` mailbox
-  -- verb) never pass it.
-  if type(internal) == "table" and type(internal.origin) == "string" then
-    task.origin = internal.origin
+  local s = {}
+  for _, k in ipairs(SPEC_FIELDS) do
+    if spec[k] ~= nil and spec[k] ~= vim.NIL then s[k] = vim.deepcopy(spec[k]) end
   end
-
-  -- Lifecycle-timestamp sanity for explicit non-open spawn (rare):
-  -- callers may pass status="completed" + completed_at, or
-  -- status="archived" + archived_at. We don't auto-derive these in
-  -- add() — caller is responsible for supplying coherent state, and
-  -- schema.validate() will reject inconsistencies.
-  if spec.status == "completed" then
-    task.completed_at = spec.completed_at or now
-  elseif spec.status == "archived" then
-    task.archived_at  = spec.archived_at  or now
-    task.completed_at = spec.completed_at  -- may be nil; that's OK
-  end
-
-  local td   = M._todo_dir()
-  local file = paths.task_file_path(td, id, task.status, task.archived_at)
-
-  -- Refuse to clobber an existing task with the same id.
-  if fs_path.exists(file) then
-    error("auto-core.todo.add: task '" .. id .. "' already exists at " .. file)
-  end
-  -- Also refuse if any bucket carries the same id (rare, but possible
-  -- if a manual move left a stray copy).
-  local stray = find_task_path(td, id)
-  if stray then
-    error("auto-core.todo.add: task '" .. id .. "' already exists at " .. stray)
-  end
-
-  normalize_ref_paths(task)
-
-  local text, render_err = render_task(task)
-  if render_err then error("auto-core.todo.add: " .. render_err) end
-
-  local ok, err = atomic_write(file, text)
-  if not ok then error("auto-core.todo.add: write failed: " .. tostring(err)) end
-
-  pcall(M._upsert_known, td, now)
-
-  -- v0.1.46: announce the mutation so UI consumers re-render. add /
-  -- update / remove previously fired nothing — only status / assign /
-  -- refresh did — so a task created via the API (or the `todos.add`
-  -- mailbox verb) never reached the auto-finder panel until some
-  -- other event triggered a render. `core.todo:changed` closes that
-  -- gap. Payload `{ kind, id }` lets subscribers filter if they care.
-  local ok_ev, events = pcall(require, "auto-core.events")
-  if ok_ev and events and type(events.publish) == "function" then
-    pcall(events.publish, "core.todo:changed", { kind = "add", id = id })
-  end
-
-  return id
+  absolute_refs(s)
+  local ok, t = op(function(ctx)
+    local task, err = daemon.rpc("todos.add", { ctx.at, s })
+    if err and err.code == daemon.NOT_A_STORE then
+      -- a new project's store: register (done), claim (done), then scaffold
+      local _, serr = daemon.rpc("todos.scaffold", { ctx.at })
+      if serr then daemon.fail(serr) end
+      task, err = daemon.rpc("todos.add", { ctx.at, s })
+    end
+    if err then daemon.fail(err) end
+    return decorate(ctx, task)
+  end)
+  if not ok then error("auto-core.todo.add: " .. tostring(t), 0) end
+  publish("core.todo:changed", { kind = "add", id = t.id })
+  return t.id
 end
 
--- ─── public: get ──────────────────────────────────────────────
-
----Read + validate one task by id. Returns `(task, nil)` on success,
----`(nil, err)` if the file isn't found or fails validation.
+---One task by id: `(task)` or `(nil, err)`.
 ---@param id string
 ---@return table? task, string? err
 function M.get(id)
   if type(id) ~= "string" or id == "" then
     return nil, "auto-core.todo.get: id must be a non-empty string"
   end
-  local td   = M._todo_dir()
-  local file = find_task_path(td, id)
-  if not file then
-    return nil, "task '" .. id .. "' not found in " .. td
-  end
-  local text, read_err = read_file(file)
-  if not text then return nil, read_err end
-  local dec = md.decode(text)
-  if not dec.ok then return nil, "md.decode: " .. tostring(dec.err) end
-  local v = schema.validate(dec.value)
-  if not v.ok then return nil, "schema: " .. tostring(v.err) end
-  return dec.value
+  local ok, t = op(function(ctx) return get_task(ctx, id) end)
+  if not ok then return nil, t end
+  return t
 end
 
--- ─── public: list ─────────────────────────────────────────────
-
----List tasks, optionally filtered. `opts` keys (all optional):
----  status     - one of the four enum values, or nil for all buckets
----  tag        - returns only tasks whose tags[] contains the value
----  assignee   - exact-match filter
----  priority   - exact-match enum filter
----  has_errors - boolean; true → only with non-empty errors[]
----
----Order: lexicographic by filename within each bucket, buckets in
----fixed order open → deferred → completed → archived (then YYYY/MM
----ascending). The 1-based index assigned by the auto-agents admin
----panel is the position in this exact ordering for the OPEN bucket.
+---List tasks. `opts` (all optional): `status` (one bucket; none lists every
+---bucket, the archive included, as before), `tag`, `assignee`, `priority`,
+---`has_errors`. Raises when the daemon cannot be asked.
 ---@param opts table?
 ---@return table[]
 function M.list(opts)
   opts = opts or {}
-  local td  = M._todo_dir()
-  local out = {}
-
-  ---@param file_path string
-  ---@return table?
-  local function load_and_filter(file_path)
-    local text = read_file(file_path)
-    if not text then return nil end
-    local dec = md.decode(text)
-    if not dec.ok then return nil end
-    local task = dec.value
-    if type(task) ~= "table" then return nil end
-    -- Schema-validate during list as well so a corrupt file doesn't
-    -- silently corrupt a result set. Invalid files are skipped (a
-    -- future refresh-time validation surface will report them).
-    if not schema.validate(task).ok then return nil end
-
-    if opts.status and task.status ~= opts.status then return nil end
-    if opts.assignee and task.assignee ~= opts.assignee then return nil end
-    if opts.priority and task.priority ~= opts.priority then return nil end
-    if opts.tag then
-      local hit = false
-      for _, t in ipairs(task.tags or {}) do
-        if t == opts.tag then hit = true; break end
-      end
-      if not hit then return nil end
-    end
-    if opts.has_errors then
-      local has = type(task.errors) == "table" and #task.errors > 0
-      if not has then return nil end
-    end
-    return task
-  end
-
-  -- Canonical walk via paths.walk (ADR-0038 Batch C). The status
-  -- filter doubles as the bucket filter — paths.walk visits only the
-  -- matching bucket dir, preserving the prior short-circuit.
-  paths.walk(td, function(file_path)
-    local t = load_and_filter(file_path)
-    if t then out[#out + 1] = t end
-  end, opts.status)
-
+  if opts.status ~= nil and not STATUSES[opts.status] then return {} end
+  local ok, out = op(function(ctx)
+    local o = { tasks = {}, malformed = {} }
+    collect(ctx, o, opts.status, filters_of(opts), "all")
+    return o.tasks
+  end)
+  if not ok then error("auto-core.todo.list: " .. tostring(out), 0) end
   return out
 end
 
--- ─── public: scan ─────────────────────────────────────────────
-
----Walk every `.md` file under the resolved todo dir and partition
----into validated tasks + malformed entries. Where `M.list()` quietly
----skips files that fail decode or schema validation (correct
----behavior for consumers that just want "the data"), `M.scan()`
----surfaces those files so a UI can RENDER them with an error
----indicator — otherwise the task silently disappears from the
----panel and the user has no way to know it's broken.
----
----Return shape:
----
----  {
----    tasks     = <table[]>,      -- same shape as M.list() result
----    malformed = <table[]>,      -- one entry per file that didn't
----                                 -- parse / validate
----  }
----
----Each malformed entry:
----
----  {
----    file_path = "/abs/path/.../<id>.md",
----    bucket    = "open" | "deferred" | "completed" | "archived",
----    filename  = "<id>.md",   -- basename, for UI display when the
----                              -- file's own id field is unreliable
----    err       = "<short error string>",  -- whichever stage failed
----  }
----
----Ordering: tasks come back in the same canonical order as M.list();
----malformed entries are returned in the order encountered during
----the directory walk (bucket-prioritised + lexicographic by
----filename within each bucket).
----@return fun(file_path: string, bucket: string) load
----@return { tasks: table[], malformed: table[] } result
-local function scan_reader()
-  local tasks_out     = {}
-  local malformed_out = {}
-  local result = { tasks = tasks_out, malformed = malformed_out }
-
-  ---@param file_path string
-  ---@param bucket string
-  local function load(file_path, bucket)
-    local text, read_err = read_file(file_path)
-    if not text then
-      malformed_out[#malformed_out + 1] = {
-        file_path = file_path,
-        bucket    = bucket,
-        filename  = fs_path.basename(file_path),
-        err       = "read: " .. tostring(read_err or "(unknown)"),
-      }
-      return
-    end
-    local dec = md.decode(text)
-    if not dec.ok then
-      malformed_out[#malformed_out + 1] = {
-        file_path = file_path,
-        bucket    = bucket,
-        filename  = fs_path.basename(file_path),
-        err       = tostring(dec.err or "md.decode failed"),
-      }
-      return
-    end
-    local task = dec.value
-    if type(task) ~= "table" then
-      malformed_out[#malformed_out + 1] = {
-        file_path = file_path,
-        bucket    = bucket,
-        filename  = fs_path.basename(file_path),
-        err       = "md.decode returned non-table value",
-      }
-      return
-    end
-    local v = schema.validate(task)
-    if not v.ok then
-      malformed_out[#malformed_out + 1] = {
-        file_path = file_path,
-        bucket    = bucket,
-        filename  = fs_path.basename(file_path),
-        err       = "schema: " .. tostring(v.err or "(unknown)"),
-      }
-      return
-    end
-    tasks_out[#tasks_out + 1] = task
-  end
-
-  return load, result
-end
-
----Synchronous read-only scan, retaining malformed entries alongside tasks.
+---Every task and every malformed file, archive included:
+---`{ tasks, malformed = { {file_path, bucket, filename, err} } }`.
 ---@return { tasks: table[], malformed: table[] }
 function M.scan()
-  local td = M._todo_dir()
-  local load, result = scan_reader()
-  -- Canonical walk via paths.walk (ADR-0038 Batch C); `load`'s
-  -- (file_path, bucket) signature matches the walker callback.
-  paths.walk(td, load)
-
-  return result
+  local ok, out = op(function(ctx)
+    local o = { tasks = {}, malformed = {} }
+    collect(ctx, o, nil, {}, "all")
+    return o
+  end)
+  if not ok then error("auto-core.todo.scan: " .. tostring(out), 0) end
+  return out
 end
 
----Cooperative scan for UI consumers. Nothing is read before returning.
----Active buckets are delivered first (`done=false`), then archives
----(`done=true`). File decoding yields every 8ms or 32 files so growing
----archives do not monopolize the editor. Results accumulate in one table;
----consumers retaining an intermediate snapshot should copy it.
----The directory is captured at invocation; cancel on location changes.
+---scan for UI consumers, asynchronous: nothing is asked before it returns. The
+---active buckets arrive first (`done = false`), then the archive (`done = true`),
+---accumulated in one table. Cancel drops every later reply.
 ---@param callback fun(result: table?, done: boolean, err: string?)
 ---@return fun() cancel
 function M.scan_async(callback)
-  local td = M._todo_dir()
-  local load, result = scan_reader()
   local cancelled = false
-  local archived = false
-  local files, index = nil, 1
-
-  local tick
-  tick = function()
+  local root = where.root()
+  local result = { tasks = {}, malformed = {} }
+  local function fail(err)
     if cancelled then return end
-    local ok, err = pcall(function()
-      if not files then
-        files = {}
-        local function collect(file, bucket)
-          files[#files + 1] = { file, bucket }
-        end
-        if archived then
-          paths.walk(td, collect, "archived")
-        else
-          for _, bucket in ipairs(paths.FLAT_BUCKETS) do
-            paths.walk(td, collect, bucket)
-          end
-        end
-      end
-      local started, count = vim.uv.hrtime(), 0
-      while index <= #files do
-        local file = files[index]
-        load(file[1], file[2])
-        index, count = index + 1, count + 1
-        if count >= 32 or vim.uv.hrtime() - started >= 8000000 then break end
-      end
-    end)
-    if not ok then
-      cancelled = true
-      callback(nil, true, tostring(err))
-      return
-    end
-    if index > #files then
-      callback(result, archived)
-      if cancelled or archived then return end
-      archived, files, index = true, nil, 1
-    end
-    if not cancelled then vim.defer_fn(tick, 1) end
+    cancelled = true
+    report(err)
+    callback(nil, true, tostring(err))
   end
-  vim.defer_fn(tick, 1)
+  vim.schedule(function()
+    if cancelled then return end
+    daemon.run(function()
+      collect(where.ensure(root), result, nil, {}, "active")
+    end, function(ok, err)
+      if cancelled then return end
+      if not ok then return fail(err) end
+      callback(result, false)
+      if cancelled then return end
+      daemon.run(function()
+        collect(where.ensure(root), result, nil, {}, "archive")
+      end, function(ok2, err2)
+        if cancelled then return end
+        if not ok2 then return fail(err2) end
+        callback(result, true)
+      end)
+    end)
+  end)
   return function() cancelled = true end
 end
 
--- ─── public: update ───────────────────────────────────────────
+-- ─── public: update / status / archive / assign / remove ─────
 
----Update one or more content fields on an existing task. `patch` may
----contain any of the hand-editable fields EXCEPT `status` (status
----transitions live on `M.status()`, coming in task 5). Bumps
----`updated`. Re-validates the resulting task before writing.
+---Change hand-editable fields: title, description, due, priority, tags, adr,
+---review, blocked. `status` goes through M.status and `assignee` through
+---M.assign (the daemon's rule: an assignment goes only through todos.assign).
 ---@param id string
 ---@param patch table
----@return table? updated_task, string? err
+---@return table? task, string? err
 function M.update(id, patch)
   if type(id) ~= "string" or id == "" then
     return nil, "auto-core.todo.update: id must be a non-empty string"
@@ -621,1015 +336,358 @@ function M.update(id, patch)
   if type(patch) ~= "table" then
     return nil, "auto-core.todo.update: patch must be a table"
   end
-
-  -- Refuse patches that touch managed or status fields. The caller
-  -- should use `M.status(id, new)` for status changes (task 5).
-  for k in pairs(patch) do
-    if k == "status" then
-      return nil, "auto-core.todo.update: status changes belong on M.status(id, new); refusing patch"
-    end
-    if not HAND_EDITABLE[k] then
-      return nil, "auto-core.todo.update: field '" .. tostring(k)
-        .. "' is not hand-editable (or unknown)"
-    end
+  if patch.status ~= nil then
+    return nil, "auto-core.todo.update: status changes belong on M.status(id, new); refusing patch"
   end
-
-  local td   = M._todo_dir()
-  local file = find_task_path(td, id)
-  if not file then return nil, "task '" .. id .. "' not found in " .. td end
-
-  local text, read_err = read_file(file)
-  if not text then return nil, read_err end
-  local dec = md.decode(text)
-  if not dec.ok then return nil, "md.decode: " .. tostring(dec.err) end
-  local task = dec.value
-  if type(task) ~= "table" then
-    return nil, "task '" .. id .. "' decoded to non-table"
+  if patch.assignee ~= nil then
+    return nil, "auto-core.todo.update: an assignment goes through M.assign(id, assignee, reason) "
+      .. "(todos.assign); refusing patch"
   end
-
-  for k, v in pairs(patch) do task[k] = v end
-  normalize_ref_paths(task)
-  task.updated = M._now_iso()
-
-  local v = schema.validate(task)
-  if not v.ok then return nil, "schema: " .. tostring(v.err) end
-
-  local rendered, render_err = render_task(task)
-  if render_err then return nil, render_err end
-  local ok, err = atomic_write(file, rendered)
-  if not ok then return nil, "write: " .. tostring(err) end
-
-  -- v0.1.46: announce the mutation (see M.add for rationale).
-  local ok_ev, events = pcall(require, "auto-core.events")
-  if ok_ev and events and type(events.publish) == "function" then
-    pcall(events.publish, "core.todo:changed", { kind = "update", id = id })
-  end
-
-  return task
+  local p = vim.deepcopy(patch)
+  absolute_refs(p)
+  local ok, t = op(function(ctx)
+    local cur = get_task(ctx, id)
+    local task, err = daemon.rpc("todos.update", { ctx.at, id, cur.rev, p })
+    if err then daemon.fail(err) end
+    return decorate(ctx, task)
+  end)
+  if not ok then return nil, t end
+  buffers.reload(t.file_path)
+  publish("core.todo:changed", { kind = "update", id = id })
+  return t
 end
 
--- ─── refresh helpers ─────────────────────────────────────────
-
----Approximate "older than 28 days" check on an ISO 8601 timestamp.
----Timezone-naive: extracts the YYYY-MM-DD prefix from both `iso_ts`
----and `now`, treats each as midnight in os.time's local frame, and
----compares the difference. Accuracy is within ~1 day at the edges —
----ample for a 28-day archive window. Returns false on malformed
----input (defensive — refresh shouldn't crash on garbage data).
----@param iso_ts string
----@param now_iso string
----@return boolean
-local function older_than_28_days(iso_ts, now_iso)
-  if type(iso_ts) ~= "string" or type(now_iso) ~= "string" then return false end
-  local function date_secs(s)
-    local y, mo, d = s:match("^(%d+)%-(%d+)%-(%d+)")
-    if not y then return nil end
-    local yn, mon, dn = tonumber(y), tonumber(mo), tonumber(d)
-    if not (yn and mon and dn) then return nil end
-    return os.time({
-      year = yn, month = mon, day = dn,
-      hour = 0, min = 0, sec = 0,
+---move_effects keeps buffers on a task the daemon moved or rewrote, and tells
+---the panel when its status changed.
+local function move_effects(before, after)
+  if type(before.file_path) == "string" and type(after.file_path) == "string" then
+    if before.file_path ~= after.file_path then
+      buffers.retarget(before.file_path, after.file_path)
+    else
+      buffers.reload(after.file_path)
+    end
+  end
+  if before.status ~= after.status then
+    publish("core.todo.status:changed", {
+      id = after.id, from = before.status, to = after.status, at = M._now_iso(),
     })
   end
-  local a, b = date_secs(iso_ts), date_secs(now_iso)
-  if not a or not b then return false end
-  return (b - a) > 28 * 86400
 end
 
----Walk every YAML task file under `td`. Returns the list of absolute
----paths, in stable order (open → in-progress → automated → deferred
----→ completed → archived YYYY/MM ascending, lexicographic within
----each leaf dir). Files that can't be statted are silently skipped.
----@param td string
----@return string[]
-local function walk_task_files(td)
-  -- Canonical walk via paths.walk (ADR-0038 Batch C).
-  local out = {}
-  paths.walk(td, function(file_path)
-    out[#out + 1] = file_path
-  end)
-  return out
-end
-
----Retarget every loaded buffer naming `from_path` onto `to_path`.
----
----A task file physically moves between bucket directories on every
----status change, and a buffer opened on it keeps naming the OLD path.
----The user's next `:w` then RECREATES the task in the bucket it just
----left — a duplicate carrying whatever stale frontmatter the buffer
----still held. Reported case: a task edited in `in-progress` while an
----agent completed it, saved back into `in-progress` as a new task.
----
----Unsaved user edits are never discarded: a modified buffer is only
----renamed, so the edits survive, and the user is warned that it happened.
----Their next `:w` is then refused with `E13: File exists (add ! to
----override)` rather than silently clobbering the frontmatter auto-core
----wrote — verified, and locked by a cell. (`:set writeany` defeats that
----refusal; a caller who has opted out of Neovim's overwrite protection
----keeps what they chose.) An unmodified buffer is reloaded, so the reader
----sees the frontmatter auto-core just rewrote.
----@param from_path string
----@param to_path string
-local function retarget_buffers(from_path, to_path)
-  if from_path == to_path then return end
-  local function apply()
-    for _, b in ipairs(vim.api.nvim_list_bufs()) do
-      if vim.api.nvim_buf_is_valid(b)
-        and not vim.api.nvim_buf_is_loaded(b)
-        and vim.api.nvim_buf_get_name(b) == from_path then
-        -- ALREADY UNLOADED before the move (`:bdelete`, a restored session).
-        -- Only the NAME survives, and that name is the resurrection vector:
-        -- reopen it with `:buffer` and the next `:w` recreates the vacated
-        -- bucket. Deleting it is safe because Neovim REFUSES to unload a
-        -- modified buffer (`E89: No write since last change`), so unloaded
-        -- implies unmodified — there is no unsaved work to lose. Same policy
-        -- the stale sweep below applies to a name set_name leaves behind;
-        -- this applies it to one that was already there.
-        pcall(vim.api.nvim_buf_delete, b, { force = true })
-      elseif vim.api.nvim_buf_is_loaded(b)
-        and vim.api.nvim_buf_get_name(b) == from_path then
-        local modified = vim.api.nvim_get_option_value("modified", { buf = b })
-        local ok_name = pcall(vim.api.nvim_buf_set_name, b, to_path)
-        if ok_name then
-          -- set_name leaves the old name behind as an unlisted buffer;
-          -- drop it, or a later `:w` from it resurrects the old bucket.
-          for _, stale in ipairs(vim.api.nvim_list_bufs()) do
-            if stale ~= b
-              and vim.api.nvim_buf_get_name(stale) == from_path
-              and not vim.api.nvim_get_option_value("modified", { buf = stale })
-            then
-              pcall(vim.api.nvim_buf_delete, stale, { force = true })
-            end
-          end
-          if not modified then
-            -- Unmodified: adopt the file auto-core just wrote. `edit!` also
-            -- clears the modified flag set_name raises on the rename.
-            vim.api.nvim_buf_call(b, function()
-              pcall(vim.cmd, "silent! keepalt edit!")
-            end)
-          else
-            -- The user has unsaved edits and we just renamed the buffer under
-            -- them. Say so: without this they meet a bare "E13: File exists"
-            -- on their next :w with no idea the path moved, and THEY are the
-            -- one who has to resolve the divergence.
-            -- log.notify, not log.warn + a bare vim.notify: its doc says
-            -- "Use this instead of bare vim.notify(...) so every visible toast
-            -- also lands in the ring for :AutoCoreLog triage". The pair emits
-            -- the same event twice in two shapes AND lets the toast bypass the
-            -- level filter, so a user who set ERROR still gets it.
-            local ok_log, log = pcall(require, "auto-core.log")
-            if ok_log and log and type(log.notify) == "function" then
-              pcall(log.notify, string.format(
-                "task moved while you had unsaved edits; buffer %d now points at %s (was %s). "
-                .. "Your edits are intact; :w will refuse with E13 until you resolve the divergence.",
-                b, to_path, from_path),
-                { level = "warn", component = LOG_COMPONENT })
-            end
-          end
-        end
-      end
-    end
-  end
-  -- Buffer APIs are unavailable in a fast event (uv callbacks, fs watchers).
-  if vim.in_fast_event() then vim.schedule(apply) else apply() end
-end
-
----Reload unmodified open buffers naming `path` after an in-place rewrite.
----An unmodified buffer is reloaded so the reader sees the frontmatter
----auto-core just rewrote, preventing a subsequent `:w` from reverting the
----disk file with stale memory (MF2).
----
----A modified buffer is preserved intact without reload. Neovim's built-in
----file modification time (mtime) check guards against silent clobbering:
----a subsequent bare `:w` triggers a W12 conflict prompt ("The file has been
----changed since reading it!!!") rather than silently overwriting disk state.
----Like retarget_buffers, we notify via log.notify so the user is informed
----that the underlying file changed while they held unsaved edits.
----@param path string
-local function reload_buffers(path)
-  local function apply()
-    for _, b in ipairs(vim.api.nvim_list_bufs()) do
-      if vim.api.nvim_buf_is_valid(b)
-        and vim.api.nvim_buf_is_loaded(b)
-        and vim.api.nvim_buf_get_name(b) == path
-      then
-        local modified = vim.api.nvim_get_option_value("modified", { buf = b })
-        if not modified then
-          vim.api.nvim_buf_call(b, function()
-            pcall(vim.cmd, "silent! keepalt edit!")
-          end)
-        else
-          local ok_log, log = pcall(require, "auto-core.log")
-          if ok_log and log and type(log.notify) == "function" then
-            pcall(log.notify, string.format(
-              "task modified on disk while you had unsaved edits; buffer %d points at %s. "
-              .. "Your edits are intact; :w will prompt (file changed on disk) until you resolve the divergence.",
-              b, path),
-              { level = "warn", component = LOG_COMPONENT })
-          end
-        end
-      end
-    end
-  end
-  if vim.in_fast_event() then vim.schedule(apply) else apply() end
-end
-
----Move a task file from `from_path` to `to_path` atomically. The
----write-new-then-unlink-old order matches M.status() so a crash mid-
----move leaves a duplicate that refresh can recover from on the next
----run.
----
----THE SINGLE CHOKE POINT for a task file changing path: status(),
----assign() and refresh() all route through here, so the buffer
----retarget cannot be forgotten by a future fourth caller. Before
----this was centralised the same write-new-then-unlink-old sequence
----was open-coded three times, with two different unlink calls.
----`what` names the CALLER for the unlink-failure warning. Consolidating
----three open-coded move sequences into this one function would otherwise
----have cost observability: M.status()'s warning used to name the task id
----and the operation, and every failure would now be reported as a
----refresh. An operator diagnosing a stray duplicate from the log is
----exactly who needs to know which API produced it.
----@param from_path string
----@param to_path string
----@param text string
----@param what string? caller tag for diagnostics (e.g. `status(id, completed)`)
----@return boolean ok, string? err
-local function move_task(from_path, to_path, text, what)
-  if from_path == to_path then
-    -- In-place rewrite (assign without bucket move, errors:[] etc. — task 7).
-    local wok, werr = atomic_write(from_path, text)
-    if not wok then return false, werr end
-    reload_buffers(from_path)
-    return true
-  end
-  local wok, werr = atomic_write(to_path, text)
-  if not wok then return false, werr end
-  local _, uerr = vim.uv.fs_unlink(from_path)
-  if uerr then
-    local ok_log, log = pcall(require, "auto-core.log")
-    if ok_log and log and type(log.warn) == "function" then
-      pcall(log.warn, LOG_COMPONENT, string.format(
-        "%s: moved %s → %s but failed to unlink old: %s",
-        what or "move", from_path, to_path, tostring(uerr)))
-    end
-  end
-  retarget_buffers(from_path, to_path)
-  return true
-end
-
--- ─── reference validation (task 7) ────────────────────────────
-
----Resolve the KB root for KB-relative reference paths. Returns nil
----when no KB root resolves — in which case KB-relative refs are not
----validated (we can't check what we can't find).
----
----ADR 1791209945 §5: this delegates to `auto-core.kb.root()`, the ONE
----KB resolver (the project's primary > `$AUTO_AGENTS_KB_ROOT` > the
----first-run import from auto-agents). It used to carry its own env
----chain (ROOT > READ[0] > WRITE, v0.1.37) that had already diverged
----from `todo/vars.lua`'s `$KB_ROOT` built-in — that one also asked
----auto-agents — so a `$KB_ROOT/...` ref and a bare KB-relative ref in
----the same task could resolve against different roots. Smoke section
----[61] locks the delegated order.
----@return string?
-local function kb_root()
-  return require("auto-core.kb").root()
-end
-
----Build the canonical {field, code} lookup key for stable `detected`
----preservation across refreshes.
----@param field string
----@param code string
----@return string
-local function err_key(field, code) return field .. "|" .. code end
-
----Index a task's existing `errors:` list by {field, code} key so a
----refresh can preserve `detected` for errors that persist.
----@param task table
----@return table<string, table>
-local function index_existing_errors(task)
-  local out = {}
-  if type(task.errors) == "table" then
-    for _, e in ipairs(task.errors) do
-      if type(e) == "table" and type(e.field) == "string"
-        and type(e.code) == "string"
-      then
-        out[err_key(e.field, e.code)] = e
-      end
-    end
-  end
-  return out
-end
-
----Run the v1 reference-validation pass on `task` and return the new
----errors list. Validates:
----  • adr[i]     — KB-relative path must exist
----  • wip        — local filepath/directory must exist
----  • review     — KB-relative path must exist
----  • blocked[i] — task id must resolve in any bucket of `td`
----`pr` and `links` are NOT network-checked.
----
----For each detected error, look up its {field, code} in the existing
----list and preserve `detected` if found; otherwise stamp with `now`.
----@param task table
----@param td string
----@param now string
----@return table[]  new_errors (may be empty)
-local function compute_errors(task, td, now)
-  local prior = index_existing_errors(task)
-  local out = {}
-  local kb = kb_root()
-
-  ---@param field string
-  ---@param code string
-  ---@param message string
-  local function add(field, code, message)
-    local existing = prior[err_key(field, code)]
-    out[#out + 1] = {
-      field    = field,
-      code     = code,
-      message  = message,
-      detected = (existing and existing.detected) or now,
-    }
-  end
-
-  -- adr[i] — `$VAR/...` substitution (v0.1.40), absolute path,
-  -- or KB-relative.
-  if type(task.adr) == "table" then
-    local vars = require("auto-core.todo.vars")
-    for i, p in ipairs(task.adr) do
-      if type(p) == "string" and p ~= "" then
-        local r = vars.resolve_path(p)
-        if r.unresolved then
-          add("adr[" .. (i - 1) .. "]", "unresolved-variable",
-            "variable '$" .. tostring(r.var_name) .. "' is not defined "
-              .. "on this machine — set it in the Vars section or as an "
-              .. "environment variable")
-        else
-          local abs
-          if r.path:sub(1, 1) == "/" then
-            -- $VAR substitution or absolute path
-            abs = r.path
-          elseif kb then
-            -- legacy KB-relative path
-            abs = fs_path.join(kb, p)
-          end
-          if abs and not fs_path.exists(abs) then
-            add("adr[" .. (i - 1) .. "]", "not-found",
-              "path '" .. p .. "' does not exist (resolved: " .. abs .. ")")
-          end
-        end
-      end
-    end
-  end
-
-  -- wip — local path.
-  if type(task.wip) == "string" and task.wip ~= "" then
-    local expanded = vim.fn.expand(task.wip)
-    if not fs_path.exists(expanded) then
-      add("wip", "not-found",
-        "working-dir/filepath '" .. task.wip .. "' does not exist")
-    end
-  end
-
-  -- review[i] — `$VAR/...` substitution (v0.1.40), absolute path, or
-  -- KB-relative. List-valued since v0.2.x (multi-repo / multi-agent
-  -- tasks carry more than one review doc).
-  if type(task.review) == "table" then
-    local vars = require("auto-core.todo.vars")
-    for i, p in ipairs(task.review) do
-      if type(p) == "string" and p ~= "" then
-        local r = vars.resolve_path(p)
-        if r.unresolved then
-          add("review[" .. (i - 1) .. "]", "unresolved-variable",
-            "variable '$" .. tostring(r.var_name) .. "' is not defined "
-              .. "on this machine — set it in the Vars section or as an "
-              .. "environment variable")
-        else
-          local abs
-          if r.path:sub(1, 1) == "/" then
-            abs = r.path
-          elseif kb then
-            abs = fs_path.join(kb, p)
-          end
-          if abs and not fs_path.exists(abs) then
-            add("review[" .. (i - 1) .. "]", "not-found",
-              "path '" .. p .. "' does not exist (resolved: " .. abs .. ")")
-          end
-        end
-      end
-    end
-  end
-
-  -- blocked[i] — task id, must resolve in current todo dir.
-  if type(task.blocked) == "table" then
-    for i, ref_id in ipairs(task.blocked) do
-      if type(ref_id) == "string" and ref_id ~= "" then
-        if not find_task_path(td, ref_id) then
-          add("blocked[" .. (i - 1) .. "]", "not-found",
-            "Task '" .. ref_id .. "' does not exist in this workspace")
-        end
-      end
-    end
-  end
-
-  -- ADR-0035 Phase 3: automation surface validation. For automated
-  -- templates, run the same content validator the auto-finder
-  -- buffer-attach (Phase 3) uses, then merge its entries here so
-  -- refresh-side / headless callers see the same `errors[]` shape.
-  -- Stable `detected` per (field, code) by re-stamping against
-  -- `prior` exactly like the local `add` helper does — keeps
-  -- refresh idempotent when nothing actually changed about the
-  -- file's content.
-  if task.status == "automated" then
-    local ok_auto, automation = pcall(require, "auto-core.todo.automation")
-    if ok_auto and automation and type(automation.validate) == "function" then
-      local auto_entries = automation.validate(task) or {}
-      for _, e in ipairs(auto_entries) do
-        local existing = prior[err_key(e.field, e.code)]
-        out[#out + 1] = {
-          field    = e.field,
-          code     = e.code,
-          message  = e.message,
-          detected = (existing and existing.detected) or e.detected or now,
-        }
-      end
-    end
-  end
-
-  return out
-end
-
--- ─── public: refresh ─────────────────────────────────────────
-
----Reconcile the todo directory: every readable task file is checked
----against its status (and lifecycle timestamps); if its current
----directory disagrees with the status-derived bucket, the file is
----moved. Auto-archive rule: any `status:completed` task whose
----`completed_at` is older than 28 days is transitioned to archived
----(via the same path M.status uses) — bumps `status_changed`, sets
----`archived_at`, preserves `completed_at`, moves the file.
----
----Returns a summary table:
----  {
----    scanned    = <int>,   -- total YAML files walked
----    moved      = <int>,   -- files relocated to a different bucket
----    archived   = <int>,   -- completed→archived via the 28-day rule
----    skipped    = <int>,   -- files that couldn't be parsed/validated
----    errors_set = <int>,   -- files now carrying ≥1 errors[] entry
----    rewritten  = <int>,   -- files re-rendered in place to update
----                          --   errors[] without moving buckets
----  }
----@return table summary
-function M.refresh()
-  local td  = M._todo_dir()
-  local now = M._now_iso()
-
-  local summary = {
-    scanned    = 0,
-    moved      = 0,
-    archived   = 0,
-    skipped    = 0,
-    errors_set = 0,
-    rewritten  = 0,
-  }
-
-  if not fs_path.is_dir(td) then return summary end
-
-  for _, file in ipairs(walk_task_files(td)) do
-    summary.scanned = summary.scanned + 1
-
-    local text, _read_err = read_file(file)
-    if not text then
-      summary.skipped = summary.skipped + 1
-    else
-      local dec = md.decode(text)
-      if not dec.ok or type(dec.value) ~= "table" then
-        summary.skipped = summary.skipped + 1
-      else
-        local task = dec.value
-        if not schema.validate(task).ok then
-          summary.skipped = summary.skipped + 1
-        else
-          local needs_write = false
-
-          -- 0. Self-heal legacy/bare ref paths to the portable
-          --    `$VAR/...` symbolic form (v0.1.46). A task authored
-          --    before the convention — or by an agent that supplied
-          --    an absolute / bare-relative adr — gets rewritten on
-          --    the next refresh. Runs BEFORE compute_errors so the
-          --    reference validation sees the symbolic form.
-          if normalize_ref_paths(task) then
-            needs_write = true
-          end
-
-          -- 1. Auto-archive rule: completed → archived if completed_at
-          --    is older than 28 days. The rule fires regardless of
-          --    where the file currently sits on disk (a misplaced
-          --    completed file STILL ages out).
-          if task.status == "completed"
-              and type(task.completed_at) == "string"
-              and older_than_28_days(task.completed_at, now)
-          then
-            task.status         = "archived"
-            task.status_changed = now
-            task.archived_at    = now
-            -- completed_at preserved (we're coming from completed).
-            needs_write = true
-            summary.archived = summary.archived + 1
-          end
-
-          -- 2. Reference validation — compute the new errors[] and
-          --    decide whether the file needs a write. Stable
-          --    `detected` per {field, code}; omit the field entirely
-          --    when empty so refresh produces zero diff noise when
-          --    nothing's wrong.
-          local new_errors = compute_errors(task, td, now)
-          local had_any  = type(task.errors) == "table" and #task.errors > 0
-          local have_any = #new_errors > 0
-
-          local errors_differ = false
-          if have_any ~= had_any then
-            errors_differ = true
-          elseif have_any then
-            -- Compare set + each entry. Lists are sorted by field
-            -- order (compute_errors emits in the order it checks),
-            -- which is stable across refreshes for a given input.
-            if #new_errors ~= #task.errors then
-              errors_differ = true
-            else
-              for i, e in ipairs(new_errors) do
-                local p = task.errors[i]
-                if p.field ~= e.field or p.code ~= e.code
-                  or p.message ~= e.message or p.detected ~= e.detected
-                then
-                  errors_differ = true; break
-                end
-              end
-            end
-          end
-
-          if errors_differ then
-            if have_any then
-              task.errors = new_errors
-            else
-              task.errors = nil
-            end
-            needs_write = true
-            if have_any then
-              summary.errors_set = summary.errors_set + 1
-            end
-          end
-
-          -- 3. Compute the bucket the file SHOULD be in now.
-          local target_path
-          if task.status == "archived" then
-            target_path = paths.task_file_path(td, task.id, "archived", task.archived_at)
-          else
-            target_path = paths.task_file_path(td, task.id, task.status, nil)
-          end
-
-          if needs_write or target_path ~= file then
-            -- Re-validate after any auto-archive mutation so a corrupt
-            -- transition doesn't slip through.
-            local v = schema.validate(task)
-            if not v.ok then
-              summary.skipped = summary.skipped + 1
-            else
-              local rendered, render_err = render_task(task)
-              if render_err then
-                summary.skipped = summary.skipped + 1
-              else
-                local mok, _merr = move_task(file, target_path, rendered, "refresh")
-                if mok then
-                  if target_path ~= file then
-                    summary.moved = summary.moved + 1
-                  elseif needs_write then
-                    summary.rewritten = summary.rewritten + 1
-                  end
-                end
-              end
-            end
-          end
-        end
-      end
-    end
-  end
-
-  -- Touch the known-dirs registry — even an empty refresh counts as
-  -- "auto-core has operated on this dir".
-  pcall(M._upsert_known, td, now)
-
-  -- Best-effort event publish so consumers know to refresh their
-  -- views (auto-finder panel, auto-agents admin panel).
-  local ok_ev, events = pcall(require, "auto-core.events")
-  if ok_ev and events and type(events.publish) == "function" then
-    pcall(events.publish, "core.todo:refreshed", { summary = summary, at = now })
-  end
-
-  return summary
-end
-
--- ─── public: dir override + registry (ADR-0031 §3.3) ─────────
-
----Set (or clear) the per-workspace todo-dir override. Accepts an
----absolute path or `~`-prefixed path; pass `nil` or an empty string
----to clear and fall back to the default `<workspace>/.todo-list/`.
----
----The override is persisted in `auto-core.state.namespace('todo')`
----keyed by the resolved workspace_root.
----@param path string?
-function M.set_todo_dir(path)
-  local ws_root   = paths.workspace_root()
-  local ns        = state()
-  local overrides = ns:get("dir_overrides") or {}
-
-  if path == nil or path == "" then
-    overrides[ws_root] = nil
-  else
-    if type(path) ~= "string" then
-      error("auto-core.todo.set_todo_dir: path must be a string or nil, got "
-        .. type(path))
-    end
-    local abs = fs_path.normalize(vim.fn.expand(path))
-    overrides[ws_root] = abs
-  end
-  ns:set("dir_overrides", overrides)
-
-  -- Eagerly touch the registry so the new (or restored-default) dir
-  -- is visible via known_dirs() before any task is added there.
-  pcall(M._upsert_known, M._todo_dir(), M._now_iso())
-end
-
----Resolved absolute todo dir for the current workspace, honoring any
----active override.
----@return string
-function M.get_todo_dir()
-  return M._todo_dir()
-end
-
----Return the registry of known todo dirs as a stable, sorted array
----of entries `{workspace_roots = {…}, todo_dir = <abs>, last_touched = <iso>}`.
----Sorted by `todo_dir` for predictable iteration.
----@return table[]
-function M.known_dirs()
-  local known = state():get("known_dirs") or {}
-  local out = {}
-  for _, entry in pairs(known) do
-    out[#out + 1] = entry
-  end
-  table.sort(out, function(a, b) return (a.todo_dir or "") < (b.todo_dir or "") end)
-  return out
-end
-
--- ─── public: status / archive — lifecycle transitions ────────
-
----Transition a task to a new status. Per ADR-0031 §3.2, this is the
----API path that fires side-effect events (mailbox notifications etc.
----land in task 5+ as events emit). Direct YAML `status:` edits remain
----supported but skip the event surface — by design.
----
----Lifecycle-timestamp side effects:
----  → completed:   sets completed_at = now, clears archived_at
----  → archived:    sets archived_at  = now; preserves completed_at if
----                 coming from completed, otherwise leaves it nil
----  → open:        clears both completed_at and archived_at
----  → in-progress: clears both completed_at and archived_at (ADR-0035)
----  → automated:   clears both completed_at and archived_at (ADR-0035;
----                 templates are inert — clearing both is mostly defensive
----                 since validate() also rejects either being set, but
----                 keeps us robust against direct YAML edits that left
----                 stale timestamps behind)
----  → deferred:    clears both completed_at and archived_at
----
----Also bumps `status_changed` to now. `updated` is NOT bumped (it
----tracks content mutations only, per the schema separation).
----
----The file is physically moved to the bucket matching the new status.
----No-op when `new` equals current status (idempotent).
+---Move a task to another status, with the daemon's timestamps, into its bucket.
+---The same status is a no-op.
 ---@param id string
----@param new string   one of {open, in-progress, automated, completed, deferred, archived}
----@return table? updated_task, string? err
+---@param new string open, in-progress, deferred, completed or archived
+---@return table? task, string? err
 function M.status(id, new)
   if type(id) ~= "string" or id == "" then
     return nil, "auto-core.todo.status: id must be a non-empty string"
   end
-  if type(new) ~= "string" or not schema.VALID_STATUS[new] then
-    return nil, "auto-core.todo.status: new status must be one of "
-      .. "{open,in-progress,automated,completed,deferred,archived}; got " .. tostring(new)
-  end
-
-  local td   = M._todo_dir()
-  local file = find_task_path(td, id)
-  if not file then return nil, "task '" .. id .. "' not found in " .. td end
-
-  local text, read_err = read_file(file)
-  if not text then return nil, read_err end
-  local dec = md.decode(text)
-  if not dec.ok then return nil, "md.decode: " .. tostring(dec.err) end
-  local task = dec.value
-  if type(task) ~= "table" then
-    return nil, "task '" .. id .. "' decoded to non-table"
-  end
-
-  local old = task.status
-
-  -- Idempotent no-op.
-  if old == new then return task end
-
-  local now = M._now_iso()
-  task.status         = new
-  task.status_changed = now
-
-  -- Lifecycle-timestamp maintenance per the rules above.
-  if new == "open" or new == "deferred" or new == "in-progress"
-      or new == "automated"
-  then
-    task.completed_at = nil
-    task.archived_at  = nil
-  elseif new == "completed" then
-    task.completed_at = now
-    task.archived_at  = nil
-  elseif new == "archived" then
-    task.archived_at = now
-    -- completed_at preserved iff coming FROM completed (preserves
-    -- "when was this done → when was this archived" history).
-    if old ~= "completed" then
-      task.completed_at = nil
-    end
-  end
-
-  -- ADR-0035 post-ship Lector findings (2026-05-31): M.status
-  -- owns the full state-transition contract — callers (the
-  -- auto-finder modal, mailbox todos.status, any direct
-  -- todo.status user) trust it to produce a schema-valid output
-  -- regardless of which source field set was present on the
-  -- input. Two symmetric cleanup directions:
-  --
-  -- (F1) Demote AWAY from automated: clear the template-only
-  -- fields. Schema rule rejects condition/execute/last_fired_at
-  -- on non-automated rows; without this, M.status would reject
-  -- the write and leave the file stuck at automated. Mirrors
-  -- the lifecycle-timestamp cleanup block above.
-  if new ~= "automated" then
-    task.condition     = nil
-    task.execute       = nil
-    task.last_fired_at = nil
-  end
-
-  -- (F2) Promote INTO automated: clear `origin`. A non-automated
-  -- row being promoted may be a clone of some prior template
-  -- fire (origin = parent template id). Schema rule rejects
-  -- origin on automated rows ("templates aren't clones") —
-  -- without this, M.status would reject the promote and leave
-  -- the clone stuck at its current status. The semantic: the
-  -- promotion detaches the clone from its origin lineage and
-  -- elevates it to a fresh template. The original template
-  -- referenced by `origin` is unaffected.
   if new == "automated" then
-    task.origin = nil
+    return nil, "auto-core.todo.status: " .. M.AUTOMATION_REMOVED
   end
-
-  local v = schema.validate(task)
-  if not v.ok then return nil, "schema: " .. tostring(v.err) end
-
-  -- Compute new file path and atomically write + remove the old file.
-  -- We write the new file FIRST, then unlink the old — so a crash
-  -- between the two leaves a duplicate (recoverable by refresh) rather
-  -- than a lost file.
-  local new_file = paths.task_file_path(td, id, new, task.archived_at)
-  local rendered, render_err = render_task(task)
-  if render_err then return nil, render_err end
-  -- move_task owns the write-new-then-unlink-old order AND the buffer
-  -- retarget, so a status change cannot leave a buffer naming the bucket
-  -- the task just left (which a later `:w` would recreate).
-  local ok, err = move_task(file, new_file, rendered,
-    string.format("status(%s, %s)", id, new))
-  if not ok then return nil, "write: " .. tostring(err) end
-
-  -- Best-effort event publish so consumers (auto-finder panel,
-  -- auto-agents admin panel) can react in-process without polling.
-  local ok_ev, events = pcall(require, "auto-core.events")
-  if ok_ev and events and type(events.publish) == "function" then
-    pcall(events.publish, "core.todo.status:changed", {
-      id   = id,
-      from = old,
-      to   = new,
-      at   = now,
-    })
+  if type(new) ~= "string" or not STATUSES[new] then
+    return nil, "auto-core.todo.status: new status must be one of "
+      .. "{open,in-progress,completed,deferred,archived}; got " .. tostring(new)
   end
-
-  return task
+  local ok, before, after = op(function(ctx)
+    local cur = get_task(ctx, id)
+    if cur.status == new then return cur, cur end
+    local task, err = daemon.rpc("todos.status", { ctx.at, id, cur.rev, new })
+    if err then daemon.fail(err) end
+    return cur, decorate(ctx, task)
+  end)
+  if not ok then return nil, before end
+  move_effects(before, after)
+  return after
 end
 
----Shorthand: `status(id, "archived")`. Irrespective of age; the
----28-day auto-archive rule lives in `refresh()` (task 6).
+---`status(id, "archived")`.
 ---@param id string
----@return table? updated_task, string? err
+---@return table? task, string? err
 function M.archive(id)
   return M.status(id, "archived")
 end
 
--- ─── public: assign (ADR-0031 §5) ─────────────────────────────
-
----Best-effort publish of `core.todo.assignee:changed` so consumers (the
----mailbox router, the panel) can react. The payload carries enough context
----for a one-shot notification without forcing the consumer to re-read the
----file.
----
----One helper rather than a copy per call site: a fresh assignment and a
----re-assignment must be indistinguishable to the router, or the recipient's
----inbox message would differ depending on which branch produced it.
----`reassigned` is additive context, not a different event.
----@param payload table
-local function _publish_assignee_changed(payload)
-  local ok_ev, events = pcall(require, "auto-core.events")
-  if ok_ev and events and type(events.publish) == "function" then
-    pcall(events.publish, "core.todo.assignee:changed", payload)
-  end
-end
-
----Assign a task to a peer agent / user. Updates the `assignee:`
----field on the task file AND emits
----`core.todo.assignee:changed` so subscribers (e.g. auto-agents'
----mailbox router) can fire a side-effect notification to the
----recipient's inbox.
----
----Per ADR §5 + lector S1, ONLY this API path emits the event.
----Direct YAML `assignee:` edits are metadata-only — no mailbox
----traffic, by design. Use this when you want the recipient to
----be notified; edit the file directly if you just want to
----record an assignment without pinging anyone.
----
----Assignment does NOT change task status: starting work is an
----explicit `todos.status` call (starting work should not be claimed
----purely because ownership changed; ADR-0035 r5).
----
----RE-ASSIGNING to the current assignee re-notifies. The file is not
----rewritten — nothing about it changed — but the event still fires, so
----the recipient gets `reason` again. Assignment is a two-part act: it
----records ownership AND hands over an instruction, and only the first
----half is idempotent. Johno, 2026-09-08: an operator re-assigning a task
----to the agent that already holds it is sending a NEW directive
----("actually, start with the tests"), and the old same-assignee early
----return swallowed it silently — no inbox message, no error, nothing to
----tell the operator their instruction went nowhere.
----
----Clearing an already-unassigned task stays a true no-op: there is no
----recipient to notify.
----
----Pass `nil`, `""`, or `vim.NIL` to unassign/clear.
----
----@param id string              task id
----@param assignee string?       agent name, or `nil`/`""`/`vim.NIL` to clear
----@param reason string?         optional one-line context
----@return table? updated_task, string? err
+---Assign a task (`nil`, `""` or `vim.NIL` clears it). Assigning an open task
+---makes it in-progress in the same write (D1). Assigning again, even to the same
+---assignee, is a new assignment and is announced again. A direct
+---`assignee:` edit in the file stays metadata-only and notifies nobody.
+---@param id string
+---@param assignee string?
+---@param reason string?
+---@return table? task, string? err
 function M.assign(id, assignee, reason)
   if type(id) ~= "string" or id == "" then
     return nil, "auto-core.todo.assign: id must be a non-empty string"
   end
-  if assignee == "" or (vim and vim.NIL and assignee == vim.NIL) then
-    assignee = nil
-  end
-  if assignee ~= nil and type(assignee) ~= "string" then
+  if assignee == nil or assignee == vim.NIL then assignee = "" end
+  if type(assignee) ~= "string" then
     return nil, "auto-core.todo.assign: assignee must be a non-empty string or nil"
   end
   if reason ~= nil and type(reason) ~= "string" then
     return nil, "auto-core.todo.assign: reason must be a string when provided"
   end
-
-  local td   = M._todo_dir()
-  local file = find_task_path(td, id)
-  if not file then return nil, "task '" .. id .. "' not found in " .. td end
-
-  local text, read_err = read_file(file)
-  if not text then return nil, read_err end
-  local dec = md.decode(text)
-  if not dec.ok then return nil, "md.decode: " .. tostring(dec.err) end
-  local task = dec.value
-  if type(task) ~= "table" then
-    return nil, "task '" .. id .. "' decoded to non-table"
+  local ok, before, after = op(function(ctx)
+    local cur = get_task(ctx, id)
+    local params = { ctx.at, id, cur.rev, assignee }
+    if reason and reason ~= "" then params[5] = reason end
+    local task, err = daemon.rpc("todos.assign", params)
+    if err then daemon.fail(err) end
+    return cur, decorate(ctx, task)
+  end)
+  if not ok then return nil, before end
+  move_effects(before, after)
+  publish("core.todo:changed", { kind = "assign", id = id })
+  if assignee ~= "" then
+    -- auto-agents' subscriber turns this into the recipient's mailbox message.
+    publish("core.todo.assignee:changed", {
+      id = id, title = after.title, file_path = after.file_path, from = before.assignee,
+      to = assignee, reason = reason, at = M._now_iso(), reassigned = before.assignee == assignee,
+    })
   end
-
-  local old           = task.assignee
-  local old_file_path = file
-
-  -- Is the assignee already what was requested? nil-vs-"" both count as
-  -- "unassigned" for this comparison.
-  local same =
-        (old == assignee)
-     or ((old == nil or old == "") and assignee == nil)
-
-  if same then
-    -- No field changed, so no rewrite and no new `updated` stamp. But a
-    -- re-assignment is still a delivery: fire the event so `reason` reaches
-    -- the recipient's inbox a second time. Nothing to deliver when the task
-    -- is being cleared and was already unassigned.
-    if assignee ~= nil then
-      _publish_assignee_changed({
-        id        = id,
-        title     = task.title,
-        file_path = old_file_path,
-        from      = old,
-        to        = assignee,
-        reason    = reason,
-        at        = M._now_iso(),
-        reassigned = true,
-      })
-    end
-    return task
-  end
-
-  local now = M._now_iso()
-  task.assignee = assignee  -- nil clears the field
-  task.updated  = now
-
-  -- Assignment does NOT change task status — starting work is an explicit
-  -- `todos.status` call (ADR-0035 r5 amendment). The task file remains in its
-  -- current bucket directory.
-
-  local v = schema.validate(task)
-  if not v.ok then return nil, "schema: " .. tostring(v.err) end
-
-  local rendered, render_err = render_task(task)
-  if render_err then return nil, render_err end
-
-  -- In-place rewrite: file stays in its current bucket. move_task reloads
-  -- unmodified buffers naming this path to prevent stale memory reverts (MF2).
-  local ok, err = move_task(old_file_path, old_file_path, rendered,
-    string.format("assign(%s, %s)", id, tostring(assignee)))
-  if not ok then return nil, "write: " .. tostring(err) end
-
-  _publish_assignee_changed({
-    id        = id,
-    title     = task.title,
-    file_path = old_file_path,
-    from      = old,
-    to        = assignee,
-    reason    = reason,
-    at        = now,
-  })
-
-  return task
+  return after
 end
 
--- ─── public: import (ADR-0031 §3.4) ──────────────────────────
-
----Delegate to `auto-core.todo.import.import`. See ADR-0031 §3.4 for
----the supported kinds (kb-todo-list / legacy-todos-md / asana-json)
----and the result shape.
----@param source string
----@param opts table?
----@return table[]
-function M.import(source, opts)
-  return require("auto-core.todo.import").import(source, opts)
-end
-
--- ─── public: remove ───────────────────────────────────────────
-
----Hard-delete a task. Returns `(true, nil)` on success or
----`(false, err)` on failure. Per ADR §3.2, deletions are auditable —
----we emit a single log line via auto-core.log (best-effort).
+---Delete a task: `(true)` or `(false, err)`.
 ---@param id string
 ---@return boolean ok, string? err
 function M.remove(id)
   if type(id) ~= "string" or id == "" then
     return false, "auto-core.todo.remove: id must be a non-empty string"
   end
-  local td   = M._todo_dir()
-  local file = find_task_path(td, id)
-  if not file then return false, "task '" .. id .. "' not found in " .. td end
-
-  local rok, rerr = vim.uv.fs_unlink(file)
-  if not rok then return false, "fs_unlink: " .. tostring(rerr) end
-
-  -- Best-effort audit line.
+  local ok, file = op(function(ctx)
+    local cur = get_task(ctx, id)
+    local _, err = daemon.rpc("todos.remove", { ctx.at, id, cur.rev })
+    if err then daemon.fail(err) end
+    return cur.file_path
+  end)
+  if not ok then return false, file end
   local ok_log, log = pcall(require, "auto-core.log")
   if ok_log and log and type(log.info) == "function" then
-    pcall(log.info, LOG_COMPONENT,
-      string.format("removed task '%s' (was at %s)", id, file))
+    pcall(log.info, LOG_COMPONENT, string.format("removed task '%s' (was at %s)", id, tostring(file)))
   end
-
-  -- v0.1.46: announce the mutation (see M.add for rationale).
-  local ok_ev, events = pcall(require, "auto-core.events")
-  if ok_ev and events and type(events.publish) == "function" then
-    pcall(events.publish, "core.todo:changed", { kind = "remove", id = id })
-  end
-
+  publish("core.todo:changed", { kind = "remove", id = id })
   return true
+end
+
+---Delete one malformed file of the store (an absolute path, or store-relative).
+---The daemon refuses a valid task (use M.remove) and a file using the removed
+---automation fields. `(true)` or `(false, err)`.
+---@param file_path string
+---@return boolean ok, string? err
+function M.remove_malformed(file_path)
+  if type(file_path) ~= "string" or file_path == "" then
+    return false, "auto-core.todo.remove_malformed: a path is required"
+  end
+  local ok, err = op(function(ctx)
+    local rel = file_path
+    if rel:sub(1, 1) == "/" then
+      local store = tostring(ctx.store)
+      if rel:sub(1, #store + 1) ~= store .. "/" then
+        daemon.fail("auto-core.todo.remove_malformed: " .. file_path .. " is not in the store " .. store)
+      end
+      rel = rel:sub(#store + 2)
+    end
+    local _, e = daemon.rpc("todos.remove_malformed", { ctx.at, rel })
+    if e then daemon.fail(e) end
+    return true
+  end)
+  if not ok then return false, err end
+  publish("core.todo:changed", { kind = "remove_malformed", path = file_path })
+  return true
+end
+
+-- ─── public: refresh ─────────────────────────────────────────
+
+local function refresh_body(ctx)
+  local s, err = daemon.rpc("todos.refresh", { ctx.at })
+  if err then daemon.fail(err) end
+  s = s or {}
+  return {
+    scanned    = tonumber(s.scanned) or 0,
+    moved      = tonumber(s.moved) or 0,
+    archived   = tonumber(s.archived) or 0,
+    errors_set = tonumber(s.errors_set) or 0,
+    rewritten  = tonumber(s.rewritten) or 0,
+    malformed  = tonumber(s.malformed) or 0,
+    skipped    = tonumber(s.malformed) or 0, -- Lua's name for the same count
+  }
+end
+
+---Reconcile the active buckets (the daemon's refresh: misplaced files, errors[],
+---the 28-day archive; it never reads the archive). Returns the summary; raises
+---when the daemon cannot be asked.
+---@return table summary
+function M.refresh()
+  local ok, s = op(refresh_body)
+  if not ok then error("auto-core.todo.refresh: " .. tostring(s), 0) end
+  publish("core.todo:refreshed", { summary = s, at = M._now_iso() })
+  return s
+end
+
+---refresh without waiting (the save hook): never blocks the editor.
+function M._refresh_async()
+  local root = where.root()
+  daemon.run(function() return refresh_body(where.ensure(root)) end, function(ok, s)
+    if ok then
+      publish("core.todo:refreshed", { summary = s, at = M._now_iso() })
+    else
+      report(s)
+    end
+  end)
+end
+
+-- ─── public: the store's location ────────────────────────────
+
+---Point this project at another store directory (it must exist), or back at
+---<root>/.todo-list with nil or "". Raises on error.
+---@param path string?
+function M.set_todo_dir(path)
+  if path ~= nil and type(path) ~= "string" then
+    error("auto-core.todo.set_todo_dir: path must be a string or nil, got " .. type(path))
+  end
+  local root = where.root()
+  local dir = ""
+  if path and path ~= "" then dir = fs_path.normalize(vim.fn.expand(path)) end
+  local ok, err = daemon.sync(function()
+    local _, e = daemon.rpc("todos.set_dir", { { root = root }, dir })
+    if e then daemon.fail(e) end
+    return true
+  end)
+  if not ok then
+    report(err)
+    error("auto-core.todo.set_todo_dir: " .. tostring(err), 0)
+  end
+  where.set_override(root, dir ~= "" and dir or nil)
+  where.reset(root)
+  op(function() return true end) -- resolve (and claim) the new store now
+  publish("core.todo:changed", { kind = "set_dir", dir = dir })
+end
+
+---The store directory for this project. It never waits: before the daemon has
+---answered once it is the directory Lua resolves (the override, else
+---<root>/.todo-list), and the first resolution (and claim) starts in the
+---background.
+---@return string
+function M.get_todo_dir()
+  local root = where.root()
+  local c = where.cached(root)
+  if c and type(c.store) == "string" then return c.store end
+  M._kick(root)
+  return where.local_dir(root)
+end
+
+M._todo_dir = M.get_todo_dir
+
+local _kicking = {}
+---_kick resolves (and claims) a root's store in the background, once at a time.
+function M._kick(root)
+  if _kicking[root] or not daemon.available() then return end
+  _kicking[root] = true
+  vim.schedule(function()
+    daemon.run(function() return where.ensure(root) end, function(ok, err)
+      _kicking[root] = nil
+      if not ok then report(err) end
+    end)
+  end)
+end
+
+---Move the store directory to new_path (nothing may be there yet; its parent
+---must exist). The store keeps its claim, its change log and its consumers'
+---cursors. Returns the new store path; raises on error.
+---@param new_path string
+---@return string
+function M.move_store(new_path)
+  if type(new_path) ~= "string" or new_path == "" then
+    error("auto-core.todo.move_store: a path is required")
+  end
+  local to = fs_path.normalize(vim.fn.expand(new_path))
+  local root = where.root()
+  local ok, r = op(function(ctx)
+    local res, err = daemon.rpc("todos.move_store", { ctx.at, to })
+    if err then daemon.fail(err) end
+    return res
+  end)
+  if not ok then error("auto-core.todo.move_store: " .. tostring(r), 0) end
+  where.set_override(root, r.store)
+  where.reset()
+  publish("core.todo:changed", { kind = "move_store", dir = r.store })
+  return r.store
+end
+
+---The stores the daemon knows: `{ todo_dir, workspace_roots, last_touched }`,
+---sorted by todo_dir. Raises when the daemon cannot be asked.
+---@return table[]
+function M.known_dirs()
+  local ok, list = daemon.sync(function()
+    local l, err = daemon.rpc("todos.stores", {})
+    if err then daemon.fail(err) end
+    return l
+  end)
+  if not ok then
+    report(list)
+    error("auto-core.todo.known_dirs: " .. tostring(list), 0)
+  end
+  local out = {}
+  for _, s in ipairs(daemon.list_of(list)) do
+    out[#out + 1] = {
+      todo_dir        = s.path,
+      workspace_roots = daemon.list_of(s.roots),
+      last_touched    = s.last_use,
+      claimed         = s.claimed == true,
+      store_id        = s.id,
+    }
+  end
+  table.sort(out, function(a, b) return tostring(a.todo_dir) < tostring(b.todo_dir) end)
+  return out
+end
+
+---No-op: the daemon keeps the store records now.
+function M._upsert_known() end
+
+-- ─── public: the cutover ─────────────────────────────────────
+
+---Claim this project's store again after a rollback released it
+---(:AutoCoreTodoClaim). Returns (true) or (false, err).
+---@return boolean ok, string? err
+function M.claim()
+  local root = where.root()
+  local ok, c = op(function(ctx) return ctx end)
+  if not ok then return false, c end
+  if c.claimed then return true end
+  where.forget_release(c.store_id)
+  local ok2, c2 = op(function(ctx) return ctx end)
+  if not ok2 then return false, c2 end
+  where.reset(root)
+  return c2.claimed and true or false, (not c2.claimed) and "the store is still not claimed" or nil
+end
+
+---Release this project's store: the daemon only reads it again (the rollback,
+---ADR §3 step 3). Run it only after the previous auto-core is installed. The
+---rollback guard keeps this Neovim from claiming it again.
+---@return boolean ok, string? err
+function M.release()
+  local ok, err = op(function(ctx)
+    local _, e = daemon.rpc("todos.release", { ctx.at })
+    if e then daemon.fail(e) end
+    return true
+  end)
+  where.reset()
+  if not ok then return false, err end
+  return true
+end
+
+-- ─── public: import (dropped) ────────────────────────────────
+
+---Import was dropped (ADR 1791532020 D3); the KB migration it served is done.
+function M.import()
+  error("auto-core.todo.import: import was dropped (ADR 1791532020 D3)", 0)
 end
 
 -- ─── public: vars submodule (v0.1.40) ─────────────────────────
 
----Per-machine variable store + `$VAR/...` path resolver for
----portable `.todo-list/` directories. See `auto-core.todo.vars`
----for the full surface.
----
----Re-exposed here as `todo.vars` so consumers don't have to know
----about the submodule split. Lazy `require` so loading the main
----`auto-core.todo` module doesn't transitively pull `vars.lua`
----into memory when callers don't use it.
+---`$VAR/…` resolution and the user's vars (`auto-core.todo.vars`), re-exposed.
 M.vars = setmetatable({}, {
   __index = function(_, k)
     return require("auto-core.todo.vars")[k]

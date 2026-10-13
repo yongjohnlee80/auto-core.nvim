@@ -480,18 +480,19 @@ do
   end
 end
 
--- ─── auto-core.todo — user command + autocmd (ADR-0031 §3) ────
+-- ─── auto-core.todo — user commands + autocmd (ADR-0031 §3) ───
 --
--- :AutoCoreTodoRefresh reconciles the resolved `.todo-list/`
--- directory: enforces dir == status, applies the 28-day auto-archive
--- rule, re-validates references, and updates errors[]. A summary is
--- printed via vim.notify so the user sees what changed.
+-- auto-core.todo forwards to AutoDoc's daemon (ADR 1791532020): these call it.
 --
--- The BufWritePost autocmd fires for any .yaml save inside the
--- currently-resolved todo dir (honoring set_todo_dir overrides). It
--- uses a callback-time filter rather than a fixed pattern so the
--- dir override can change at runtime without re-registering the
--- autocmd.
+-- :AutoCoreTodoRefresh asks the daemon to reconcile the store's active buckets
+-- (dir == status, the 28-day archive, refs and errors[]) and prints the summary.
+--
+-- The BufWritePost autocmd asks for the same refresh, without waiting, when a
+-- saved .md file is under the project's store: a hand edit is picked up at once,
+-- and `:w` never waits on the daemon.
+--
+-- :AutoCoreTodoClaim claims the project's store again after a rollback released
+-- it (auto-core never re-claims a store it saw released).
 vim.api.nvim_create_user_command("AutoCoreTodoRefresh", function()
   local ok, todo = pcall(require, "auto-core.todo")
   if not ok then
@@ -504,10 +505,24 @@ vim.api.nvim_create_user_command("AutoCoreTodoRefresh", function()
     return
   end
   vim.notify(string.format(
-    "auto-core.todo: scanned=%d moved=%d archived=%d skipped=%d errors_set=%d rewritten=%d",
-    summary.scanned, summary.moved, summary.archived, summary.skipped,
+    "auto-core.todo: scanned=%d moved=%d archived=%d malformed=%d errors_set=%d rewritten=%d",
+    summary.scanned, summary.moved, summary.archived, summary.malformed,
     summary.errors_set, summary.rewritten), vim.log.levels.INFO)
-end, { desc = "Reconcile .todo-list/ files (status ↔ dir, 28-day auto-archive, refs)" })
+end, { desc = "Ask AutoDoc to reconcile .todo-list/ (status ↔ dir, 28-day auto-archive, refs)" })
+
+vim.api.nvim_create_user_command("AutoCoreTodoClaim", function()
+  local ok, todo = pcall(require, "auto-core.todo")
+  if not ok then
+    vim.notify("auto-core.todo unavailable: " .. tostring(todo), vim.log.levels.ERROR)
+    return
+  end
+  local claimed, err = todo.claim()
+  if claimed then
+    vim.notify("auto-core.todo: the store is claimed: AutoDoc writes it", vim.log.levels.INFO)
+  else
+    vim.notify("auto-core.todo: claim failed: " .. tostring(err), vim.log.levels.ERROR)
+  end
+end, { desc = "Claim the project's todo store for AutoDoc again (after a rollback released it)" })
 
 do
   local group = vim.api.nvim_create_augroup("AutoCoreTodo", { clear = true })
@@ -523,11 +538,9 @@ do
       if type(td) ~= "string" or td == "" then return end
       local saved_file = args.file
       if type(saved_file) ~= "string" or saved_file == "" then return end
-      -- Only fire when the saved file is under the currently-resolved
-      -- todo dir. Buffers in unrelated yaml files (pubspec.yaml,
-      -- action workflows, etc.) get a no-op short-circuit here.
-      if fs_path.is_under(saved_file, td) then
-        pcall(todo.refresh)
+      -- Only a file under the project's store. Other Markdown is a no-op.
+      if fs_path.is_under(vim.fn.fnamemodify(saved_file, ":p"), td) then
+        pcall(todo._refresh_async)
       end
     end,
   })

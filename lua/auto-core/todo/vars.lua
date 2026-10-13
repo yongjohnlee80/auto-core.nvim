@@ -158,6 +158,25 @@ local function publish_changed(kind, name)
   end
 end
 
+---forward gives the daemon the same change: after the cutover (ADR 1791532020)
+---refs resolve against AutoDoc's user vars, so a var set here is set there too.
+---Best effort and asynchronous; without AutoDoc it does nothing.
+---@param name string
+---@param value string  "" removes it
+local function forward(name, value)
+  local ok, daemon = pcall(require, "auto-core.todo.daemon")
+  if not ok or not daemon.available() then return end
+  daemon.request("todos.set_var", { name, value }, function(_, err)
+    if err then
+      local ok_log, log = pcall(require, "auto-core.log")
+      if ok_log and log then
+        pcall(log.warn, "auto-core.todo", "AutoDoc did not take var $" .. name .. ": "
+          .. daemon.format(err))
+      end
+    end
+  end)
+end
+
 -- ─── public: get / set / list / remove ────────────────────────
 
 ---Look up a variable by name. Order: built-ins → user-defined
@@ -210,6 +229,7 @@ function M.set(name, value)
   end
   s:set("entries", entries)
   publish_changed("set", name)
+  forward(name, value)
   return true
 end
 
@@ -231,6 +251,7 @@ function M.remove(name)
   entries[name] = nil
   s:set("entries", entries)
   publish_changed("remove", name)
+  forward(name, "")
   return true
 end
 
