@@ -35,7 +35,7 @@ ok("fixture: the first call claims the store", #todo.list({ status = "open" }) =
 local store_id = env.call("todos.resolve", { "kb" }).store_id
 
 local mbroot = env.tmp .. "/mailbox"
-local wm = env.tmp .. "/state/todo_notifier.json"
+local wm = env.tmp .. "/state/todo_notifier"
 mb_path.configure(mbroot)
 mb_path.set_instance_id("1111111111-22222")
 registry.register("nvim", { root = mbroot })
@@ -94,7 +94,7 @@ local function poll()
   return done
 end
 
-notifier._configure({ poll_ms = false, watermark_path = wm, grace_ms = 0 })
+notifier._configure({ poll_ms = false, watermark_dir = wm, grace_ms = 0 })
 notifier.start()
 notifier._connect()
 env.wait(5000, function() return count("todos.stores") > 0 end)
@@ -189,7 +189,7 @@ end)
 section("the timer delivers an assignment made outside this Neovim; it stops on disconnect")
 run("timer", function()
   notifier.stop()
-  notifier._configure({ poll_ms = 200, watermark_path = wm, grace_ms = 0 })
+  notifier._configure({ poll_ms = 200, watermark_dir = wm, grace_ms = 0 })
   notifier.start()
   notifier._connect()
   local t = env.call("todos.get", { "kb", "2026-10-01-task-4" })
@@ -211,7 +211,7 @@ run("timer", function()
   ok("delivered on reconnect (the catch-up)", env.wait(5000, function()
     return env.exists(lector.subs.inbox .. "/" .. mid2 .. ".json") end))
   notifier.stop()
-  notifier._configure({ poll_ms = false, watermark_path = wm, grace_ms = 0 })
+  notifier._configure({ poll_ms = false, watermark_dir = wm, grace_ms = 0 })
   notifier.start()
 end)
 
@@ -238,7 +238,7 @@ run("watermark", function()
   mb_path.set_instance_id("3333333333-44444")
   registry.register("nvim", { root = mbroot })
   local lector2 = registry.register("agent:lector", { root = mbroot })
-  notifier._configure({ poll_ms = false, watermark_path = wm, grace_ms = 0 })
+  notifier._configure({ poll_ms = false, watermark_dir = wm, grace_ms = 0 })
   notifier.start()
   notifier._connect()
   poll()
@@ -248,11 +248,11 @@ run("watermark", function()
   ok("nothing older was replayed to the old instance either", #inbox(lector) == delivered_before)
   -- no watermark at all: the first poll starts at the head
   notifier._reset_for_tests()
-  vim.fn.delete(wm)
+  vim.fn.delete(wm, "rf")
   mb_path.set_instance_id("5555555555-66666")
   registry.register("nvim", { root = mbroot })
   local lector3 = registry.register("agent:lector", { root = mbroot })
-  notifier._configure({ poll_ms = false, watermark_path = wm, grace_ms = 0 })
+  notifier._configure({ poll_ms = false, watermark_dir = wm, grace_ms = 0 })
   notifier.start()
   notifier._connect()
   poll()
@@ -289,7 +289,7 @@ end)
 section("held: an assignment made before its agent registers is delivered when it registers")
 run("hold", function()
   notifier._reset_for_tests()
-  notifier._configure({ poll_ms = false, watermark_path = wm, grace_ms = 60000 })
+  notifier._configure({ poll_ms = false, watermark_dir = wm, grace_ms = 60000 })
   notifier.start()
   notifier._connect()
   poll()
@@ -326,7 +326,7 @@ end)
 section("past the grace window: a recipient still not registered is skipped and acked, once, as an audit line")
 run("grace", function()
   notifier._reset_for_tests()
-  notifier._configure({ poll_ms = false, watermark_path = wm, grace_ms = 300 })
+  notifier._configure({ poll_ms = false, watermark_dir = wm, grace_ms = 300 })
   notifier.start()
   notifier._connect()
   env.wait(500, function() return false end)
@@ -351,6 +351,114 @@ run("grace", function()
   end
   ok("one audit line names it", lines == 1, lines)
   ok("and no notice reached the user", toasts == 0, toasts)
+end)
+
+section("several Neovims: one watermark file per process, the maximum read, never lowered")
+-- Each cell plays several processes in this one: the seams write or prune AS an
+-- instance, and before_write/after_list run another process's step at the
+-- worst moment, deterministically. pid 1 is always alive; 999999999 never is
+-- (above Linux's PID_MAX_LIMIT).
+local W, P = notifier._watermark_write, notifier._watermark_prune
+local function with_dir(name, hooks)
+  local dir = env.tmp .. "/" .. name
+  notifier._configure(vim.tbl_extend("force", { poll_ms = false, watermark_dir = dir, grace_ms = 0 }, hooks or {}))
+  return dir
+end
+local function files(dir)
+  local out = {}
+  for _, f in ipairs(vim.fn.glob(dir .. "/*.json", false, true)) do out[vim.fn.fnamemodify(f, ":t")] = true end
+  return out
+end
+local A, B = "1000000001-1", "1000000002-1"
+
+run("two writers interleave on one store", function()
+  notifier.stop()
+  notifier._reset_for_tests()
+  with_dir("wm-race")
+  W(A, { S = 100 })
+  W(B, { S = 100 })
+  local once = true
+  with_dir("wm-race", { before_write = function(inst)
+    if inst == A and once then once = false; W(B, { S = 102 }) end
+  end })
+  W(A, { S = 101 }) -- A has updated its map; B writes 102 before A writes 101
+  ok("B's write ran between A's update and A's write", not once)
+  ok("a third process starts after 102, not 101", notifier.watermark("S") == 102, notifier.watermark("S"))
+end)
+
+run("two writers interleave on different stores", function()
+  notifier._reset_for_tests()
+  local once = true
+  with_dir("wm-race2", { before_write = function(inst)
+    if inst == A and once then once = false; W(B, { Y = 7 }) end
+  end })
+  W(A, { X = 5 })
+  ok("B's store survives A's write", notifier.watermark("Y") == 7, notifier.watermark("Y"))
+  ok("… and A's", notifier.watermark("X") == 5, notifier.watermark("X"))
+end)
+
+run("pruning removes the files of processes that are gone, never lowering the maximum", function()
+  notifier._reset_for_tests()
+  local dir = with_dir("wm-prune")
+  local me = "1000000006-" .. vim.fn.getpid()
+  local dead = "1000000003-999999999"
+  local live = "1000000004-" .. vim.fn.getpid()
+  local aged = "1000000005-1"
+  W(dead, { S = 500, T = 3 })
+  W(live, { S = 10 })
+  W(aged, { T = 9 })
+  local old = os.time() - 100 * 24 * 3600
+  vim.uv.fs_utime(dir .. "/" .. aged .. ".json", old, old)
+  local removed = P(me)
+  table.sort(removed)
+  ok("the dead process's file and the 100-day-old one were pruned",
+    vim.deep_equal(removed, { aged .. ".json", dead .. ".json" }), vim.inspect(removed))
+  local f = files(dir)
+  ok("a live process's file is kept", f[live .. ".json"], vim.inspect(f))
+  ok("the pruner's own file carries the maximum", f[me .. ".json"], vim.inspect(f))
+  ok("the starting point is still 500 for S", notifier.watermark("S") == 500, notifier.watermark("S"))
+  ok("… and 9 for T (from the aged file)", notifier.watermark("T") == 9, notifier.watermark("T"))
+end)
+
+run("a process never prunes its own file", function()
+  notifier._reset_for_tests()
+  local dir = with_dir("wm-own")
+  local mine = "1000000007-999999999" -- its pid reads as gone, as the test instance ids do
+  W(mine, { S = 42 })
+  W("1000000008-999999999", { S = 1 })
+  P(mine)
+  ok("its own file is still there", files(dir)[mine .. ".json"], vim.inspect(files(dir)))
+  ok("and the starting point is 42", notifier.watermark("S") == 42, notifier.watermark("S"))
+end)
+
+run("a prune between a reader's listing and its reads", function()
+  notifier._reset_for_tests()
+  local dir = with_dir("wm-scan")
+  W("1000000009-999999999", { S = 300 })
+  local once, pruned = true, nil
+  with_dir("wm-scan", { after_list = function()
+    if once then once = false; pruned = P("1000000010-1") end
+  end })
+  local got = notifier.watermark("S")
+  ok("the pruner ran after the reader listed the dead file", pruned and #pruned == 1, vim.inspect(pruned))
+  ok("the reader read again and found 300 in the pruner's file", got == 300, got)
+  ok("only the pruner's file is left", vim.deep_equal(files(dir), { ["1000000010-1.json"] = true }),
+    vim.inspect(files(dir)))
+end)
+
+run("a new Neovim prunes once, at its first floor", function()
+  notifier._reset_for_tests()
+  local dir = with_dir("wm-start")
+  W("1000000011-999999999", { [store_id] = head() })
+  mb_path.set_instance_id("7777777777-" .. vim.fn.getpid())
+  registry.register("nvim", { root = mbroot })
+  notifier.start()
+  notifier._connect()
+  poll()
+  local f = files(dir)
+  ok("the dead process's file is gone", not f["1000000011-999999999.json"], vim.inspect(f))
+  ok("this process's file carries the floor", f["7777777777-" .. vim.fn.getpid() .. ".json"]
+    and notifier.watermark(store_id) == head(), vim.inspect(f))
 end)
 
 notifier.stop()

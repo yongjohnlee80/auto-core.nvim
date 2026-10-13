@@ -388,7 +388,10 @@ session connects, right after an assignment made here, and every 5 s while
 connected (the daemon never pushes). Each message's id is `todo-<store_id>-<seq>`:
 a resend after a crash carries the same id, and a sender finding it already
 delivered does not write it again. A new Neovim starts after the highest change
-any Neovim on this machine handled, so nothing old is assigned again.
+any Neovim on this machine handled, so nothing old is assigned again (each Neovim
+writes only its own watermark file, `stdpath("state")/auto-core/todo_notifier/`,
+and the highest across them is read; files of Neovims that are gone are pruned
+after their highest value is carried into a live one).
 `core.todo.assignee:changed` is no longer published. `vim.g.auto_core_todo_notifier
 = false` turns the notifier off.
 

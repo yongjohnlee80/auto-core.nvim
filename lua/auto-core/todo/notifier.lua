@@ -23,8 +23,9 @@
 ---Neovim start is a new consumer, and the daemon starts a new consumer at the
 ---beginning of its retained log. Replaying that log would assign every retained
 ---task again. So the first poll of a process delivers only changes after the
----highest seq any Neovim on this machine handled (a watermark kept in
----`stdpath("state")/auto-core/todo_notifier.json`): the catch-up at Neovim start
+---highest seq any Neovim on this machine handled (the watermark: one file per
+---process under `stdpath("state")/auto-core/todo_notifier/`, each written only by
+---its own process, the maximum across them read): the catch-up at Neovim start
 ---covers what changed while every Neovim was closed, and nothing older. With no
 ---watermark yet (the first poll after the cutover) it starts at the log's head.
 ---
@@ -62,7 +63,7 @@ M.GRACE_MS = 10 * 60 * 1000
 -- NOTE: backoff. Reconnecting to a daemon that went away: 5 s, doubling to 60 s.
 M.BACKOFF_MS = { first = 5000, max = 60000 }
 
-local _cfg = {}          -- test overrides: poll_ms, watermark_path, ensure, page, grace_ms
+local _cfg = {}          -- test overrides: poll_ms, watermark_dir, ensure, page, grace_ms, after_list, before_write
 local _running = false
 local _subs = {}
 local _timer, _retry = nil, nil
@@ -94,32 +95,169 @@ function M.message_id(store_id, seq)
 end
 
 -- ─── the watermark ───────────────────────────────────────────
+--
+-- One file per process: <dir>/<instance_id>.json, { store id → seq }. A process
+-- writes ONLY its own file (temp + rename), from its own map in memory, so no
+-- process ever reads, modifies and writes another's: two Neovims cannot lose each
+-- other's updates (one shared file did: A and B both read 100, B wrote 102, A
+-- wrote 101, and a new Neovim started at 101 and replayed 102). A new process
+-- starts each store after the MAXIMUM over every file.
+--
+-- Pruning. A file whose process is gone (its pid is not alive) or that has not
+-- been written for the daemon's 90-day consumer silence is removed; this
+-- process's own file never is. Before removing anything, the pruner writes the
+-- maximum it read, for every store, into its own file: pruning never lowers the
+-- maximum, which matters most when every Neovim was closed and the files of dead
+-- processes are the only record (the catch-up at start).
+--
+-- Reading. A directory listing is not a snapshot: a pruner's create-then-remove
+-- can happen during one listing, which then shows neither file, and a listed file
+-- can be pruned before it is read. So a read is accepted only when the listing
+-- taken after reading every file equals the one taken before; otherwise it reads
+-- again (a pruner writes its own file before it removes any, so the next round
+-- sees the maximum there).
 
-local function watermark_path()
-  return _cfg.watermark_path or (vim.fn.stdpath("state") .. "/auto-core/todo_notifier.json")
+local SILENCE_S = 90 * 24 * 3600 -- the daemon's consumer silence (ADR 1791532020 §2.5)
+local SCAN_ROUNDS = 20           -- each extra round follows a concurrent create or remove
+
+local _own = {}          -- instance id → { store id → seq }: what that instance wrote
+local _prepared = false  -- this process pruned (once, before its first floor)
+
+local function watermark_dir()
+  return _cfg.watermark_dir or (vim.fn.stdpath("state") .. "/auto-core/todo_notifier")
 end
 
-local function watermarks()
-  local f = io.open(watermark_path(), "r")
-  if not f then return {} end
+local function own_instance() return require("auto-core.mailbox.path").get_instance_id() end
+
+---read_json is a file's map, {} when it does not parse, nil when it is gone.
+local function read_json(path)
+  local f = io.open(path, "r")
+  if not f then return nil end
   local text = f:read("*a")
   f:close()
   local ok, t = pcall(vim.json.decode, text)
   return (ok and type(t) == "table") and t or {}
 end
 
----watermark is the highest seq any Neovim here handled for a store, or nil.
+local function list_names(dir)
+  local names = {}
+  local handle = vim.uv.fs_scandir(dir)
+  if not handle then return names end
+  while true do
+    local name = vim.uv.fs_scandir_next(handle)
+    if not name then break end
+    if name:match("^[^.].*%.json$") then names[#names + 1] = name end
+  end
+  table.sort(names)
+  return names
+end
+
+---scan reads every process's file: name → { map, path, mtime }.
+---@return table<string, { map: table, path: string, mtime: integer }>
+local function scan()
+  local dir = watermark_dir()
+  local out = {}
+  for _ = 1, SCAN_ROUNDS do
+    out = {}
+    local before = list_names(dir)
+    if _cfg.after_list then _cfg.after_list(before) end -- test seam: a pruner runs here
+    for _, name in ipairs(before) do
+      local path = dir .. "/" .. name
+      local map = read_json(path) -- nil: pruned meanwhile, so the listing changed
+      local st = vim.uv.fs_stat(path)
+      if map then out[name] = { map = map, path = path, mtime = st and st.mtime.sec or os.time() } end
+    end
+    if table.concat(list_names(dir), "\n") == table.concat(before, "\n") then return out end
+  end
+  warn("watermark", "the watermark directory kept changing while it was read")
+  return out
+end
+
+---maximum is the highest seq per store across the files read.
+local function maximum(files)
+  local max = {}
+  for _, f in pairs(files) do
+    for store_id, seq in pairs(f.map) do
+      local n = tonumber(seq)
+      if n and n > (max[store_id] or -1) then max[store_id] = n end
+    end
+  end
+  return max
+end
+
+---watermark is the highest seq any Neovim here handled for a store, or nil:
+---where a new consumer starts.
 function M.watermark(store_id)
-  return tonumber(watermarks()[store_id])
+  return maximum(scan())[store_id]
+end
+
+---write_own raises an instance's own seqs to `seqs` (store id → seq), never
+---lowering one, and writes that instance's file. Only that instance writes it.
+local function write_own(inst, seqs)
+  local path = watermark_dir() .. "/" .. inst .. ".json"
+  -- Its own file seeds the map once (the same instance after a restart): only
+  -- this instance writes it, so reading it is no read-modify-write of another's.
+  local w = vim.deepcopy(_own[inst] or read_json(path) or {})
+  local grew = false
+  for store_id, seq in pairs(seqs) do
+    if (tonumber(w[store_id]) or -1) < seq then w[store_id] = seq; grew = true end
+  end
+  if not grew then return true end
+  if _cfg.before_write then _cfg.before_write(inst, seqs) end -- test seam: another writer runs here
+  local ok, err = require("auto-core.fs.atomic").write(path, vim.json.encode(w), { mkdir = true })
+  if not ok then
+    warn("watermark", "could not save the watermark: " .. tostring(err))
+    return false
+  end
+  _own[inst] = w
+  return true
+end
+
+local function alive(pid)
+  local r, _, name = vim.uv.kill(pid, 0)
+  return r == 0 or name == "EPERM"
+end
+
+---prunable is whether another process's file may go: its process is gone, or it
+---was not written for the consumer silence. A name that carries no pid ages out.
+local function prunable(name, f, own_name)
+  if name == own_name then return false end
+  if os.time() - f.mtime > SILENCE_S then return true end
+  local pid = tonumber(name:match("^%d+%-(%d+)%.json$"))
+  return pid ~= nil and not alive(pid)
+end
+
+---prune removes the files of processes that are gone, after writing the maximum
+---it read into `inst`'s own file. Returns the names it removed.
+local function prune(inst)
+  local files = scan()
+  local own_name = inst .. ".json"
+  local doomed = {}
+  for name, f in pairs(files) do
+    if prunable(name, f, own_name) then doomed[#doomed + 1] = f.path end
+  end
+  if #doomed == 0 then return {} end
+  if not write_own(inst, maximum(files)) then return {} end -- carry the maximum first
+  local removed = {}
+  for _, p in ipairs(doomed) do
+    if os.remove(p) then removed[#removed + 1] = vim.fn.fnamemodify(p, ":t") end
+  end
+  return removed
+end
+
+local function prepare_once()
+  if _prepared then return end
+  _prepared = true
+  prune(own_instance())
 end
 
 local function bump_watermark(store_id, seq)
-  local w = watermarks()
-  if (tonumber(w[store_id]) or 0) >= seq then return end
-  w[store_id] = seq
-  local ok, err = require("auto-core.fs.atomic").write(watermark_path(), vim.json.encode(w), { mkdir = true })
-  if not ok then warn("watermark", "could not save the watermark: " .. tostring(err)) end
+  write_own(own_instance(), { [store_id] = seq })
 end
+
+-- Test seams: write or prune as another process would.
+M._watermark_write = write_own
+M._watermark_prune = prune
 
 -- ─── recipients ──────────────────────────────────────────────
 
@@ -263,6 +401,7 @@ local function poll_store(store)
   local at = { root = roots[1] }
   local page_size = _cfg.page or M.PAGE
   local floor = _floors[store.id]
+  if floor == nil then prepare_once() end
   if floor == nil then floor = M.watermark(store.id) end
   while true do
     local page, err = daemon.rpc("todos.changes", { at, M.consumer(), page_size })
@@ -481,13 +620,16 @@ function M.is_running() return _running end
 -- Test seam: connect now (headless tests never see VimEnter).
 function M._connect() connect() end
 
----Test seam: { poll_ms, watermark_path, ensure, page, grace_ms }.
+---Test seam: { poll_ms, watermark_dir, ensure, page, grace_ms, after_list,
+---before_write }. after_list(names) runs between a scan's listing and its reads;
+---before_write(inst, seqs) between an instance's update of its map and its write.
 function M._configure(cfg) _cfg = cfg or {} end
 
 function M._reset_for_tests()
   M.stop()
   _cfg, _floors, _backoff, _polling, _again, _waiters = {}, {}, nil, false, false, {}
   _applied, _audited, _started_at = {}, {}, nil
+  _own, _prepared = {}, false
 end
 
 return M
