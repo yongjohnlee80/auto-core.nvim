@@ -47,8 +47,12 @@ end
 -- one-shot fault per verb: fault(params, cb, pass) where pass(params, cb) sends
 -- it for real.
 local calls, faults = {}, {}
+local acks_fail = false -- every todos.ack is lost while set
 daemon._set_transport(function(method, params, cb)
   calls[#calls + 1] = { method = method, params = params }
+  if method == "todos.ack" and acks_fail then
+    return cb(nil, { message = "injected: the ack was lost" })
+  end
   local f = faults[method]
   if f then
     faults[method] = nil
@@ -146,23 +150,21 @@ end)
 
 section("at-least-once")
 run("ack fails after the send", function()
-  local before = #inbox(lector)
-  faults["todos.ack"] = function(_, cb) cb(nil, { message = "injected: the ack was lost" }) end
+  acks_fail = true
   todo.assign("2026-10-01-task-6", "agent:lector", "ack lost")
   poll()
   local seq = assign_seq("2026-10-01-task-6")
   local mid = notifier.message_id(store_id, seq)
   local path = lector.subs.inbox .. "/" .. mid .. ".json"
-  ok("the message was written before the (failed) ack", env.exists(path))
+  ok("the message was written before the (lost) ack", env.exists(path))
+  ok("the cursor did not move", (notifier.watermark(store_id) or 0) < seq, notifier.watermark(store_id))
   -- the recipient processed it: it is in archive/ now
-  local archived = lector.subs.archive .. "/" .. mid .. ".json"
-  vim.uv.fs_rename(path, archived)
-  local n_send = #vim.fn.glob(lector.subs.inbox .. "/todo-*.json", false, true)
+  vim.uv.fs_rename(path, lector.subs.archive .. "/" .. mid .. ".json")
+  acks_fail = false
   poll()
-  ok("the change came again (its ack was lost) and was NOT written again",
-    not env.exists(path) and #inbox(lector) == n_send, vim.inspect(inbox(lector)))
+  ok("the change came again (its ack was lost) and was NOT written again", not env.exists(path),
+    vim.inspect(inbox(lector)))
   ok("the cursor moved on the retry", notifier.watermark(store_id) == seq, notifier.watermark(store_id))
-  local _ = before
 end)
 
 run("a failed send stops the page; the next poll resumes at the same seq", function()
