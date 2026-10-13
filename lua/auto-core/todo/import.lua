@@ -1,5 +1,9 @@
 ---Import handlers for the auto-core todo task store (ADR-0031 §3.4).
 ---
+---**Dropped by ADR 1791532020 (D3), v0.3.4:** `import` refuses. The KB migration
+---it served finished on 2026-05-26. The parser stays until v0.4.0 removes the
+---module.
+---
 ---v1 supports three source kinds:
 ---  • `kb-todo-list`     — KB markdown identified by inline `**Tags:**
 ---                          type:todo-list`. Reads the file as a SINGLE
@@ -218,56 +222,9 @@ local VALID_KINDS = {
   -- tasks via `M.add()` or the auto-finder panel as needed.
 }
 
----Import an external todo source. `opts.source` may be passed via
----the first argument (file path) for convenience.
----
----  opts.kind     — 'kb-todo-list' | 'legacy-todos-md'
----  opts.dry_run  — boolean; when true, return planned specs without
----                  writing anything to disk
----
----Returns a list of `{spec, id?}` entries. `id` is the result of
----`auto-core.todo.add(spec)` (nil for dry_run or for failed adds).
----@param source string         path to the source file
----@param opts table?
----@return table[] results
-function M.import(source, opts)
-  opts = opts or {}
-  local kind = opts.kind or "kb-todo-list"
-
-  if not VALID_KINDS[kind] then
-    error("auto-core.todo.import: unknown kind '" .. tostring(kind)
-      .. "' (valid: kb-todo-list, legacy-todos-md)")
-  end
-
-  if type(source) ~= "string" or source == "" then
-    error("auto-core.todo.import: source path must be a non-empty string")
-  end
-
-  if not fs_path.exists(source) then
-    error("auto-core.todo.import: source '" .. source .. "' does not exist")
-  end
-
-  local md, read_err = read_file(source)
-  if not md then
-    error("auto-core.todo.import: " .. tostring(read_err))
-  end
-
-  -- Both `kb-todo-list` and `legacy-todos-md` share the same parser.
-  local spec = parse_kb_todo(md, source, kind)
-
-  local results = { { spec = spec } }
-
-  if not opts.dry_run then
-    local todo = require("auto-core.todo")
-    local ok, id_or_err = pcall(todo.add, spec)
-    if ok then
-      results[1].id = id_or_err
-    else
-      results[1].error = tostring(id_or_err)
-    end
-  end
-
-  return results
+---Refused: import was dropped (ADR 1791532020 D3). Raises.
+function M.import(_source, _opts)
+  error("auto-core.todo.import: import was dropped (ADR 1791532020 D3)", 0)
 end
 
 return M
