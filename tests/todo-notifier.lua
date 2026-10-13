@@ -412,7 +412,7 @@ run("pruning removes the files of processes that are gone, never lowering the ma
   local removed = P(me)
   table.sort(removed)
   ok("the dead process's file and the 100-day-old one were pruned",
-    vim.deep_equal(removed, { aged .. ".json", dead .. ".json" }), vim.inspect(removed))
+    vim.deep_equal(removed, { dead .. ".json", aged .. ".json" }), vim.inspect(removed))
   local f = files(dir)
   ok("a live process's file is kept", f[live .. ".json"], vim.inspect(f))
   ok("the pruner's own file carries the maximum", f[me .. ".json"], vim.inspect(f))
