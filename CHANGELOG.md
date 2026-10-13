@@ -11,7 +11,7 @@ key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
 
-## [Unreleased] — the todo shim is removed
+## [v0.4.1] — 2026-10-14 — the todo shim is removed
 
 ADR 1791532020 §3 step 5 (r12). A patch by Johno's ruling (2026-10-14: "no need
 to minor version up since we just did it"). It removes a public module in a
