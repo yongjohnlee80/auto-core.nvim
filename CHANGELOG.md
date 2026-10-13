@@ -10,6 +10,50 @@ rename, remove, or break-shape an existing function, state-namespace
 key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
+
+## [Unreleased] — the todo shim is removed
+
+ADR 1791532020 §3 step 5 (r12). A patch by Johno's ruling (2026-10-14: "no need
+to minor version up since we just did it"). It removes a public module in a
+patch, an exception to the additive-only rule above that Johno ruled
+deliberately. The shim was announced as one release's bridge when v0.4.0
+shipped. **Release it only after auto-finder
+v0.5.10 and auto-agents v0.3.6**, the direct clients. Earlier ones still call
+`auto-core.todo`.
+
+- **`require("auto-core.todo")` is gone.** The forwarding shim of v0.4.0 is
+  removed. A plugin that still requires it gets "module not found". AutoDoc's
+  daemon owns the todo system, and its clients call the daemon's `todos.*` verbs
+  themselves (autodoc.nvim's `autodoc.todos`).
+- **Removed with it:**
+  - `auto-core.todo.automation`, `.cron` and `.import`;
+  - the Lua format modules `.md`, `.yaml`, `.schema` and `.header`, which
+    nothing has used since v0.4.0.
+  - Automation's legacy `todo.bash` trust migration goes with automation.
+    `auto-core.trust` stays; auto-run uses it.
+- **The supported todo surface:**
+  - `auto-core.todo.where`: a project root to its store, and the claim;
+  - `auto-core.todo.daemon`: the door to the daemon;
+  - `auto-core.todo.buffers`: open buffers follow a moved task;
+  - `auto-core.todo.notifier`: assignment notices;
+  - `auto-core.todo.vars`;
+  - `auto-core.todo.paths`.
+
+  The soft dependency on autodoc.nvim is permanent, because the notifier lives
+  here. It is still not declared in any plugin spec.
+- **The commands stay.** `:AutoCoreTodoRefresh`, `:AutoCoreTodoClaim` and the
+  refresh on saving a task file now call the daemon through `where` and
+  `daemon`.
+- **Tests:**
+  - `tests/todo-where.lua` (real daemon) covers the store resolution and claim,
+    the legacy rewrite, the rollback guard, the explicit claim, buffers, vars
+    and the commands.
+  - `tests/todo-where-required.lua` covers the same surface without AutoDoc.
+  - `tests/todo-where-mutants.sh` replaces `todo-shim-mutants.sh`.
+  - The notifier suite uses a fixture client.
+  - The v0.4.0 cutover rehearsal is retired.
+  - smoke drops the sections for the removed modules.
+
 ## [v0.4.0] — 2026-10-14 — the todo cutover: auto-core.todo forwards to AutoDoc
 
 Minor (ADR 1791532020 §3 step 3; D4 as amended 2026-10-13: the cutover is a minor,

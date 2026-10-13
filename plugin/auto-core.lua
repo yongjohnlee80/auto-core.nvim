@@ -480,9 +480,12 @@ do
   end
 end
 
--- ─── auto-core.todo — user commands + autocmd (ADR-0031 §3) ───
+-- ─── the todo store — user commands + autocmd (ADR 1791532020) ───
 --
--- auto-core.todo forwards to AutoDoc's daemon (ADR 1791532020): these call it.
+-- AutoDoc's daemon owns the todo store. auto-core keeps only where a project's
+-- store is (auto-core.todo.where, which also claims it once per root) and the
+-- door to the daemon (auto-core.todo.daemon); `auto-core.todo` itself, the
+-- forwarding shim, went at v0.4.1. These call the daemon through that door.
 --
 -- :AutoCoreTodoRefresh asks the daemon to reconcile the store's active buckets
 -- (dir == status, the 28-day archive, refs and errors[]) and prints the summary.
@@ -493,34 +496,59 @@ end
 --
 -- :AutoCoreTodoClaim claims the project's store again after a rollback released
 -- it (auto-core never re-claims a store it saw released).
+
+---refresh_body runs todos.refresh for the project's store, inside daemon.run.
+---A project with no store yet has nothing to reconcile: a zero summary.
+local function todo_refresh_body(daemon, where)
+  local c = where.ensure(where.root())
+  local s, err = daemon.rpc("todos.refresh", { c.at })
+  if err and err.code == daemon.NOT_A_STORE then s, err = {}, nil end
+  if err then daemon.fail(err) end
+  return s or {}
+end
+
+local function todo_mods()
+  local ok_d, daemon = pcall(require, "auto-core.todo.daemon")
+  local ok_w, where = pcall(require, "auto-core.todo.where")
+  if not (ok_d and ok_w) then return nil end
+  return daemon, where
+end
+
+local function todo_publish(topic, payload)
+  local ok, events = pcall(require, "auto-core.events")
+  if ok then pcall(events.publish, topic, payload) end
+end
+
 vim.api.nvim_create_user_command("AutoCoreTodoRefresh", function()
-  local ok, todo = pcall(require, "auto-core.todo")
-  if not ok then
-    vim.notify("auto-core.todo unavailable: " .. tostring(todo), vim.log.levels.ERROR)
+  local daemon, where = todo_mods()
+  if not daemon then
+    vim.notify("auto-core: the todo store resolution is unavailable", vim.log.levels.ERROR)
     return
   end
-  local ok_run, summary = pcall(todo.refresh)
+  local ok_run, s = daemon.sync(function() return todo_refresh_body(daemon, where) end)
   if not ok_run then
-    vim.notify("auto-core.todo.refresh failed: " .. tostring(summary), vim.log.levels.ERROR)
+    vim.notify("auto-core: todos.refresh failed: " .. tostring(s), vim.log.levels.ERROR)
     return
   end
+  todo_publish("core.todo:refreshed", { summary = s })
   vim.notify(string.format(
-    "auto-core.todo: scanned=%d moved=%d archived=%d malformed=%d errors_set=%d rewritten=%d",
-    summary.scanned, summary.moved, summary.archived, summary.malformed,
-    summary.errors_set, summary.rewritten), vim.log.levels.INFO)
+    "todos: scanned=%d moved=%d archived=%d malformed=%d errors_set=%d rewritten=%d",
+    tonumber(s.scanned) or 0, tonumber(s.moved) or 0, tonumber(s.archived) or 0,
+    tonumber(s.malformed) or 0, tonumber(s.errors_set) or 0, tonumber(s.rewritten) or 0),
+    vim.log.levels.INFO)
 end, { desc = "Ask AutoDoc to reconcile .todo-list/ (status ↔ dir, 28-day auto-archive, refs)" })
 
 vim.api.nvim_create_user_command("AutoCoreTodoClaim", function()
-  local ok, todo = pcall(require, "auto-core.todo")
-  if not ok then
-    vim.notify("auto-core.todo unavailable: " .. tostring(todo), vim.log.levels.ERROR)
+  local daemon, where = todo_mods()
+  if not daemon then
+    vim.notify("auto-core: the todo store resolution is unavailable", vim.log.levels.ERROR)
     return
   end
-  local claimed, err = todo.claim()
-  if claimed then
-    vim.notify("auto-core.todo: the store is claimed: AutoDoc writes it", vim.log.levels.INFO)
+  local ok_claim, err = daemon.sync(function() return where.claim(where.root()) end)
+  if ok_claim then
+    vim.notify("auto-core: the todo store is claimed: AutoDoc writes it", vim.log.levels.INFO)
   else
-    vim.notify("auto-core.todo: claim failed: " .. tostring(err), vim.log.levels.ERROR)
+    vim.notify("auto-core: claim failed: " .. tostring(err), vim.log.levels.ERROR)
   end
 end, { desc = "Claim the project's todo store for AutoDoc again (after a rollback released it)" })
 
@@ -530,18 +558,26 @@ do
     group   = group,
     pattern = "*.md",
     callback = function(args)
-      local ok_t, todo = pcall(require, "auto-core.todo")
-      if not ok_t then return end
+      local daemon, where = todo_mods()
+      if not daemon or not daemon.available() then return end
       local ok_p, fs_path = pcall(require, "auto-core.fs.path")
       if not ok_p then return end
-      local td = todo.get_todo_dir()
+      local root = where.root()
+      local c = where.cached(root)
+      local td = c and c.store or where.local_dir(root)
       if type(td) ~= "string" or td == "" then return end
       local saved_file = args.file
       if type(saved_file) ~= "string" or saved_file == "" then return end
       -- Only a file under the project's store. Other Markdown is a no-op.
-      if fs_path.is_under(vim.fn.fnamemodify(saved_file, ":p"), td) then
-        pcall(todo._refresh_async)
-      end
+      if not fs_path.is_under(vim.fn.fnamemodify(saved_file, ":p"), td) then return end
+      -- Asynchronous: `:w` never waits on the daemon.
+      daemon.run(function() return todo_refresh_body(daemon, where) end, function(ok_run, s)
+        if ok_run then
+          todo_publish("core.todo:refreshed", { summary = s })
+        elseif tostring(s):find("todos.unclaimed", 1, true) then
+          where.reset(root) -- the store was released: resolve again next time
+        end
+      end)
     end,
   })
 end

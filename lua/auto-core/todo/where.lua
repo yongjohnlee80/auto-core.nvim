@@ -82,8 +82,10 @@ function M.local_dir(root)
   return paths.default_todo_dir(root)
 end
 
----set_override mirrors a store directory into Lua state, for readers of the
----frozen key (autodoc's kb.migrate) during the one minor the shim lives.
+---set_override mirrors a store directory into Lua state: `local_dir` (what
+---the clients compare before the daemon has answered) and the frozen key's
+---readers see the same override the daemon holds. The clients' set_dir and
+---move_store call it after the daemon has answered.
 ---@param root string
 ---@param dir string?
 function M.set_override(root, dir)

@@ -8,7 +8,9 @@ local ok, run, section = env.ok, env.run, env.section
 env.require_daemon()
 env.start_daemon()
 
-local todo     = require("auto-core.todo")
+-- The fixture client (auto-core.todo, the shim, went at v0.4.1): it stands in
+-- for the direct clients, through auto-core's door, so the spies below see it.
+local todo     = env.client()
 local daemon   = require("auto-core.todo.daemon")
 local notifier = require("auto-core.todo.notifier")
 local mailbox  = require("auto-core.mailbox")
@@ -47,7 +49,7 @@ local function inbox_json(rec, mid)
   return text and vim.json.decode(text)
 end
 
--- Every daemon call the shim and the notifier make, recorded; an optional
+-- Every daemon call the fixture client and the notifier make, recorded; an optional
 -- one-shot fault per verb: fault(params, cb, pass) where pass(params, cb) sends
 -- it for real.
 local calls, faults = {}, {}
