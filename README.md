@@ -338,6 +338,60 @@ kb.sync_managed(root?)       -- ok, err, { root, updated, kept, missing, failed,
   operations document. The topics are `core.kb:managed_provided` and
   `core.kb:managed_synced`.
 
+## `todo` — a shim over AutoDoc's todo system (ADR 1791532020)
+
+From v0.3.4 **AutoDoc's daemon owns the todo system**: the task format, its
+rules and every write. `auto-core.todo` keeps its public functions and their
+synchronous shape, so auto-agents' `todos.*` mailbox verbs and auto-finder keep
+working, but each call goes to the daemon's `todos.*` verbs (protocol 20) and
+waits for the answer, bounded. auto-core no longer writes a task file. The shim
+itself goes at v0.4.0.
+
+- **AutoDoc is required.** auto-core reaches the daemon through autodoc.nvim's
+  todos client, by a soft `require` (no plugin spec declares it). Without
+  autodoc.nvim (v0.1.39 or later) and its binary, every function answers
+  `"AutoDoc required: …"`, the user is told once per session, and nothing is
+  written. There is no Lua fallback.
+- **The first call claims the store** (`todos.claim`, the cutover). Stop every
+  Neovim before updating: an older auto-core still running would keep writing.
+  The daemon writes `.todo-list/.autodoc-owner` once it owns a store.
+- **Which store.** A project's store is its override, else
+  `<root>/.todo-list`. When an AutoDoc workspace owns that directory the shim
+  names the workspace; otherwise it names `{root}`, and tells the daemon the
+  override (`set_dir`) or enrolls the root (`register`).
+- **Refs cross absolute.** `$VAR/…` in `adr`/`review` is resolved with Neovim's
+  vars before it is sent; the daemon writes it in its own portable form.
+- **Changes in behaviour.** Assigning an open task makes it in-progress, from
+  every surface. `update` refuses `assignee` (use `assign`). `set_todo_dir`
+  needs an existing directory. `automated` and `import` are gone. Tasks carry
+  `rev`, `path` and an absolute `file_path`.
+
+```lua
+local todo = require("auto-core.todo")
+todo.list({ status = "open" })              -- tasks
+todo.assign(id, "agent:lector", "start here") -- D1: open → in-progress; the agent is told
+todo.remove_malformed(file_path)            -- a malformed file, through the daemon
+todo.move_store(new_dir)                    -- the claim and the change log move with it
+```
+
+**Assignment notices.** `auto-core.todo.notifier` turns the daemon's `assign`
+changes into mailbox messages. It starts with the mailbox router, is the
+consumer `auto-core:<instance_id>` (one per Neovim), and delivers only to the
+agents registered in its own instance; an assignee it does not host is skipped
+and acked (the task file is the record). It polls `todos.changes` when the
+session connects, right after an assignment made here, and every 5 s while
+connected (the daemon never pushes). Each message's id is `todo-<store_id>-<seq>`:
+a resend after a crash carries the same id, and a sender finding it already
+delivered does not write it again. A new Neovim starts after the highest change
+any Neovim on this machine handled, so nothing old is assigned again.
+`core.todo.assignee:changed` is no longer published. `vim.g.auto_core_todo_notifier
+= false` turns the notifier off.
+
+**Rollback.** Stop every Neovim, restore the previous lock (a caret alone still
+selects v0.3.4), then `autodoc --call todos.release '["<workspace>"]'`. A store
+this Neovim claimed and later finds released is never claimed again;
+`:AutoCoreTodoClaim` claims it on purpose.
+
 ## Logging — the family contract (ADR 0021 / v0.1.11+)
 
 `auto-core.log` is the single ring for the entire AutoVim family.
