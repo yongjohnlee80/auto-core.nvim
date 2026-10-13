@@ -17,14 +17,16 @@ Patch. Additive to `auto-core.mailbox`:
 - **The wake ctx carries the arriving message's facts** (`router.dispatch_wake`):
   `arrival_from` and `arrival_from_bare`, `arrival_subject`, `arrival_msg_kind`,
   `arrival_command`, and for responses `arrival_ok`, `arrival_code` and
-  `arrival_error`. `arrival_read_error` is set when the file is already gone.
+  `arrival_error`. `arrival_read_error` is set when the file could not be read
+  or decoded (gone, unreadable, or not JSON).
   `ctx.mailbox` (the recipient) is unchanged, so older consumers behave as
   before.
 - **Response envelopes** (`complete`, `fail`, stale recovery) carry `command`,
   `code` and `from`. The bootstrap doc always promised `code` on failure.
 - **`outbox_undeliverable`** carries `subject`, and `path` on `decode_failed`.
-- **The router log's** `wake_dispatched` and `response_arrival` entries carry the
-  sender, subject, command and outcome.
+- **The router log:** `wake_dispatched` carries the sender, subject, command and
+  outcome; `response_arrival` carries the outcome (`ok`, `command`, `code`,
+  `error`, `read_error`).
 - **The bootstrap doc** tells agents to poll `responses/` rather than wait for a
   nudge. Its revision changes, so agents re-ingest it once.
 - auto-agents uses these facts to name the real sender in its notices and to
