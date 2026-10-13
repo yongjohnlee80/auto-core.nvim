@@ -9,11 +9,15 @@
 ---Each Neovim delivers only to the agents registered in its own instance, and acks
 ---its own cursor.
 ---
----**A recipient not registered here is skipped, and its change acked.** An
----assignment notice is best-effort, per instance; the task file is the record.
----Holding the cursor for an agent this Neovim does not host would stop every later
----delivery here, for an agent that may never start in it; the Neovim that hosts it
----delivers it from its own cursor.
+---**A recipient not registered here yet is HELD** for a grace window counted from
+---this process's notifier start (`GRACE_MS`, 10 min): agents spawn after Neovim
+---starts, and the catch-up must reach them (ADR §2.5). The cursor is acked only up
+---to the change before the first held one; later changes are still delivered, and
+---re-reading them on the next poll writes nothing twice (the sender's duplicate
+---check). A new mailbox registration polls at once. Past the window a recipient
+---still not registered is skipped and acked, with one audit line: an assignment
+---notice is best-effort per instance, and the task file is the record. `user` and
+---`autodoc:*` are skipped at once. The watermark only ever passes handled changes.
 ---
 ---**Where a new consumer starts.** The instance id is per process, so every
 ---Neovim start is a new consumer, and the daemon starts a new consumer at the
@@ -45,17 +49,29 @@ local M = {}
 -- delay; a tick is one todos.stores and one todos.changes per claimed store. It
 -- runs only while the session is connected.
 M.POLL_MS = 5000
-M.PAGE = 100
+-- While a change is held, the cursor cannot pass it, so a poll reads one page
+-- from it; the page bounds how many later changes are delivered meanwhile.
+M.PAGE = 200
+-- NOTE: deadline. A change whose recipient is not registered in this instance
+-- is HELD this long, counted from this process's notifier start, so an agent
+-- spawned after Neovim started still gets the catch-up (ADR §2.5: an assignment
+-- made while Neovim was closed is still delivered). Past it, the change is
+-- skipped and acked (one audit line). Configurable: set M.GRACE_MS before the
+-- notifier starts.
+M.GRACE_MS = 10 * 60 * 1000
 -- NOTE: backoff. Reconnecting to a daemon that went away: 5 s, doubling to 60 s.
 M.BACKOFF_MS = { first = 5000, max = 60000 }
 
-local _cfg = {}          -- test overrides: poll_ms, watermark_path, ensure, page
+local _cfg = {}          -- test overrides: poll_ms, watermark_path, ensure, page, grace_ms
 local _running = false
 local _subs = {}
 local _timer, _retry = nil, nil
 local _backoff = nil
 local _polling, _again = false, false
 local _floors = {}       -- store id → the seq this process starts after
+local _applied = {}      -- store id → the highest seq whose effects were applied
+local _audited = {}      -- message id → true once its skip was logged
+local _started_at = nil  -- ms (hrtime) when this process's notifier started
 
 local function log() return require("auto-core.log") end
 
@@ -208,6 +224,31 @@ local function effects(store, c)
   end
 end
 
+local function now_ms() return vim.uv.hrtime() / 1e6 end
+
+---route decides an assign change: "deliver" (with the recipient's record),
+---"hold" (not registered here, inside the grace window) or "skip" (nobody to
+---tell: cleared, `user`, `autodoc:*`, or past the window).
+---@return "deliver"|"hold"|"skip", table?
+local function route(mid, to)
+  if type(to) ~= "string" or to == "" or to == "user" or to:match("^autodoc:") then
+    return "skip"
+  end
+  local rec = M.local_recipient(to)
+  if rec then return "deliver", rec end
+  local grace = _cfg.grace_ms
+  if grace == nil then grace = M.GRACE_MS end
+  if _started_at and now_ms() - _started_at < grace then return "hold" end
+  if not _audited[mid] then
+    _audited[mid] = true
+    pcall(function()
+      log().info(LOG_COMPONENT, "assignment " .. mid .. " to " .. to
+        .. " skipped: no such agent registered in this Neovim within the grace window")
+    end)
+  end
+  return "skip"
+end
+
 local function ack(at, seq)
   local _, err = daemon.rpc("todos.ack", { at, M.consumer(), seq })
   if err then warn("ack", "todos.ack failed: " .. daemon.format(err)) end
@@ -233,16 +274,18 @@ local function poll_store(store)
     local cursor = tonumber(page.cursor) or 0
     if page.resync then
       -- Away past the daemon's silence limit: the log was dropped for us.
+      local held = false
       for _, row in ipairs(daemon.list_of(page.snapshot)) do
-        local rec = M.local_recipient(row.assignee)
-        if rec then
-          local mid = string.format("todo-%s-r%d-%s", store.id, cursor, tostring(row.id))
-          if send(at, store, rec, mid, { id = row.id,
-            note = "Sent again after a resync: the original reason was lost." }) == "retry" then
-            return -- not acked: the next poll resyncs again
-          end
+        local mid = string.format("todo-%s-r%d-%s", store.id, cursor, tostring(row.id))
+        local verdict, rec = route(mid, row.assignee)
+        if verdict == "hold" then
+          held = true
+        elseif verdict == "deliver" and send(at, store, rec, mid, { id = row.id,
+          note = "Sent again after a resync: the original reason was lost." }) == "retry" then
+          return -- not acked: the next poll resyncs again
         end
       end
+      if held then return end -- not acked: delivered rows are not written twice
       if ack(at, cursor) then bump_watermark(store.id, cursor) end
       _floors[store.id] = cursor
       return
@@ -250,32 +293,44 @@ local function poll_store(store)
     if floor == nil then floor = cursor end -- no watermark yet: start at the head
     _floors[store.id] = floor
     local changes = daemon.list_of(page.changes)
-    local last, stopped, any = nil, false, false
+    -- acked: the last change of the handled prefix (delivered, or skipped for
+    -- good). A held change stops the prefix; later changes are still delivered,
+    -- and the next poll reads them again from the held one, which writes nothing
+    -- twice (the sender's duplicate check).
+    local acked, held, stopped, any = nil, false, false, false
     for _, c in ipairs(changes) do
       local seq = tonumber(c.seq) or 0
+      local handled = true
       if seq > floor then
         if c.kind == "assign" then
-          local rec = M.local_recipient(c.to)
-          if rec and send(at, store, rec, M.message_id(store.id, seq),
+          local mid = M.message_id(store.id, seq)
+          local verdict, rec = route(mid, c.to)
+          if verdict == "hold" then
+            handled = false
+          elseif verdict == "deliver" and send(at, store, rec, mid,
             { id = c.id, from = c.from, reason = c.reason }) == "retry" then
             stopped = true
             break
           end
         end
-        effects(store, c)
-        any = true
+        if seq > (_applied[store.id] or 0) then
+          _applied[store.id] = seq
+          effects(store, c)
+          any = true
+        end
       end
-      last = seq
+      if not handled then held = true end
+      if handled and not held then acked = seq end
     end
     if any then
       pcall(function()
         require("auto-core.events").publish("core.todo:changed", { kind = "changes", store = store.id })
       end)
     end
-    if last then
-      if ack(at, last) then bump_watermark(store.id, last) end
+    if acked then
+      if ack(at, acked) then bump_watermark(store.id, acked) end
     end
-    if stopped or #changes < page_size then return end
+    if stopped or held or #changes < page_size then return end
   end
 end
 
@@ -386,11 +441,17 @@ end
 function M.start()
   if _running or vim.g.auto_core_todo_notifier == false then return end
   _running = true
+  _started_at = now_ms()
   local ok, events = pcall(require, "auto-core.events")
   if ok then
     _subs = {
       events.subscribe("autodoc.session:connected", function() vim.schedule(on_connected) end),
       events.subscribe("autodoc.session:disconnected", function() vim.schedule(on_disconnected) end),
+      -- A mailbox just registered (an agent spawned): poll at once, so a held
+      -- assignment for it is delivered now rather than at the next tick.
+      events.subscribe("core.mailbox:registered", function()
+        vim.schedule(function() if _running then M.poll_all() end end)
+      end),
     }
   end
   if vim.v.vim_did_enter == 1 then
@@ -420,12 +481,13 @@ function M.is_running() return _running end
 -- Test seam: connect now (headless tests never see VimEnter).
 function M._connect() connect() end
 
----Test seam: { poll_ms, watermark_path, ensure, page }.
+---Test seam: { poll_ms, watermark_path, ensure, page, grace_ms }.
 function M._configure(cfg) _cfg = cfg or {} end
 
 function M._reset_for_tests()
   M.stop()
   _cfg, _floors, _backoff, _polling, _again, _waiters = {}, {}, nil, false, false, {}
+  _applied, _audited, _started_at = {}, {}, nil
 end
 
 return M
