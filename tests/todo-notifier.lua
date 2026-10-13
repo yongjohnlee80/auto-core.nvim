@@ -16,6 +16,10 @@ local mb_path  = mailbox.path
 local registry = require("auto-core.mailbox.registry")
 local events   = require("auto-core.events")
 
+-- The cells up to the hold sections run with grace_ms = 0: a recipient not
+-- registered here is past the window at once (skipped and acked), as the
+-- notifier treats it after GRACE_MS. The hold sections set a window.
+
 -- ── fixture ─────────────────────────────────────────────────────
 local kb = env.new_kb("kb")
 local store = kb .. "/.todo-list"
@@ -90,7 +94,7 @@ local function poll()
   return done
 end
 
-notifier._configure({ poll_ms = false, watermark_path = wm })
+notifier._configure({ poll_ms = false, watermark_path = wm, grace_ms = 0 })
 notifier.start()
 notifier._connect()
 env.wait(5000, function() return count("todos.stores") > 0 end)
@@ -116,7 +120,7 @@ run("deliver", function()
   ok("a second poll sends nothing more", #inbox(lector) == 1, #inbox(lector))
 end)
 
-section("recipients this Neovim does not host: skipped and acked")
+section("recipients this Neovim does not host, past the grace window (0 here): skipped and acked")
 run("skip", function()
   todo.assign("2026-10-01-task-2", "agent:ghost", "nobody here")
   todo.assign("2026-10-01-task-3", "user")
@@ -185,7 +189,7 @@ end)
 section("the timer delivers an assignment made outside this Neovim; it stops on disconnect")
 run("timer", function()
   notifier.stop()
-  notifier._configure({ poll_ms = 200, watermark_path = wm })
+  notifier._configure({ poll_ms = 200, watermark_path = wm, grace_ms = 0 })
   notifier.start()
   notifier._connect()
   local t = env.call("todos.get", { "kb", "2026-10-01-task-4" })
@@ -207,7 +211,7 @@ run("timer", function()
   ok("delivered on reconnect (the catch-up)", env.wait(5000, function()
     return env.exists(lector.subs.inbox .. "/" .. mid2 .. ".json") end))
   notifier.stop()
-  notifier._configure({ poll_ms = false, watermark_path = wm })
+  notifier._configure({ poll_ms = false, watermark_path = wm, grace_ms = 0 })
   notifier.start()
 end)
 
@@ -234,7 +238,7 @@ run("watermark", function()
   mb_path.set_instance_id("3333333333-44444")
   registry.register("nvim", { root = mbroot })
   local lector2 = registry.register("agent:lector", { root = mbroot })
-  notifier._configure({ poll_ms = false, watermark_path = wm })
+  notifier._configure({ poll_ms = false, watermark_path = wm, grace_ms = 0 })
   notifier.start()
   notifier._connect()
   poll()
@@ -248,7 +252,7 @@ run("watermark", function()
   mb_path.set_instance_id("5555555555-66666")
   registry.register("nvim", { root = mbroot })
   local lector3 = registry.register("agent:lector", { root = mbroot })
-  notifier._configure({ poll_ms = false, watermark_path = wm })
+  notifier._configure({ poll_ms = false, watermark_path = wm, grace_ms = 0 })
   notifier.start()
   notifier._connect()
   poll()
@@ -280,6 +284,73 @@ run("resync", function()
   ok("not to the agent this Neovim does not host",
     #vim.fn.glob(lector.subs.inbox .. "/todo-*task-2*.json", false, true) == 0)
   ok("then the page's cursor was acked", acked == h, tostring(acked) .. " vs " .. h)
+end)
+
+section("held: an assignment made before its agent registers is delivered when it registers")
+run("hold", function()
+  notifier._reset_for_tests()
+  notifier._configure({ poll_ms = false, watermark_path = wm, grace_ms = 60000 })
+  notifier.start()
+  notifier._connect()
+  poll()
+  local nid = todo.add({ title = "For an agent that starts later", assignee = "agent:newbie" })
+  poll()
+  local nseq = assign_seq(nid)
+  local nmid = notifier.message_id(store_id, nseq)
+  ok("nothing is written while the agent is not registered", vim.fn.isdirectory(mbroot
+    .. "/" .. mb_path.get_instance_id() .. "/newbie") == 0)
+  ok("the watermark does not pass the held change", (notifier.watermark(store_id) or 0) < nseq,
+    tostring(notifier.watermark(store_id)) .. " vs " .. nseq)
+  local lid = todo.add({ title = "Meanwhile, for lector", assignee = "agent:lector" })
+  poll()
+  local lmid = notifier.message_id(store_id, assign_seq(lid))
+  local lpath = lector.subs.inbox .. "/" .. lmid .. ".json"
+  ok("a later change is delivered while the earlier one is held", env.exists(lpath))
+  local st = vim.uv.fs_stat(lpath)
+  local n_lector = #inbox(lector)
+  poll()
+  local st2 = vim.uv.fs_stat(lpath)
+  ok("the next poll reads it again and writes nothing twice", st2 and st.ino == st2.ino
+    and st.mtime.nsec == st2.mtime.nsec and #inbox(lector) == n_lector)
+  ok("the watermark still does not pass the held change", (notifier.watermark(store_id) or 0) < nseq)
+  -- the agent spawns: registration alone must deliver (the test polls no more)
+  local newbie = registry.register("agent:newbie", { root = mbroot })
+  ok("delivered when the agent registers, within the window", env.wait(5000, function()
+    return env.exists(newbie.subs.inbox .. "/" .. nmid .. ".json") end))
+  ok("then the watermark passes both changes", env.wait(5000, function()
+    return (notifier.watermark(store_id) or 0) >= assign_seq(lid) end), notifier.watermark(store_id))
+  local st3 = vim.uv.fs_stat(lpath)
+  ok("lector's message was still written once", st3 and st3.ino == st.ino and #inbox(lector) == n_lector)
+end)
+
+section("past the grace window: a recipient still not registered is skipped and acked, once, as an audit line")
+run("grace", function()
+  notifier._reset_for_tests()
+  notifier._configure({ poll_ms = false, watermark_path = wm, grace_ms = 300 })
+  notifier.start()
+  notifier._connect()
+  env.wait(500, function() return false end)
+  poll()
+  local log = require("auto-core.log")
+  local toasts = 0
+  local real = vim.notify
+  vim.notify = function(...) toasts = toasts + 1; return real(...) end
+  local gid = todo.add({ title = "For an agent that never starts", assignee = "agent:never" })
+  poll()
+  poll()
+  vim.notify = real
+  local gseq = assign_seq(gid)
+  local gmid = notifier.message_id(store_id, gseq)
+  ok("acked: the watermark passes it", (notifier.watermark(store_id) or 0) >= gseq,
+    tostring(notifier.watermark(store_id)) .. " vs " .. gseq)
+  local lines = 0
+  for _, e in ipairs(log.recent()) do
+    if tostring(e.message):find(gmid, 1, true) and tostring(e.message):find("skipped", 1, true) then
+      lines = lines + 1
+    end
+  end
+  ok("one audit line names it", lines == 1, lines)
+  ok("and no notice reached the user", toasts == 0, toasts)
 end)
 
 notifier.stop()
