@@ -37,19 +37,19 @@ run_suite() {
       timeout 600 nvim --headless -u NONE -l "$0"' "$file" 2>&1)"
   rc=$?
   stop_daemons
-  printf '%s\n' "$out" | grep -E "^  (PASS|FAIL)" | sed 's/^/   /'
+  printf '%s\n' "$out" | grep -oE "  (PASS|FAIL)  .*" | sed 's/^/   /'
   summary="$(printf '%s\n' "$out" | grep -oE "[0-9]+ passed, [0-9]+ failed" | tail -1 || true)"
   if [ -z "$summary" ]; then
     echo "   ✗ $name: NO SUMMARY LINE — the suite aborted mid-run"
     printf '%s\n' "$out" | tail -30 | sed 's/^/     /'
-    overall=1; rm -rf "$sandbox"; return
+    overall=1; rm -rf "$sandbox" 2>/dev/null; return
   fi
   echo "   $name: $summary (exit=$rc)"
   fail_n="${summary##* passed, }"; fail_n="${fail_n%% failed}"
   if [ "$fail_n" -ne 0 ]; then echo "   ✗ $name: $fail_n failed"; overall=1
   elif [ "$rc" -ne 0 ]; then echo "   ✗ $name: exit=$rc despite '$summary'"; overall=1
   else echo "   ✓ $name OK"; fi
-  rm -rf "$sandbox"
+  rm -rf "$sandbox" 2>/dev/null || true
 }
 
 only="${1:-}"

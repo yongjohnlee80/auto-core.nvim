@@ -63,6 +63,7 @@ end
 ---start_daemon sets autodoc.nvim up against this suite's own daemon.
 function M.start_daemon()
   local cfg = M.tmp .. "/autodoc/config.toml"
+  for _, d in ipairs({ "run", "state", "data" }) do vim.fn.mkdir(M.tmp .. "/autodoc/" .. d, "p") end
   M.write(cfg, table.concat({
     "[server]",
     string.format("socket = %q", M.tmp .. "/autodoc/run/autodoc.sock"),
