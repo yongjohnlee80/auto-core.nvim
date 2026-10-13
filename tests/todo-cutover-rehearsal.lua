@@ -52,7 +52,7 @@ end
 
 local function start_daemon()
   local cfg = R .. "/autodoc/config.toml"
-  vim.fn.mkdir(R .. "/autodoc", "p")
+  for _, d in ipairs({ "state", "data" }) do vim.fn.mkdir(R .. "/autodoc/" .. d, "p") end
   local f = assert(io.open(cfg, "w"))
   f:write(table.concat({ "[server]",
     string.format("socket = %q", R .. "/autodoc/autodoc.sock"),
