@@ -29,8 +29,11 @@ local function ok(name, cond, detail)
   if cond then pass = pass + 1 else fail = fail + 1 end
 end
 
-io.stdout:write("mailbox wake ctx — arrival facts reach the wake hook\n")
-io.stdout:flush()
+-- Headers go through the same stream as ok(): mixing print() with
+-- io.stdout:write() interleaves them out of order.
+local function section(title) io.stdout:write("\n", title, "\n"); io.stdout:flush() end
+
+section("mailbox wake ctx — arrival facts reach the wake hook")
 
 local mailbox  = require("auto-core.mailbox")
 local mb_path  = mailbox.path
@@ -95,7 +98,7 @@ local function drop_in_outbox(rec, msg)
 end
 
 -- ── 1. inbox: the wake names the SENDER and the subject ─────────────
-print("\n[1] inbox arrival: arrival_from is the message's from, not the recipient")
+section("[1] inbox arrival: arrival_from is the message's from, not the recipient")
 local m1 = message.build({ from = x.id, to = "agent:y", subject = "Ready for review",
                             body = "PR #12" })
 drop_in_outbox(x, m1)
@@ -140,7 +143,7 @@ ok("wake_dispatched log entry names the sender and subject",
   logged and vim.inspect(logged.fields))
 
 -- ── 2. responses: outcome + command reach the wake ──────────────────
-print("\n[2] response arrival: arrival_ok / code / error / command")
+section("[2] response arrival: arrival_ok / code / error / command")
 local function send_command(cmd)
   local c = message.build({ kind = "command", from = x.id, to = nvim.id, command = cmd,
                             correlation_id = "cor-" .. cmd })
@@ -201,7 +204,7 @@ ok("transport.fail envelope: command + code + from",
   vim.inspect(fenv))
 
 -- ── 3. a response consumed before the router saw it ─────────────────
-print("\n[3] response already archived: the wake says so instead of guessing")
+section("[3] response already archived: the wake says so instead of guessing")
 local gone = x.subs.responses .. "/cor-gone.json"
 vim.fn.writefile({ vim.json.encode({ ok = true, correlation_id = "cor-gone" }) }, gone)
 -- Simulate the agent reading + archiving it between the fs_event and the
@@ -220,7 +223,7 @@ ok("arrival_read_error set, arrival_ok nil",
   w_gone and vim.inspect({ re = w_gone.ctx.arrival_read_error, ok = w_gone.ctx.arrival_ok }))
 
 -- ── 4. undeliverable: the event names the subject and the path ───────
-print("\n[4] outbox_undeliverable carries the subject and path")
+section("[4] outbox_undeliverable carries the subject and path")
 local undeliv = {}
 events_m.subscribe("core.mailbox:outbox_undeliverable", function(p) undeliv[#undeliv + 1] = p end)
 local m4 = message.build({ from = x.id, to = "agent:nobody", subject = "Hello?" })
