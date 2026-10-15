@@ -117,11 +117,23 @@ vim.wait(2000, function() return fast_err ~= nil end, 10)
 ok("a sync call in a fast event is refused, before any work",
   tostring(fast_err):find("called from a fast event", 1, true), fast_err)
 
-section("vars work on the Neovim side")
+section("vars answer \"AutoDoc required\" too (ADR 1792015069 §2.5)")
 local vars = require("auto-core.todo.vars")
-local okv = vars.set("REQ_VAR", root)
-ok("vars.set still works", okv == true and vars.get("REQ_VAR") == root)
-vars.remove("REQ_VAR")
+local okv, verr = vars.set("REQ_VAR", root)
+ok("vars.set refuses, naming AutoDoc", okv == false and tostring(verr):find("AutoDoc required", 1, true), verr)
+local got, why = vars.get("KB_ROOT")
+ok("vars.get has no value, and says why", got == nil and tostring(why):find("AutoDoc required", 1, true), why)
+ok("… so a $VAR ref is unresolved, with the reason",
+  (function()
+    local r = vars.resolve_path("$KB_ROOT/adrs/x.md")
+    return r.unresolved and r.path == "$KB_ROOT/adrs/x.md" and tostring(r.why):find("AutoDoc required", 1, true)
+  end)())
+ok("… an absolute path is still expanded", vars.resolve_path("/abs/x").path == "/abs/x")
+ok("… and symbolize_path leaves a path as it is", vars.symbolize_path(root .. "/x.md") == root .. "/x.md")
+local rows, lwhy = vars.list()
+ok("vars.list is empty, and says why", #rows == 0 and tostring(lwhy):find("AutoDoc required", 1, true), lwhy)
+ok("nothing was written to auto-core's state for it",
+  require("auto-core.state").namespace("todo.vars", { persist = "json" }):get("entries") == nil)
 
 section("the notifier stays off without AutoDoc")
 local notifier = require("auto-core.todo.notifier")

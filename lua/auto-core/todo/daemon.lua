@@ -160,6 +160,13 @@ function M.run(fn, done)
   resume(co)
 end
 
+---in_run is whether the caller runs inside `run`, where `rpc` may yield.
+---@return boolean
+function M.in_run()
+  local co, main = coroutine.running()
+  return co ~= nil and not main and _runs[co] ~= nil
+end
+
 ---rpc sends one verb from inside `run` and returns (result, err), the result with
 ---vim.NIL normalized away.
 ---@param method string

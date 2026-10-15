@@ -6,8 +6,10 @@
 ---disagree — `todo/vars.lua`'s `$KB_ROOT` built-in (env ROOT → READ[0]
 ---→ WRITE → `auto-agents.kb.root()`) and `todo/init.lua`'s private
 ---`kb_root()` (the same env chain, without the auto-agents fallback) —
----and both now delegate to `M.root`
----([[shared-resolver-single-source-of-truth]]).
+---and both delegated to `M.root`
+---([[shared-resolver-single-source-of-truth]]). Since v0.4.2 a todo store's
+---`$KB_ROOT` is AutoDoc's, derived from where the store is (ADR 1792015069):
+---which KB a project uses is still answered here.
 ---
 ---  M.primary(project_root?)                       → { workspace, root } | nil
 ---  M.root(project_root?)                          → root | nil

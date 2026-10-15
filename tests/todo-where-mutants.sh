@@ -18,10 +18,12 @@ SRC="$PWD"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-# run_suite <dir> <where|notifier|required>
+# run_suite <dir> <where|notifier|required|smoke>
 run_suite() {
   if [ "$2" = required ]; then
     (cd "$1" && timeout 120 nvim --headless -u NONE -l tests/todo-where-required.lua 2>&1)
+  elif [ "$2" = smoke ]; then
+    (cd "$1" && timeout 600 nvim --headless -u NONE -l tests/smoke.lua 2>&1)
   else
     (cd "$1" && bash tests/todo-daemon.sh "$2" 2>&1)
   fi
@@ -29,7 +31,7 @@ run_suite() {
 summary_of() { printf '%s\n' "$1" | grep -oE '[0-9]+ passed, [0-9]+ failed' | tail -1; }
 
 cp -r "$SRC" "$WORK/base"
-for s in required where notifier; do
+for s in required where notifier smoke; do
   out="$(run_suite "$WORK/base" "$s")"
   summary="$(summary_of "$out")"
   if [ -z "$summary" ] || [ "${summary##*, }" != "0 failed" ]; then
@@ -41,6 +43,7 @@ done
 W=lua/auto-core/todo/where.lua
 N=lua/auto-core/todo/notifier.lua
 D=lua/auto-core/todo/daemon.lua
+V=lua/auto-core/todo/vars.lua
 # file|suite|name|old|new — literal strings; old must occur exactly once in file.
 mutants=(
   "$W|where|the first call does not claim|      claim(at, root, r.store_id, r.store)\n      c.claimed = true|      c.claimed = false"
@@ -51,6 +54,16 @@ mutants=(
   "$W|where|an error without a code passes as success|  if err and (tolerate == nil or err.code ~= tolerate) then daemon.fail(err) end|  if err and err.code ~= tolerate then daemon.fail(err) end"
   "$W|where|the explicit claim does not check the daemon's answer|  if not c.claimed then\n    daemon.fail(|  if false then\n    daemon.fail("
   "$D|required|a fast event waits|  if vim.in_fast_event() then|  if false then"
+  "$W|where|todos.open sends the session's kb_root again|  local _, oerr = daemon.rpc(\"todos.open\", { at })|  local _, oerr = daemon.rpc(\"todos.open\", { at, { kb_root = vim.fn.getcwd() } })"
+  "$V|where|Lua computes \$KB_ROOT itself again|  if row then return row.value end|  if row then return name == \"KB_ROOT\" and require(\"auto-core.kb\").root() or row.value end"
+  "$V|where|a new name is kept globally, not for this machine|    or \"machine\"\n  return put(name, value, scope)|    or \"global\"\n  return put(name, value, scope)"
+  "$V|required|without AutoDoc a variable falls back to vim.env|  local e, why = table_now()\n  if not e then return nil, why end\n  local row = e.by[name]|  local e, why = table_now()\n  if not e then return vim.env[name] end\n  local row = e.by[name]"
+  "$V|smoke|an old table is never read again|    if vim.uv.now() - e.read > M.FRESH_MS and not vim.in_fast_event() then|    if false then"
+  "$V|smoke|a set leaves the old table cached|  _cache = {}\n  publish_changed(value == \"\" and \"remove\" or \"set\", name)|  publish_changed(value == \"\" and \"remove\" or \"set\", name)"
+  "$V|smoke|symbolize: the tie goes to \$WORKSPACE, not \$KB_ROOT|  for _, n in ipairs({ \"KB_ROOT\", \"WORKSPACE\", \"PROJECT_ROOT\" }) do\n    add(n, e.by[n] and e.by[n].value)\n  end|  for _, n in ipairs({ \"PROJECT_ROOT\", \"WORKSPACE\", \"KB_ROOT\" }) do\n    add(n, e.by[n] and e.by[n].value)\n  end"
+  "$V|smoke|remove ignores where the value comes from|  local scope = row and row.value and row.source\n|  local scope = row and row.value and \"machine\"\n"
+  "$W|smoke|the old vars are offered every session|  if ns:get(\"carried\") then return end|  if false then return end"
+  "$W|smoke|a name the daemon knows is carried over it|    if type(name) == \"string\" and type(value) == \"string\" and value ~= \"\" and not have[name] then|    if type(name) == \"string\" and type(value) == \"string\" and value ~= \"\" then"
   "$N|notifier|a failed send is acked past|            stopped = true\n            break|            stopped = false"
   "$N|notifier|past the window a recipient is still held|  return \"skip\"\nend\n\nlocal function ack|  return \"hold\"\nend\n\nlocal function ack"
   "$N|notifier|a new consumer replays the retained log|  if floor == nil then floor = M.watermark(store.id) end|  if floor == nil then floor = 0 end"

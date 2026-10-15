@@ -20,7 +20,7 @@
 ---Moving the domain layer down removes the reason to reach up. auto-core
 ---depends on neither worktree nor auto-finder and must not, so what moved is
 ---exactly what needed nothing from them: every function here requires only
----`auto-core.drafts`, `auto-core.git.worktree` and `auto-core.todo.vars`.
+---`auto-core.drafts`, `auto-core.git.worktree` and `auto-core.kb`.
 ---
 ---`submit` deliberately did NOT move. It is the one function that reaches
 ---sideways — it needs `worktree.review` to write the pair — so it stays with
@@ -404,13 +404,14 @@ function M.reviewer(cwd)
   return display, M.slugify(display)
 end
 
----_kb_root resolves `$KB_ROOT` through auto-core's canonical resolver, so the
----Markdown lands where every other durable doc does.
+---_kb_root is the project's KB, from auto-core's one KB resolver (ADR 1791209945
+---§5), so the Markdown lands where every other durable doc does. Not a todo
+---store's `$KB_ROOT`: that is AutoDoc's, and a project's store may lie in no KB.
 local function _kb_root()
-  local ok, vars = pcall(require, "auto-core.todo.vars")
+  local ok, kb = pcall(require, "auto-core.kb")
   if not ok then return nil end
-  local okv, v = pcall(vars.get, "KB_ROOT")
-  if okv and type(v) == "string" and v ~= "" then return v end
+  local okr, v = pcall(kb.root)
+  if okr and type(v) == "string" and v ~= "" then return v end
   return nil
 end
 

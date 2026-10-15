@@ -9,7 +9,8 @@
 ---     <root>/.todo-list;
 ---  2. the At is the workspace whose <root>/.todo-list is S, else {root};
 ---  3. the daemon learns the root once: set_dir(override) or register(root);
----  4. todos.open(At, {kb_root});
+---  4. todos.open(At): the daemon derives the store's variables itself (ADR
+---     1792015069), so no kb_root is sent;
 ---  5. the first call claims the store (the cutover, ADR §3 step 3), with
 ---     legacy_workspace = the Neovim root, which is what Lua's $WORKSPACE meant.
 ---
@@ -34,7 +35,6 @@ local M = {}
 M.MARKER = ".autodoc-owner"
 
 local _ctx = {}       -- root → { root, at, store, store_id, claimed, released, writable }
-local _vars_sent = {} -- store id → true once Lua's user vars were offered to the daemon
 local _warned = {}
 
 local function state()
@@ -141,29 +141,32 @@ local function claim(at, root, store_id, store, fresh)
   end
 end
 
----offer_vars gives the daemon Lua's user vars it lacks, once per store per
----session: refs resolve against the daemon's vars after the cutover.
-local function offer_vars(at, store_id)
-  if _vars_sent[store_id] then return end
-  _vars_sent[store_id] = true
+---carry_vars gives the daemon, once per machine, the user vars auto-core kept in
+---its own state before v0.4.2 (state `todo.vars`, key `entries`), as global vars:
+---they were this machine's, for every store. Once carried they are never offered
+---again, so a var removed in AutoDoc stays removed. A name the daemon already
+---knows is left alone.
+local function carry_vars(at)
+  local ns = require("auto-core.state").namespace("todo.vars", { persist = "json" })
+  if ns:get("carried") then return end
+  local entries = ns:get("entries")
+  if type(entries) ~= "table" or next(entries) == nil then
+    ns:set("carried", os.date("!%Y-%m-%dT%H:%M:%SZ"))
+    return
+  end
+  local list, lerr = daemon.rpc("todos.vars", { at })
+  if lerr then return end
   local have = {}
-  local list = daemon.rpc("todos.vars", { at })
   for _, v in ipairs(daemon.list_of(list)) do
-    if type(v) == "table" and v.name then have[v.name] = v.value end
+    if type(v) == "table" and v.name then have[v.name] = true end
   end
-  local ok, user = pcall(function()
-    local out = {}
-    for _, v in ipairs(require("auto-core.todo.vars").list()) do
-      if not v.builtin and type(v.value) == "string" then out[#out + 1] = v end
-    end
-    return out
-  end)
-  if not ok then return end
-  for _, v in ipairs(user) do
-    if have[v.name] ~= v.value then
-      daemon.rpc("todos.set_var", { v.name, v.value })
+  for name, value in pairs(entries) do
+    if type(name) == "string" and type(value) == "string" and value ~= "" and not have[name] then
+      local _, err = daemon.rpc("todos.set_var", { name, value, { scope = "global" } })
+      if err then return end -- not recorded: the next store's resolution tries again
     end
   end
+  ns:set("carried", os.date("!%Y-%m-%dT%H:%M:%SZ"))
 end
 
 ---locate maps a root to its At, makes the daemon agree about the root, opens
@@ -197,11 +200,7 @@ local function locate(root)
   end
   at = at or { root = root }
 
-  local ok_kb, kb = pcall(require, "auto-core.kb")
-  local kb_root = ok_kb and type(kb.root) == "function" and kb.root(root) or nil
-  local open_params = { at }
-  if type(kb_root) == "string" and kb_root ~= "" then open_params[2] = { kb_root = kb_root } end
-  local _, oerr = daemon.rpc("todos.open", open_params)
+  local _, oerr = daemon.rpc("todos.open", { at })
   check(oerr, daemon.NOT_A_STORE)
 
   local r, rerr = daemon.rpc("todos.resolve", { at })
@@ -239,7 +238,7 @@ function M.ensure(root)
     claim(at, root, r.store_id, r.store)
   end
 
-  offer_vars(at, r.store_id) -- best effort: its rpc errors are ignored, never raised
+  carry_vars(at) -- best effort: an rpc error leaves it for the next resolution
   _ctx[root] = c
   return c
 end
@@ -262,14 +261,14 @@ function M.claim(root)
   if not c.claimed then
     daemon.fail("the daemon answered todos.claim, but " .. tostring(r.store) .. " is still not claimed")
   end
-  offer_vars(c.at, c.store_id)
+  carry_vars(c.at)
   _ctx[root] = c
   return c
 end
 
 ---Test seam.
 function M._reset_for_tests()
-  _ctx, _vars_sent, _warned = {}, {}, {}
+  _ctx, _warned = {}, {}
 end
 
 return M

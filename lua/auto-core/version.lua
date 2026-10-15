@@ -981,6 +981,11 @@ return {
   -- format modules. where, daemon, buffers, notifier, vars and paths stay. A
   -- removal in a patch, by Johno's ruling; the direct clients (auto-finder
   -- v0.5.10, auto-agents v0.3.6) ship first.
-  version     = "0.4.1",
+  -- v0.4.2: todo.vars asks AutoDoc's daemon for the session store's variables
+  -- (ADR 1792015069 §2.5) instead of computing $KB_ROOT and $WORKSPACE itself;
+  -- $PROJECT_ROOT is a built-in, $CWD is gone, set keeps a new name for this
+  -- machine and store. where sends todos.open no kb_root. review.draft's
+  -- kb_root is auto-core.kb's. daemon.in_run is new.
+  version     = "0.4.2",
   api_version = "0.1",
 }

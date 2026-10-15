@@ -11,6 +11,52 @@ key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
 
+## [v0.4.2] — 2026-10-15 — a todo store's variables are AutoDoc's
+
+ADR 1792015069 §2.5 ("variables belong to the store, not the route"). **Needs
+AutoDoc v0.1.49** for the same values from every route; an older daemon still
+answers, with its per-route values.
+
+- **`auto-core.todo.vars` asks the daemon.** `get`, `list`, `resolve_path` and
+  `symbolize_path` read the session store's table from `todos.vars`, which
+  AutoDoc derives from where the store is and the `.autodoc-vars.toml` beside
+  it. Before, this module computed `$KB_ROOT` (the session project's KB) and
+  `$WORKSPACE` (the Neovim root) itself, so the panel and the daemon could read
+  one ref two ways.
+  - The table is cached per store and read again in the background once older
+    than `FRESH_MS` (2 s): the daemon announces no variable change to Neovim. A
+    change publishes `core.todo.vars:changed`, as before.
+  - Built-ins: `$KB_ROOT`, `$WORKSPACE`, `$PROJECT_ROOT` (new) and `$HOME`.
+    **`$CWD` is gone**: the daemon has no working directory, and no store used
+    it in a ref.
+  - `symbolize_path` follows the daemon's rule: longest prefix among `$KB_ROOT`,
+    `$WORKSPACE`, `$PROJECT_ROOT`, the user vars by name, then `$HOME`, the
+    earlier winning a tie; a bare relative path only against `$KB_ROOT`.
+  - **Without AutoDoc there are no values.** `get` answers nil and "AutoDoc
+    required", `resolve_path` marks a `$VAR` ref unresolved with that reason,
+    `list` is empty, and `set` and `remove` refuse, like every todo call since
+    v0.4.1.
+- **`set` keeps a value where it comes from:** the store's file, this machine,
+  or the daemon's global vars. A new name is this machine's, for this store
+  (`todos.set_var` scope `machine`), so its value never reaches git. Built-ins
+  stay read-only here; AutoDoc's Variables tab overrides one.
+- **The vars auto-core kept itself are carried once.** The user vars in state
+  `todo.vars` go to the daemon as global vars on the first store resolution,
+  skipping a name the daemon already has, and are never offered again, so a var
+  removed in AutoDoc stays removed. Before, they were offered every session.
+- **`where` sends `todos.open` no `kb_root`.** The daemon derives it.
+- **`review.draft.kb_root()` is `auto-core.kb.root()`.** Which KB a project
+  uses is not a todo variable: a project's store may lie in no KB.
+- **`auto-core.todo.daemon.in_run()`** says whether the caller runs inside
+  `daemon.run`.
+- **Tests:**
+  - smoke section 65 runs `vars` against a fake daemon: values, the cache,
+    `symbolize_path`'s rule, the scopes, and the one-time carry.
+  - `tests/todo-where.lua` checks every built-in is the same on the workspace
+    route, the folder route and in Lua.
+  - `tests/todo-where-required.lua` checks the "AutoDoc required" answers.
+  - `tests/todo-where-mutants.sh` gains 10 mutants and a `smoke` suite.
+
 ## [v0.4.1] — 2026-10-14 — the todo shim is removed
 
 ADR 1791532020 §3 step 5 (r12). A patch by Johno's ruling (2026-10-14: "no need

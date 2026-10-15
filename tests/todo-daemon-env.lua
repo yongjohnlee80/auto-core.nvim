@@ -212,7 +212,9 @@ function M.new_kb(name)
   for _, b in ipairs({ "open", "in-progress", "deferred", "completed", "archived" }) do
     vim.fn.mkdir(kb .. "/.todo-list/" .. b, "p")
   end
-  M.write(kb .. "/AGENTS.md", "# KB\n")
+  -- a KB's AGENTS.md says so in its frontmatter: AutoDoc derives a store's $KB_ROOT
+  -- from it (ADR 1792015069 §2.2), and a project's plain AGENTS.md is no KB
+  M.write(kb .. "/AGENTS.md", "---\ntype: kb\n---\n\n# KB\n")
   return kb
 end
 
