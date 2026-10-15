@@ -6907,8 +6907,9 @@ print("\n[65] todo.vars — the store's variables, from AutoDoc's daemon")
   daemon._set_transport(nil)
   wt.set_workspace_root(prev_root)
   where._reset_for_tests()
-  require("auto-core.state").configure({ persist_dir = nil })
-  vim.fn.delete(state_tmp, "rf")
+  -- state_tmp is NOT deleted: configure({ persist_dir = nil }) changes nothing, so
+  -- it stays the persist dir, and a namespace a later section creates first (the
+  -- kb one, [94]) lives in it. Deleted, that namespace's writes fail silently.
   vim.fn.delete(kbdir, "rf")
   vim.fn.delete(proj, "rf")
   package.loaded["auto-core.todo.vars"] = nil
