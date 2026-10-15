@@ -6898,11 +6898,13 @@ print("\n[65] todo.vars — the store's variables, from AutoDoc's daemon")
   ok("an old var is carried to the daemon as global; one it knows is left alone",
     #carried == 1 and carried[1][1] == "OLDV" and carried[1][3].scope == "global", vim.inspect(carried))
   ok("… and recorded as carried", ns:get("carried") ~= nil)
+  ok("fixture: the carried var is removed in AutoDoc", vars.remove("OLDV") == true and vars.get("OLDV") == nil)
   where._reset_for_tests()
   vars._reset_for_tests()
   calls = {}
   vars.get("KB_ROOT")
-  ok("… so it is never offered again", count("todos.set_var") == 0, count("todos.set_var"))
+  ok("… so it is never offered again: a var removed in AutoDoc stays removed",
+    count("todos.set_var") == 0 and vars.get("OLDV") == nil, count("todos.set_var"))
 
   daemon._set_transport(nil)
   wt.set_workspace_root(prev_root)
