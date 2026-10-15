@@ -55,7 +55,7 @@ mutants=(
   "$W|where|the explicit claim does not check the daemon's answer|  if not c.claimed then\n    daemon.fail(|  if false then\n    daemon.fail("
   "$D|required|a fast event waits|  if vim.in_fast_event() then|  if false then"
   "$W|where|todos.open sends the session's kb_root again|  local _, oerr = daemon.rpc(\"todos.open\", { at })|  local _, oerr = daemon.rpc(\"todos.open\", { at, { kb_root = vim.fn.getcwd() } })"
-  "$V|where|Lua computes \$KB_ROOT itself again|  if row then return row.value end|  if row then return name == \"KB_ROOT\" and require(\"auto-core.kb\").root() or row.value end"
+  "$V|where|Lua computes \$KB_ROOT itself again|  if row then return row.value end|  if row then\n    if name == \"KB_ROOT\" then return require(\"auto-core.kb\").root() end\n    return row.value\n  end"
   "$V|where|a new name is kept globally, not for this machine|    or \"machine\"\n  return put(name, value, scope)|    or \"global\"\n  return put(name, value, scope)"
   "$V|required|without AutoDoc a variable falls back to vim.env|  local e, why = table_now()\n  if not e then return nil, why end\n  local row = e.by[name]|  local e, why = table_now()\n  if not e then return vim.env[name] end\n  local row = e.by[name]"
   "$V|smoke|an old table is never read again|    if vim.uv.now() - e.read > M.FRESH_MS and not vim.in_fast_event() then|    if false then"
