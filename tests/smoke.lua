@@ -6851,11 +6851,17 @@ print("\n[65] todo.vars — the store's variables, from AutoDoc's daemon")
   tbl[5].value = "/src/proj/doc2"
   local fresh = vars.FRESH_MS
   vars.FRESH_MS = -1
-  ok("an old table answers at once", vars.get("DOCS") == "/src/proj/docs")
-  vim.wait(1000, function() return seen > 0 end, 10)
+  ok("an old table is read again before it answers: the read has the change",
+    vars.get("DOCS") == "/src/proj/doc2", vars.get("DOCS"))
   vars.FRESH_MS = fresh
-  ok("… is read again in the background, and the change published", seen == 1, seen)
-  ok("… so the next read has it", vars.get("DOCS") == "/src/proj/doc2")
+  ok("… and the change is published", seen == 1, seen)
+
+  -- ~ is the store's $HOME, as the daemon reads it, never Neovim's own
+  ok("resolve_path: ~/x is under the store's $HOME", vars.resolve_path("~/ref.md").path == "/home/u/ref.md",
+    vars.resolve_path("~/ref.md").path)
+  ok("resolve_path: ~ alone is the store's $HOME", vars.resolve_path("~").path == "/home/u")
+  ok("resolve_path: ~name is left as the daemon leaves it", vars.resolve_path("~other/x").path == "~other/x")
+  ok("symbolize: a ~ path is the store's $HOME's", vars.symbolize_path("~/n.md") == "$HOME/n.md")
 
   -- set / remove: where the value comes from ---------------------
   local function last_set()
@@ -6885,6 +6891,21 @@ print("\n[65] todo.vars — the store's variables, from AutoDoc's daemon")
   ok("remove: a built-in is refused", vars.remove("HOME") == false)
   events.unsubscribe(h)
 
+  -- the background read: a change made elsewhere is published with no one reading
+  vars._reset_for_tests()
+  vars.FRESH_MS = 50
+  vars.get("KB_ROOT") -- the session's first read starts it
+  local polled = 0
+  local hp = events.subscribe("core.todo.vars:changed", function() polled = polled + 1 end)
+  local reads = count("todos.vars")
+  tbl[5].value = "/src/proj/elsewhere"
+  ok("an idle session sees a change made elsewhere: it is published with no read",
+    vim.wait(2000, function() return polled > 0 end, 10), polled)
+  ok("… by reading the table again", count("todos.vars") > reads)
+  events.unsubscribe(hp)
+  vars._reset_for_tests()
+  vars.FRESH_MS = fresh
+
   -- the one-time carry of auto-core's own vars (before v0.4.2) -----
   local ns = require("auto-core.state").namespace("todo.vars", { persist = "json" })
   ns:set("carried", nil)
@@ -6907,6 +6928,7 @@ print("\n[65] todo.vars — the store's variables, from AutoDoc's daemon")
     count("todos.set_var") == 0 and vars.get("OLDV") == nil, count("todos.set_var"))
 
   daemon._set_transport(nil)
+  vars._reset_for_tests() -- its background read stops
   wt.set_workspace_root(prev_root)
   where._reset_for_tests()
   -- state_tmp is NOT deleted: configure({ persist_dir = nil }) changes nothing, so

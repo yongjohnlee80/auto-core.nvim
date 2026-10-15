@@ -297,6 +297,29 @@ run("vars", function()
   ok("… and the folder route sees it too", (table_of({ root = proj }).COREVAR or {}).value == proj)
   ok("… and so does Lua", vars.get("COREVAR") == proj)
   ok("vars.remove clears it", vars.remove("COREVAR") == true and (table_of("kb").COREVAR or {}).value == nil)
+
+  -- ~ is the store's $HOME: an override in the store's file moves it for the daemon and for Lua alike
+  local home = env.tmp .. "/home-override"
+  vim.fn.mkdir(home, "p")
+  local _, herr = env.call("todos.set_var", { "HOME", home, { at = "kb", scope = "store" } })
+  ok("fixture: the store overrides $HOME", herr == nil, herr and herr.message)
+  vars._reset_for_tests()
+  ok("Lua reads ~ under the store's $HOME", vars.resolve_path("~/no-such.md").path == home .. "/no-such.md",
+    vars.resolve_path("~/no-such.md").path)
+  local t = todo.add({ id = "2026-10-02-home-ref", title = "A ~ ref", adr = { "~/no-such.md" } })
+  ok("fixture: the task was added", t ~= nil)
+  env.call("todos.refresh", { "kb" })
+  local got = env.call("todos.get", { "kb", "2026-10-02-home-ref" }) or {}
+  local msg = ""
+  for _, e in ipairs(got.errors or {}) do msg = msg .. tostring(e.message) end
+  local daemon_path = msg:match("resolved: ([^)]+)%)")
+  ok("the daemon resolved the same ref to the same path",
+    daemon_path ~= nil and daemon_path == vars.resolve_path((got.adr or {})[1] or "").path,
+    ("daemon=%s lua=%s ref=%s"):format(tostring(daemon_path), vars.resolve_path((got.adr or {})[1] or "").path,
+      tostring((got.adr or {})[1])))
+  ok("… under the overridden $HOME", daemon_path == home .. "/no-such.md", daemon_path)
+  env.call("todos.set_var", { "HOME", "", { at = "kb", scope = "store" } })
+  vars._reset_for_tests()
 end)
 
 env.finish()

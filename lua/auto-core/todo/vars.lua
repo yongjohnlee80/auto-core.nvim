@@ -24,10 +24,11 @@
 ---    and the daemon's global vars.
 ---
 ---The store is the session project's (`auto-core.todo.where`). Its table is
----cached per store and read again in the background once older than
----`M.FRESH_MS`; a change publishes `core.todo.vars:changed`. Without AutoDoc there
----are no values: `get` answers nil and the reason, as every todo verb answers
----"AutoDoc required" since v0.4.1.
+---cached per store: a read of one older than `M.FRESH_MS` reads it again first,
+---and once read it is read again every `M.FRESH_MS` in the background; a change
+---publishes `core.todo.vars:changed`. A leading `~` is the store's `$HOME`, as the
+---daemon reads it. Without AutoDoc there are no values: `get` answers nil and the
+---reason, as every todo verb answers "AutoDoc required" since v0.4.1.
 ---
 ---Asking which KB a project uses is a different question, `auto-core.kb.root()`:
 ---a project's store may lie outside any KB.
@@ -38,12 +39,23 @@ local fs_path = require("auto-core.fs.path")
 
 local M = {}
 
--- NOTE: staleness bound. The daemon announces no variable change to Neovim (its
--- events go to its own log), so a value set elsewhere (AutoDoc's Variables tab,
--- a hand edit of the store's .autodoc-vars.toml, another Neovim) is seen here
--- within this long: a read of an older table answers it and reads it again in the
--- background.
+-- NOTE: staleness bound, a poll because the daemon cannot announce. The daemon
+-- tells Neovim of no variable change (its events go to its own log), so a value set
+-- elsewhere (AutoDoc's Variables tab, a hand edit of the store's
+-- .autodoc-vars.toml, another Neovim) is found by reading again:
+--   * a read of a table older than this reads it again first (REREAD_WAIT_MS);
+--   * once the session has read a table, it is read again every FRESH_MS in the
+--     background, and a change is published (core.todo.vars:changed), so a panel
+--     nobody touches shows it too.
 M.FRESH_MS = 2000
+
+-- NOTE: deadline. A stale table's re-read is waited for at most this long; past it
+-- the read answers the table it had, and the background read carries on: a render
+-- never stalls on a slow daemon.
+M.REREAD_WAIT_MS = 500
+
+---now_ms is a monotonic clock in milliseconds, current inside a long synchronous call too.
+local function now_ms() return vim.uv.hrtime() / 1e6 end
 
 -- ─── built-ins ────────────────────────────────────────────────
 
@@ -77,6 +89,7 @@ function M.is_builtin(name) return BUILTIN[name] == true end
 
 local _cache = {}   -- store id → { at, rows, by, read }
 local _reading = {} -- root → true while a background read runs
+local _poll         -- the timer of the background read, once a table was read
 
 local function deps()
   local ok_d, daemon = pcall(require, "auto-core.todo.daemon")
@@ -116,7 +129,7 @@ local function fetch(daemon, where, root)
       by[v.name] = row
     end
   end
-  return { at = c.at, store_id = c.store_id, rows = rows, by = by, read = vim.uv.now() }
+  return { at = c.at, store_id = c.store_id, rows = rows, by = by, read = now_ms() }
 end
 
 local function same(a, b)
@@ -145,7 +158,39 @@ local function read_again(daemon, where, root)
   end)
 end
 
----table is the session store's variable table, or nil and why.
+---poll starts the background read (FRESH_MS), once: the session store's table, as
+---where resolves it then, read again while Neovim runs.
+local function poll()
+  if _poll then return end
+  _poll = vim.uv.new_timer()
+  _poll:start(M.FRESH_MS, M.FRESH_MS, vim.schedule_wrap(function()
+    local daemon, where = deps()
+    if not daemon or not daemon.available() then return end
+    local root = where.root()
+    local c = where.cached(root)
+    if c and _cache[c.store_id] then read_again(daemon, where, root) end
+  end))
+end
+
+---read reads root's store's table now: inside daemon.run by its rpc, else waiting
+---at most wait_ms (the daemon's own deadline when nil). A change is published.
+---@return table|nil entry, string? why
+local function read(daemon, where, root, wait_ms)
+  local ok, got
+  if daemon.in_run() then
+    ok, got = pcall(fetch, daemon, where, root)
+  else
+    ok, got = daemon.sync(function() return fetch(daemon, where, root) end, wait_ms)
+  end
+  if not ok then return nil, tostring(got) end
+  if keep(got) then publish_changed("read") end
+  poll()
+  return got
+end
+
+---table is the session store's variable table, or nil and why. A table older than
+---FRESH_MS is read again first, waited for at most REREAD_WAIT_MS; when the read
+---cannot finish (a fast event, a slow daemon) the old one answers.
 ---@return table|nil entry, string? why
 local function table_now()
   local daemon, where = deps()
@@ -155,22 +200,36 @@ local function table_now()
   local root = where.root()
   local c = where.cached(root)
   local e = c and _cache[c.store_id]
-  if e then
-    if vim.uv.now() - e.read > M.FRESH_MS and not vim.in_fast_event() then
-      read_again(daemon, where, root)
-    end
+  if not e then
+    return read(daemon, where, root, nil)
+  end
+  if now_ms() - e.read <= M.FRESH_MS then return e end
+  if vim.in_fast_event() then
+    vim.schedule(function() read_again(daemon, where, root) end)
     return e
   end
-  if daemon.in_run() then
-    local ok, got = pcall(fetch, daemon, where, root)
-    if not ok then return nil, tostring(got) end
-    keep(got)
-    return got
-  end
-  local ok, got = daemon.sync(function() return fetch(daemon, where, root) end)
-  if not ok then return nil, tostring(got) end
-  keep(got)
-  return got
+  return read(daemon, where, root, M.REREAD_WAIT_MS) or e
+end
+
+---home is the store's $HOME, as the daemon resolves a leading "~" with it; nil when
+---the store has none.
+local function home_of(e)
+  local h = e and e.by.HOME and e.by.HOME.value
+  if type(h) == "string" and h ~= "" then return (h:gsub("/+$", "")) end
+  return nil
+end
+
+---expand_home is p with a leading "~" or "~/" read as the store's $HOME, as the
+---daemon does (autodoc core/todo/vars.go expandHome): another "~name" form, or a
+---store with no $HOME, leaves p as it is. Without the daemon's table it is
+---Neovim's home: there is no store to ask.
+local function expand_home(p)
+  if p ~= "~" and p:sub(1, 2) ~= "~/" then return p end
+  local e = table_now()
+  if not e then return vim.fn.expand(p) end
+  local h = home_of(e)
+  if not h then return p end
+  return h .. p:sub(2)
 end
 
 -- ─── public: get / set / list / remove ────────────────────────
@@ -292,8 +351,8 @@ end
 ---  { ok, path, var_name?, unresolved, why? }
 ---
 ---An unresolved variable keeps the literal in `path`, so an editor shows what was
----written, and `why` says when the daemon could not answer. An absolute or `~`
----path is expanded; a plain relative one is returned for the caller to resolve
+---written, and `why` says when the daemon could not answer. An absolute path is
+---returned as it is, and a leading `~` is the store's `$HOME`; a plain relative one is returned for the caller to resolve
 ---(AutoDoc reads it as KB-relative, ADR 1791532020 D2).
 ---@param input string
 ---@return { ok: boolean, path: string?, var_name: string?, unresolved: boolean, why: string? }
@@ -313,8 +372,11 @@ function M.resolve_path(input)
     end
     return { ok = true, path = joined, var_name = var_name, unresolved = false }
   end
-  if input:sub(1, 1) == "/" or input:sub(1, 1) == "~" then
-    return { ok = true, path = vim.fn.expand(input), unresolved = false }
+  if input:sub(1, 1) == "/" then
+    return { ok = true, path = input, unresolved = false }
+  end
+  if input:sub(1, 1) == "~" then
+    return { ok = true, path = expand_home(input), unresolved = false }
   end
   return { ok = true, path = input, unresolved = false }
 end
@@ -352,7 +414,7 @@ function M.symbolize_path(path)
   add("HOME", e.by.HOME and e.by.HOME.value)
 
   if path:sub(1, 1) == "/" or path:sub(1, 1) == "~" then
-    local abs = vim.fn.expand(path)
+    local abs = expand_home(path)
     local best
     for _, r in ipairs(roots) do
       if abs == r.value or abs:sub(1, #r.value + 1) == r.value .. "/" then
@@ -372,6 +434,11 @@ end
 ---Test seam: forgets every cached table.
 function M._reset_for_tests()
   _cache, _reading = {}, {}
+  if _poll then
+    _poll:stop()
+    _poll:close()
+    _poll = nil
+  end
 end
 
 return M
