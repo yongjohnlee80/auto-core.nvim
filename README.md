@@ -250,9 +250,11 @@ of the window logic, which is the thing this module exists to prevent.
 ## `kb` — the project's primary knowledge base (ADR 1791209945 §5)
 
 `auto-core.kb` answers "which KB does this project use?" for every plugin
-and agent. It is the **one** KB-root resolver: the todo store's `$KB_ROOT`
-variable, its reference validator and `review.draft.kb_root()` all delegate
-to it, so they can no longer disagree.
+and agent. It is the **one** KB-root resolver: `review.draft.kb_root()` and
+every plugin that asks which KB a project uses delegate to it, so they can no
+longer disagree. A todo store's `$KB_ROOT` is a different question since v0.4.2:
+AutoDoc derives it from where the store is (ADR 1792015069), and a project's
+store may lie in no KB.
 
 ```lua
 local kb = require("auto-core").kb
@@ -356,7 +358,7 @@ supported surface:
 | `auto-core.todo.daemon` | The door to the daemon: `run`, `rpc`, `sync` (bounded), `request`, `format`, `normalize`, the error codes. |
 | `auto-core.todo.buffers` | Open buffers follow a task file the daemon moved (`retarget`) or rewrote (`reload`). |
 | `auto-core.todo.notifier` | The assignment notices (below). |
-| `auto-core.todo.vars` | `$VAR/…` resolution and the user's vars; a var set here is given to the daemon too. |
+| `auto-core.todo.vars` | The session store's variables, from the daemon's `todos.vars` (the same from every route to the store), and `$VAR/…` resolution over them: `get`, `list`, `resolve_path`, `symbolize_path`. `set` keeps a value where it comes from (a new name: this machine's, for this store); built-ins are `$KB_ROOT`, `$WORKSPACE`, `$PROJECT_ROOT` and `$HOME`. Cached per store, read again after `FRESH_MS`. |
 | `auto-core.todo.paths` | `workspace_root()` and the layout helpers. |
 
 - **AutoDoc is required.** auto-core reaches the daemon through autodoc.nvim's

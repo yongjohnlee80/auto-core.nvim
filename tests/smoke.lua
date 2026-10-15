@@ -6742,149 +6742,175 @@ local function assert_kb_state_sandboxed()
     "auto-core.kb state is NOT sandboxed: " .. tostring(ns._path))
 end
 
--- ─────────────────────── 65. todo.vars — variable store + $VAR resolver (v0.1.40) ──
-print("\n[65] todo.vars — variable store + $VAR resolver")
+-- ─────────────────────── 65. todo.vars — the store's variables, from AutoDoc ──
+-- ADR 1792015069 §2.5: vars.lua asks the daemon's todos.vars for the session
+-- store's table instead of computing $KB_ROOT / $WORKSPACE itself. The daemon is
+-- faked here (daemon._set_transport); tests/todo-where.lua runs a real one.
+print("\n[65] todo.vars — the store's variables, from AutoDoc's daemon")
 ;(function()
-  local ok_v, vars = pcall(require, "auto-core.todo.vars")
-  ok("auto-core.todo.vars loads", ok_v, tostring(vars))
-  if not ok_v then return end
-
-  -- Built-ins ----------------------------------------------------
-  local builtin_names = {}
-  for _, b in ipairs(vars.BUILTINS) do builtin_names[#builtin_names + 1] = b.name end
-  ok("built-ins include KB_ROOT, WORKSPACE, HOME, CWD in order",
-    table.concat(builtin_names, ",") == "KB_ROOT,WORKSPACE,HOME,CWD")
-  ok("is_builtin('KB_ROOT') is true", vars.is_builtin("KB_ROOT"))
-  ok("is_builtin('MY_VAR') is false", not vars.is_builtin("MY_VAR"))
-
-  -- HOME built-in is unconditional (vim.fn.expand('~') always
-  -- returns something). Use it to verify the resolver chain.
-  local home = vars.get("HOME")
-  ok("HOME built-in resolves to a non-empty string",
-    type(home) == "string" and home ~= "")
-  ok("CWD built-in resolves to a non-empty string",
-    type(vars.get("CWD")) == "string" and vars.get("CWD") ~= "")
-
-  -- KB_ROOT pinned via env so the test doesn't depend on the
-  -- user's actual KB setup. Since ADR 1791209945 §5 the built-in is
-  -- auto-core.kb.root(), where a project's primary outranks env — so
-  -- the kb records are wiped (no primary can answer instead) and
-  -- auto-agents is stubbed absent (no first-run import can either).
-  local kb = require("auto-core.kb")
-  assert_kb_state_sandboxed()
-  kb._reset_for_tests()
-  local saved_aa_loaded  = package.loaded["auto-agents.kb"]
-  local saved_aa_preload = package.preload["auto-agents.kb"]
-  package.loaded["auto-agents.kb"]  = nil
-  package.preload["auto-agents.kb"] = function() error("auto-agents not installed") end
-  local saved_root  = vim.env.AUTO_AGENTS_KB_ROOT
-  local saved_read  = vim.env.AUTO_AGENTS_KB_READ
-  local saved_write = vim.env.AUTO_AGENTS_KB_WRITE
-  vim.env.AUTO_AGENTS_KB_ROOT  = "/tmp/fake-kb-root"
-  vim.env.AUTO_AGENTS_KB_READ  = nil
-  vim.env.AUTO_AGENTS_KB_WRITE = nil
-  ok("KB_ROOT built-in resolves via AUTO_AGENTS_KB_ROOT",
-    vars.get("KB_ROOT") == "/tmp/fake-kb-root",
-    "got " .. tostring(vars.get("KB_ROOT")))
-  ok("KB_ROOT built-in IS auto-core.kb.root() (one resolver, not a copy)",
-    (function()
-      local real = kb.root
-      kb.root = function() return "/tmp/from-auto-core-kb" end
-      local got = vars.get("KB_ROOT")
-      kb.root = real
-      return got == "/tmp/from-auto-core-kb", got
-    end)())
-
-  -- Set / list / remove ----------------------------------------
   local state_tmp = vim.fn.tempname()
   vim.fn.mkdir(state_tmp, "p")
   require("auto-core.state").configure({ persist_dir = state_tmp })
-  -- Reset the cached vars-state handle so it picks up the new persist_dir
+  local daemon = require("auto-core.todo.daemon")
+  local where = require("auto-core.todo.where")
+  local wt = require("auto-core.git.worktree")
+  local prev_root = wt.get_workspace_root()
+  local events = require("auto-core.events")
+  where._reset_for_tests()
   package.loaded["auto-core.todo.vars"] = nil
-  local _, vars2 = pcall(require, "auto-core.todo.vars")
-  vars = vars2
-  -- Re-restore env-vars (the reload re-read them; KB_ROOT still set).
-  ok("set MY_VAR succeeds", select(1, vars.set("MY_VAR", "/abs/value")))
-  ok("set returns false on built-in name",
-    not select(1, vars.set("KB_ROOT", "/whatever")))
-  ok("set returns false on invalid identifier",
-    not select(1, vars.set("1bad", "/x")))
-  ok("set returns false on identifier with hyphen",
-    not select(1, vars.set("bad-name", "/x")))
-  ok("get('MY_VAR') returns the set value",
-    vars.get("MY_VAR") == "/abs/value")
-  ok("list() includes both built-ins and user vars",
+  local vars = require("auto-core.todo.vars")
+
+  -- the fixture: a KB with one file, a project, and the store's table as the
+  -- daemon answers it; LONG is a global var deeper than $KB_ROOT
+  local kbdir = vim.fn.tempname() .. "-kb"
+  vim.fn.mkdir(kbdir .. "/adrs", "p")
+  local fh = assert(io.open(kbdir .. "/adrs/x.md", "w")); fh:write("# x\n"); fh:close()
+  local proj = vim.fn.tempname() .. "-proj"
+  vim.fn.mkdir(proj, "p")
+  wt.set_workspace_root(proj)
+  local tbl = {
+    { name = "KB_ROOT", value = kbdir, builtin = true, derived = kbdir, source = "derived" },
+    { name = "WORKSPACE", value = kbdir, builtin = true, derived = kbdir, source = "derived" },
+    { name = "PROJECT_ROOT", value = "/src/proj", builtin = true, source = "store" },
+    { name = "HOME", value = "/home/u", builtin = true, derived = "/home/u", source = "derived" },
+    { name = "DOCS", value = "/src/proj/docs", source = "store" },
+    { name = "DUMPS", machine = true },
+    { name = "LONG", value = kbdir .. "/deep", source = "global" },
+  }
+  local calls = {}
+  local function count(m)
+    local n = 0
+    for _, c in ipairs(calls) do if c.method == m then n = n + 1 end end
+    return n
+  end
+  daemon._set_transport(function(method, params, cb)
+    calls[#calls + 1] = { method = method, params = vim.deepcopy(params) }
+    if method == "workspace.list" then return cb({}) end
+    if method == "todos.resolve" then
+      return cb({ store = kbdir .. "/.todo-list", store_id = "s1", writable = true, claimed = true })
+    end
+    if method == "todos.vars" then return cb(vim.deepcopy(tbl)) end
+    if method == "todos.set_var" then
+      local name, value = params[1], params[2]
+      for i, r in ipairs(tbl) do if r.name == name then table.remove(tbl, i) break end end
+      if value ~= "" then tbl[#tbl + 1] = { name = name, value = value, source = params[3].scope } end
+      return cb(nil)
+    end
+    cb(nil) -- todos.register, todos.open, todos.claim
+  end)
+
+  -- values -----------------------------------------------------
+  ok("KB_ROOT is the store's, from todos.vars", vars.get("KB_ROOT") == kbdir, vars.get("KB_ROOT"))
+  ok("PROJECT_ROOT is a built-in now", vars.is_builtin("PROJECT_ROOT") and vars.get("PROJECT_ROOT") == "/src/proj")
+  ok("CWD is gone: the daemon has no working directory", not vars.is_builtin("CWD"))
+  ok("a machine-only name not set here has no value", vars.get("DUMPS") == nil)
+  vim.env.SMOKE_ONLY_ENV = "/from/env"
+  ok("a name the store does not know falls back to vim.env", vars.get("SMOKE_ONLY_ENV") == "/from/env")
+  vim.env.SMOKE_ONLY_ENV = nil
+  ok("todos.open sent no kb_root (the daemon derives it)",
     (function()
-      local list = vars.list()
-      local saw_kb, saw_my = false, false
-      for _, e in ipairs(list) do
-        if e.name == "KB_ROOT" and e.builtin then saw_kb = true end
-        if e.name == "MY_VAR"  and not e.builtin and e.value == "/abs/value" then saw_my = true end
+      for _, c in ipairs(calls) do
+        if c.method == "todos.open" and c.params[2] ~= nil then return false end
       end
-      return saw_kb and saw_my
-    end)())
-
-  -- env-var fallback for un-set user var
-  vim.env.MY_FALLBACK = "/from/env"
-  ok("env fallback: unset user var resolves from vim.env",
-    vars.get("MY_FALLBACK") == "/from/env")
-
-  -- remove
-  ok("remove(MY_VAR) succeeds", select(1, vars.remove("MY_VAR")))
-  ok("after remove, get('MY_VAR') is nil",
-    vars.get("MY_VAR") == nil)
-  ok("remove returns false on built-in",
-    not select(1, vars.remove("KB_ROOT")))
+      return count("todos.open") == 1
+    end)(), vim.inspect(calls))
+  local rows = vars.list()
+  ok("list is the daemon's table, built-ins first",
+    #rows == #tbl and rows[1].name == "KB_ROOT" and rows[1].builtin and rows[1].doc ~= nil
+      and rows[5].name == "DOCS" and rows[5].source == "store" and rows[6].machine == true)
 
   -- resolve_path ------------------------------------------------
-  ok("set TARGET succeeds", select(1, vars.set("TARGET", "/usr/local/bin")))
-  local r = vars.resolve_path("$TARGET/nvim")
-  ok("resolve_path: $VAR/rest substitutes correctly",
-    r.ok and r.path == "/usr/local/bin/nvim" and r.var_name == "TARGET",
-    "got path=" .. tostring(r and r.path))
-  local r2 = vars.resolve_path("${TARGET}/nvim")
-  ok("resolve_path: brace form ${VAR}/rest works",
-    r2.ok and r2.path == "/usr/local/bin/nvim" and r2.var_name == "TARGET")
-  local r3 = vars.resolve_path("$TARGET")
-  ok("resolve_path: bare $VAR (no rest) returns the var value",
-    r3.ok and r3.path == "/usr/local/bin")
-  local r4 = vars.resolve_path("$UNDEFINED/foo")
-  ok("resolve_path: unknown var returns unresolved=true",
-    not r4.ok and r4.unresolved
-      and r4.var_name == "UNDEFINED"
-      and r4.path == "$UNDEFINED/foo")  -- literal preserved
-  local r5 = vars.resolve_path("/abs/path")
-  ok("resolve_path: absolute path passes through expanded",
-    r5.ok and r5.path == "/abs/path" and not r5.unresolved)
-  local r6 = vars.resolve_path("relative/path")
-  ok("resolve_path: plain relative passes through unchanged",
-    r6.ok and r6.path == "relative/path" and not r6.unresolved)
+  local r = vars.resolve_path("$DOCS/a.md")
+  ok("resolve_path: $VAR/rest substitutes", r.ok and r.path == "/src/proj/docs/a.md" and r.var_name == "DOCS")
+  ok("resolve_path: ${VAR}/rest too", vars.resolve_path("${DOCS}/a.md").path == "/src/proj/docs/a.md")
+  ok("resolve_path: bare $VAR is its value", vars.resolve_path("$DOCS").path == "/src/proj/docs")
+  local u = vars.resolve_path("$DUMPS/x")
+  ok("resolve_path: an unset machine-only name is unresolved, the literal kept",
+    not u.ok and u.unresolved and u.path == "$DUMPS/x" and u.var_name == "DUMPS")
+  ok("resolve_path: absolute passes through", vars.resolve_path("/abs/p").path == "/abs/p")
+  ok("resolve_path: plain relative is the caller's", vars.resolve_path("rel/p").path == "rel/p")
 
-  -- ── symbolize_path: inverse of resolve_path (v0.1.47) ────────
-  -- KB_ROOT pinned to /tmp/fake-kb-root earlier in this section.
-  ok("symbolize_path: absolute under $KB_ROOT → $KB_ROOT/...",
-    vars.symbolize_path("/tmp/fake-kb-root/shared/adrs/x.md")
-      == "$KB_ROOT/shared/adrs/x.md")
-  ok("symbolize_path: exact root → bare $VAR",
-    vars.symbolize_path("/tmp/fake-kb-root") == "$KB_ROOT")
-  ok("symbolize_path: already-$VAR passes through",
-    vars.symbolize_path("$KB_ROOT/a.md") == "$KB_ROOT/a.md")
-  ok("symbolize_path: path outside all roots kept absolute",
-    vars.symbolize_path("/opt/nowhere/a.md") == "/opt/nowhere/a.md")
-  -- longest-prefix: TARGET=/usr/local/bin set earlier; a deeper
-  -- user var would win, but here just confirm user vars are tried.
-  ok("symbolize_path: absolute under a user var → $VAR/...",
-    vars.symbolize_path("/usr/local/bin/nvim") == "$TARGET/nvim")
+  -- symbolize_path: the daemon's rule ----------------------------
+  ok("symbolize: under $KB_ROOT", vars.symbolize_path(kbdir .. "/adrs/x.md") == "$KB_ROOT/adrs/x.md")
+  ok("symbolize: $KB_ROOT wins its tie with $WORKSPACE", vars.symbolize_path(kbdir) == "$KB_ROOT")
+  ok("symbolize: a longer user var wins", vars.symbolize_path(kbdir .. "/deep/y.md") == "$LONG/y.md")
+  ok("symbolize: $DOCS is longer than $PROJECT_ROOT", vars.symbolize_path("/src/proj/docs/a.md") == "$DOCS/a.md")
+  ok("symbolize: under $PROJECT_ROOT", vars.symbolize_path("/src/proj/z.md") == "$PROJECT_ROOT/z.md")
+  ok("symbolize: $HOME last", vars.symbolize_path("/home/u/n.md") == "$HOME/n.md")
+  ok("symbolize: outside every root, unchanged", vars.symbolize_path("/opt/n.md") == "/opt/n.md")
+  ok("symbolize: a bare relative path the KB holds", vars.symbolize_path("adrs/x.md") == "$KB_ROOT/adrs/x.md")
+  ok("symbolize: a bare relative path it does not, unchanged", vars.symbolize_path("adrs/nope.md") == "adrs/nope.md")
+  ok("symbolize: a $VAR input, unchanged", vars.symbolize_path("$WORKSPACE/a") == "$WORKSPACE/a")
 
-  -- Cleanup env-vars
-  vim.env.AUTO_AGENTS_KB_ROOT  = saved_root
-  vim.env.AUTO_AGENTS_KB_READ  = saved_read
-  vim.env.AUTO_AGENTS_KB_WRITE = saved_write
-  vim.env.MY_FALLBACK          = nil
-  package.loaded["auto-agents.kb"]  = saved_aa_loaded
-  package.preload["auto-agents.kb"] = saved_aa_preload
+  -- the cache ---------------------------------------------------
+  local reads = count("todos.vars")
+  vars.get("KB_ROOT"); vars.list(); vars.symbolize_path("/opt/a")
+  ok("a fresh table is not read again", count("todos.vars") == reads, count("todos.vars") - reads)
+  local seen = 0
+  local h = events.subscribe("core.todo.vars:changed", function() seen = seen + 1 end)
+  tbl[5].value = "/src/proj/doc2"
+  local fresh = vars.FRESH_MS
+  vars.FRESH_MS = -1
+  ok("an old table answers at once", vars.get("DOCS") == "/src/proj/docs")
+  vim.wait(1000, function() return seen > 0 end, 10)
+  vars.FRESH_MS = fresh
+  ok("… is read again in the background, and the change published", seen == 1, seen)
+  ok("… so the next read has it", vars.get("DOCS") == "/src/proj/doc2")
+
+  -- set / remove: where the value comes from ---------------------
+  local function last_set()
+    for i = #calls, 1, -1 do if calls[i].method == "todos.set_var" then return calls[i].params end end
+  end
+  seen = 0
+  ok("set: a new name succeeds", vars.set("NEWV", "/n") == true)
+  local p1 = last_set()
+  ok("… for this machine and this store, so its value never reaches git",
+    p1 and p1[1] == "NEWV" and p1[3].scope == "machine" and p1[3].at ~= nil, vim.inspect(p1))
+  ok("… publishes core.todo.vars:changed", seen == 1, seen)
+  ok("… and the next read has it", vars.get("NEWV") == "/n")
+  vars.set("DOCS", "/src/proj/d3")
+  ok("set: a store-file var stays in the store's file", last_set()[3].scope == "store")
+  vars.set("LONG", "/l")
+  local p3 = last_set()
+  ok("set: a global var stays global, with no at", p3[3].scope == "global" and p3[3].at == nil, vim.inspect(p3))
+  local bok, berr = vars.set("KB_ROOT", "/x")
+  ok("set: a built-in is refused here (the Variables tab overrides one)",
+    bok == false and tostring(berr):find("built-in", 1, true))
+  ok("set: an invalid name is refused", vars.set("1bad", "/x") == false and vars.set("bad-name", "/x") == false)
+  local n_sets = count("todos.set_var")
+  ok("remove: a store-file var is cleared in the file", vars.remove("DOCS") == true
+    and last_set()[2] == "" and last_set()[3].scope == "store")
+  ok("remove: a name with no value is a no-op", vars.remove("DUMPS") == true
+    and count("todos.set_var") == n_sets + 1)
+  ok("remove: a built-in is refused", vars.remove("HOME") == false)
+  events.unsubscribe(h)
+
+  -- the one-time carry of auto-core's own vars (before v0.4.2) -----
+  local ns = require("auto-core.state").namespace("todo.vars", { persist = "json" })
+  ns:set("carried", nil)
+  ns:set("entries", { OLDV = "/old", NEWV = "/kept" })
+  where._reset_for_tests()
+  vars._reset_for_tests()
+  calls = {}
+  vars.get("KB_ROOT")
+  local carried = {}
+  for _, c in ipairs(calls) do if c.method == "todos.set_var" then carried[#carried + 1] = c.params end end
+  ok("an old var is carried to the daemon as global; one it knows is left alone",
+    #carried == 1 and carried[1][1] == "OLDV" and carried[1][3].scope == "global", vim.inspect(carried))
+  ok("… and recorded as carried", ns:get("carried") ~= nil)
+  where._reset_for_tests()
+  vars._reset_for_tests()
+  calls = {}
+  vars.get("KB_ROOT")
+  ok("… so it is never offered again", count("todos.set_var") == 0, count("todos.set_var"))
+
+  daemon._set_transport(nil)
+  wt.set_workspace_root(prev_root)
+  where._reset_for_tests()
   require("auto-core.state").configure({ persist_dir = nil })
   vim.fn.delete(state_tmp, "rf")
+  vim.fn.delete(kbdir, "rf")
+  vim.fn.delete(proj, "rf")
   package.loaded["auto-core.todo.vars"] = nil
 end)()
 

@@ -5,7 +5,7 @@
 --     root with the legacy $WORKSPACE rewrite, the rollback guard and the
 --     explicit claim;
 --   * auto-core.todo.buffers: open buffers follow a file the daemon moved;
---   * auto-core.todo.vars: a user var is given to the daemon too;
+--   * auto-core.todo.vars: the daemon's variables, the same from every route;
 --   * :AutoCoreTodoClaim, :AutoCoreTodoRefresh and the BufWritePost refresh;
 --   * auto-core.todo itself (the forwarding shim) and its Lua writer are gone.
 --
@@ -252,23 +252,51 @@ run("explicit claim", function()
   ok("… and the marker came back", env.exists(store .. "/.autodoc-owner"))
 end)
 
-section("vars: a user var is given to the daemon too")
+section("vars: the daemon's, the same from every route (ADR 1792015069)")
 run("vars", function()
   local vars = require("auto-core.todo.vars")
-  local okv = vars.set("COREVAR", proj)
-  ok("vars.set answers true", okv == true)
-  local got = env.wait(5000, function()
-    for _, v in ipairs(env.call("todos.vars", { "kb" }) or {}) do
-      if v.name == "COREVAR" and v.value == proj then return true end
-    end
+  vars._reset_for_tests()
+  local function table_of(at)
+    local out = {}
+    for _, v in ipairs(env.call("todos.vars", { at }) or {}) do out[v.name] = v end
+    return out
+  end
+  local by_ws, by_root = table_of("kb"), table_of({ root = proj })
+  ok("fixture: the daemon derives a $KB_ROOT for the store", by_ws.KB_ROOT and by_ws.KB_ROOT.value ~= nil
+    and by_ws.KB_ROOT.value ~= "", vim.inspect(by_ws.KB_ROOT))
+  for _, n in ipairs({ "KB_ROOT", "WORKSPACE", "PROJECT_ROOT", "HOME" }) do
+    local w = by_ws[n] and by_ws[n].value
+    ok("$" .. n .. ": the workspace route, the folder route and Lua agree",
+      w == (by_root[n] and by_root[n].value) and vars.get(n) == w,
+      ("workspace=%s folder=%s lua=%s"):format(tostring(w), tostring(by_root[n] and by_root[n].value),
+        tostring(vars.get(n))))
+  end
+  local ref = "$KB_ROOT/adrs/x.md"
+  ok("Lua resolves a ref to the daemon's value", vars.resolve_path(ref).path == by_ws.KB_ROOT.value .. "/adrs/x.md",
+    vars.resolve_path(ref).path)
+
+  local sent = {}
+  daemon._set_transport(function(method, params, cb)
+    sent[#sent + 1] = { method = method, params = vim.deepcopy(params) }
+    daemon._real_request(method, params, cb)
   end)
-  ok("the daemon has the var too", got)
-  vars.remove("COREVAR")
-  local gone = env.wait(5000, function()
-    for _, v in ipairs(env.call("todos.vars", { "kb" }) or {}) do if v.name == "COREVAR" then return false end end
-    return true
-  end)
-  ok("… and loses it with vars.remove", gone)
+  where.reset()
+  ensure()
+  daemon._set_transport(nil)
+  local open_params
+  for _, c in ipairs(sent) do if c.method == "todos.open" then open_params = c.params end end
+  ok("todos.open sends no kb_root", open_params and #open_params == 1, vim.inspect(open_params))
+
+  local okv, verr = vars.set("COREVAR", proj)
+  ok("vars.set answers true", okv == true, verr)
+  local cv = table_of("kb").COREVAR
+  ok("the daemon has it, for this machine", cv and cv.value == proj and cv.source == "machine", vim.inspect(cv))
+  ok("… the store's file declares the name machine-only, without the value",
+    env.read(store .. "/.autodoc-vars.toml"):find("COREVAR", 1, true) ~= nil
+      and not env.read(store .. "/.autodoc-vars.toml"):find(proj, 1, true))
+  ok("… and the folder route sees it too", (table_of({ root = proj }).COREVAR or {}).value == proj)
+  ok("… and so does Lua", vars.get("COREVAR") == proj)
+  ok("vars.remove clears it", vars.remove("COREVAR") == true and (table_of("kb").COREVAR or {}).value == nil)
 end)
 
 env.finish()
