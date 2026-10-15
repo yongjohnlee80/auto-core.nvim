@@ -10456,7 +10456,10 @@ print("\n[93] auto-core.kb — primary KB, the one resolver, first-run import")
   vim.env.AUTO_AGENTS_KB_WRITE = saved_env.WRITE
   wt.set_workspace_root(saved_ws)
   vim.fn.delete(base, "rf")
-  vim.fn.delete(state_tmp, "rf")
+  -- state_tmp is NOT deleted: the state registry keeps a namespace at the path it
+  -- was created with, and the kb namespace may have been created here (when no
+  -- earlier section touched it). [94] writes through it; with this directory
+  -- gone its writes would fail silently.
 end)()
 
 print("\n[94] auto-core.kb — managed KB documents: provided per version, synced into a KB")
