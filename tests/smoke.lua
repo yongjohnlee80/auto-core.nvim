@@ -6789,6 +6789,7 @@ print("\n[65] todo.vars — the store's variables, from AutoDoc's daemon")
     { name = "HELD", conflict = true },
   }
   local old_daemon = false -- workspace.of refused, as by a daemon older than protocol 24
+  local old_none = false   -- workspace.vars("") refused, as by a daemon before no workspace's variables
   local calls = {}
   local function count(m)
     local n = 0
@@ -6803,7 +6804,14 @@ print("\n[65] todo.vars — the store's variables, from AutoDoc's daemon")
       if params[1]:sub(1, 5) == "/kb2/" then return cb({ workspace = "kb2", root = "/kb2" }) end
       return cb({})
     end
-    if method == "workspace.vars" then return cb(vim.deepcopy(ws2)) end
+    if method == "workspace.vars" then
+      if params[1] == "" then
+        if old_none then return cb(nil, { code = -32060, message = "no such workspace: " }) end
+        return cb({ { name = "HOME", value = "/home/u", builtin = true, source = "derived" },
+          { name = "GLOB", value = "/glob", source = "global" } })
+      end
+      return cb(vim.deepcopy(ws2))
+    end
     if method == "workspace.set_var" then
       local name, value = params[2], params[3]
       for i, r in ipairs(ws2) do if r.name == name then table.remove(ws2, i) break end end
@@ -6970,6 +6978,14 @@ print("\n[65] todo.vars — the store's variables, from AutoDoc's daemon")
   ok("from: a file beside it is not asked about again while fresh", count("workspace.of") == wo,
     count("workspace.of") - wo)
   ok("from: a file no workspace owns has no $KB_ROOT", vars.get("KB_ROOT", { from = "/opt/x.md" }) == nil)
+  ok("… but the global variables, from workspace.vars(\"\")", vars.get("GLOB", { from = "/opt/x.md" }) == "/glob")
+  vars._reset_for_tests()
+  old_none = true
+  vim.env.GLOB = nil
+  ok("a daemon before them: the environment alone, no error", vars.get("GLOB", { from = "/opt/x.md" }) == nil
+    and vars.workspace({ from = "/opt/x.md" }) == nil)
+  old_none = false
+  vars._reset_for_tests()
   vim.env.HELD = "/from/env"
   ok("a name held in conflict is unresolved, never the environment's",
     vars.get("HELD", { from = note2 }) == nil and vars.resolve_path("$HELD/x", { from = note2 }).unresolved)

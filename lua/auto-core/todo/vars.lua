@@ -94,8 +94,8 @@ function M.is_builtin(name) return BUILTIN[name] == true end
 -- A table is a source's variables:
 --   { kind = "store" }                  the session project's store (todos.vars);
 --   { kind = "ws", workspace = name }   a workspace's (workspace.vars);
---   { kind = "none" }                   a file no workspace owns: its refs resolve
---                                       with the environment alone here.
+--   { kind = "none" }                   a file no workspace owns: workspace.vars(""),
+--                                       $HOME and the global variables (§2.5).
 local _cache = {}   -- key → entry { key, src, at?, store_id?, workspace?, rows, by, read }
 local _reading = {} -- key → true while a background read runs
 local _owner = {}   -- a file's directory → { key, read }: the table its files resolve with
@@ -144,7 +144,15 @@ end
 ---@return table entry
 local function fetch(daemon, where, src)
   if src.kind == "none" then
-    return { key = "none", src = src, rows = {}, by = {}, read = now_ms() }
+    local list, err = daemon.rpc("workspace.vars", { "" })
+    if err then
+      -- a daemon before no workspace's variables ("" is no workspace's) refuses the name: such a
+      -- file then resolves with the environment alone, as the daemon's index would not
+      if type(err) ~= "table" or err.code ~= -32060 then daemon.fail(err) end
+      list = {}
+    end
+    local rows, by = rows_of(daemon, list)
+    return { key = "none", src = src, rows = rows, by = by, read = now_ms() }
   end
   if src.kind == "ws" then
     local list, err = daemon.rpc("workspace.vars", { src.workspace })
@@ -227,7 +235,7 @@ local function poll()
     if not daemon or not daemon.available() then return end
     for key, e in pairs(_cache) do
       local src = e.src
-      local fresh = src.kind == "ws"
+      local fresh = src.kind == "ws" or src.kind == "none"
       if src.kind == "store" then
         local c = where.cached(where.root())
         fresh = c ~= nil and "store:" .. c.store_id == key
