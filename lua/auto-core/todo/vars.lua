@@ -380,7 +380,9 @@ local function put(e, name, value, scope, machine_only)
     if machine_only then o.machine_only = true end
     method, params = "workspace.set_var", { e.workspace, name, value, o }
   elseif e.at then
-    method, params = "todos.set_var", { name, value, { scope = scope == "kb" and "store" or scope, at = e.at } }
+    local o = { scope = scope == "kb" and "store" or scope, at = e.at }
+    if machine_only then o.machine_only = true end
+    method, params = "todos.set_var", { name, value, o }
   else
     return false, "no workspace owns this file: set the variable in a workspace, or globally"
   end
