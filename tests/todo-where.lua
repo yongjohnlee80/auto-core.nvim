@@ -5,7 +5,8 @@
 --     root with the legacy $WORKSPACE rewrite, the rollback guard and the
 --     explicit claim;
 --   * auto-core.todo.buffers: open buffers follow a file the daemon moved;
---   * auto-core.todo.vars: the daemon's variables, the same from every route;
+--   * auto-core.todo.vars: a file's workspace's variables (ADR 1792132105), the
+--     same from every route;
 --   * :AutoCoreTodoClaim, :AutoCoreTodoRefresh and the BufWritePost refresh;
 --   * auto-core.todo itself (the forwarding shim) and its Lua writer are gone.
 --
@@ -252,25 +253,37 @@ run("explicit claim", function()
   ok("… and the marker came back", env.exists(store .. "/.autodoc-owner"))
 end)
 
-section("vars: the daemon's, the same from every route (ADR 1792015069)")
+section("vars: the workspace's, the same from every route (ADR 1792132105)")
 run("vars", function()
   local vars = require("auto-core.todo.vars")
   vars._reset_for_tests()
+  vim.env.WORKSPACE = nil -- the environment is the last layer: keep it from answering $WORKSPACE
   local function table_of(at)
     local out = {}
     for _, v in ipairs(env.call("todos.vars", { at }) or {}) do out[v.name] = v end
     return out
   end
+  local function ws_table(name)
+    local out = {}
+    for _, v in ipairs(env.call("workspace.vars", { name }) or {}) do out[v.name] = v end
+    return out
+  end
   local by_ws, by_root = table_of("kb"), table_of({ root = proj })
   ok("fixture: the daemon derives a $KB_ROOT for the store", by_ws.KB_ROOT and by_ws.KB_ROOT.value ~= nil
     and by_ws.KB_ROOT.value ~= "", vim.inspect(by_ws.KB_ROOT))
-  for _, n in ipairs({ "KB_ROOT", "WORKSPACE", "PROJECT_ROOT", "HOME" }) do
+  for _, n in ipairs({ "KB_ROOT", "HOME" }) do
     local w = by_ws[n] and by_ws[n].value
-    ok("$" .. n .. ": the workspace route, the folder route and Lua agree",
-      w == (by_root[n] and by_root[n].value) and vars.get(n) == w,
+    ok("$" .. n .. ": the workspace route, the folder route, workspace.vars and Lua agree",
+      w ~= nil and w == (by_root[n] and by_root[n].value) and w == (ws_table("kb")[n] or {}).value
+        and vars.get(n) == w,
       ("workspace=%s folder=%s lua=%s"):format(tostring(w), tostring(by_root[n] and by_root[n].value),
         tostring(vars.get(n))))
   end
+  ok("$WORKSPACE is not derived (§2.6): unresolved for the daemon and for Lua",
+    (by_ws.WORKSPACE or {}).value == nil and vars.get("WORKSPACE") == nil
+      and vars.resolve_path("$WORKSPACE/docs/legacy.md").unresolved == true,
+    vim.inspect({ by_ws.WORKSPACE, vars.get("WORKSPACE") }))
+  ok("… nor a built-in for Lua", not vars.is_builtin("WORKSPACE") and not vars.is_builtin("PROJECT_ROOT"))
   local ref = "$KB_ROOT/adrs/x.md"
   ok("Lua resolves a ref to the daemon's value", vars.resolve_path(ref).path == by_ws.KB_ROOT.value .. "/adrs/x.md",
     vars.resolve_path(ref).path)
@@ -287,24 +300,97 @@ run("vars", function()
   for _, c in ipairs(sent) do if c.method == "todos.open" then open_params = c.params end end
   ok("todos.open sends no kb_root", open_params and #open_params == 1, vim.inspect(open_params))
 
+  -- this machine's value: a DB row, the KB's file untouched
+  local kbfile = kb .. "/.autodoc-vars.toml"
   local okv, verr = vars.set("COREVAR", proj)
   ok("vars.set answers true", okv == true, verr)
-  local cv = table_of("kb").COREVAR
+  local cv = ws_table("kb").COREVAR
   ok("the daemon has it, for this machine", cv and cv.value == proj and cv.source == "machine", vim.inspect(cv))
-  ok("… the store's file declares the name machine-only, without the value",
-    env.read(store .. "/.autodoc-vars.toml"):find("COREVAR", 1, true) ~= nil
-      and not env.read(store .. "/.autodoc-vars.toml"):find(proj, 1, true))
+  ok("… and the KB's file does not", not (env.exists(kbfile) and env.read(kbfile):find("COREVAR", 1, true)))
   ok("… and the folder route sees it too", (table_of({ root = proj }).COREVAR or {}).value == proj)
   ok("… and so does Lua", vars.get("COREVAR") == proj)
-  ok("vars.remove clears it", vars.remove("COREVAR") == true and (table_of("kb").COREVAR or {}).value == nil)
+  ok("vars.remove clears it", vars.remove("COREVAR") == true and (ws_table("kb").COREVAR or {}).value == nil)
 
-  -- ~ is the store's $HOME: an override in the store's file moves it for the daemon and for Lua alike
+  -- the KB's value: relative to the KB root, in its file, carried by git
+  vim.fn.mkdir(kb .. "/sub", "p")
+  okv, verr = vars.set("RELVAR", kb .. "/sub", { scope = "kb" })
+  ok("vars.set scope kb answers true", okv == true, verr)
+  ok("… the KB's file holds it relative to the KB root",
+    env.exists(kbfile) and env.read(kbfile):find("RELVAR", 1, true) ~= nil
+      and not env.read(kbfile):find(kb .. "/sub", 1, true), env.exists(kbfile) and env.read(kbfile))
+  ok("… and it resolves absolute", vars.get("RELVAR") == by_ws.KB_ROOT.value .. "/sub", vars.get("RELVAR"))
+  ok("vars.remove clears it from the file", vars.remove("RELVAR") == true
+    and not env.read(kbfile):find("RELVAR =", 1, true))
+  -- machine_only: the name declared in the KB's file, its value this machine's
+  okv, verr = vars.set("MONLY", env.tmp .. "/monly", { machine_only = true })
+  ok("vars.set machine_only answers true", okv == true, verr)
+  ok("… the KB's file declares the name machine-only, without its value",
+    env.read(kbfile):find("MONLY", 1, true) ~= nil and not env.read(kbfile):find(env.tmp .. "/monly", 1, true),
+    env.read(kbfile))
+  vars.remove("MONLY")
+
+  -- $PROJECT_ROOT is a user variable: set, it symbolizes; $WORKSPACE never does
+  local legacy = proj .. "/docs/legacy.md"
+  ok("unset, a project path is not symbolized to $WORKSPACE", vars.symbolize_path(legacy) == legacy,
+    vars.symbolize_path(legacy))
+  okv, verr = vars.set("PROJECT_ROOT", proj)
+  ok("$PROJECT_ROOT can be set (not a built-in)", okv == true, verr)
+  ok("… and a project path symbolizes to it", vars.symbolize_path(legacy) == "$PROJECT_ROOT/docs/legacy.md",
+    vars.symbolize_path(legacy))
+  vars.remove("PROJECT_ROOT")
+
+  -- a file of another workspace resolves with ITS variables, whichever store is the session's (§2.5)
+  local kb2 = env.new_kb("kb2")
+  local note2 = kb2 .. "/notes/n.md"
+  env.write(note2, "# n\n")
+  local _, w2err = env.call("workspace.add", { "kb2", kb2 })
+  ok("fixture: workspace kb2 added", w2err == nil, w2err and w2err.message)
+  local _, s1 = env.call("workspace.set_var", { "kb", "SHARED", env.tmp .. "/from-kb", { scope = "machine" } })
+  local _, s2 = env.call("workspace.set_var", { "kb2", "SHARED", env.tmp .. "/from-kb2", { scope = "machine" } })
+  ok("fixture: SHARED set apart in each workspace", s1 == nil and s2 == nil, vim.inspect({ s1, s2 }))
+  vars._reset_for_tests()
+  local kb2_root = (ws_table("kb2").KB_ROOT or {}).value
+  ok("a kb2 file's $KB_ROOT is kb2's, not the session's",
+    kb2_root ~= nil and vars.get("KB_ROOT", { from = note2 }) == kb2_root and vars.get("KB_ROOT") == by_ws.KB_ROOT.value,
+    ("kb2=%s from=%s session=%s"):format(tostring(kb2_root), tostring(vars.get("KB_ROOT", { from = note2 })),
+      tostring(vars.get("KB_ROOT"))))
+  ok("… and its refs resolve with kb2's values",
+    vars.resolve_path("$SHARED/x.md", { from = note2 }).path == env.tmp .. "/from-kb2/x.md"
+      and vars.resolve_path("$SHARED/x.md").path == env.tmp .. "/from-kb/x.md",
+    vars.resolve_path("$SHARED/x.md", { from = note2 }).path)
+  ok("… vars.workspace names kb2 for it", vars.workspace({ from = note2 }) == "kb2", vars.workspace({ from = note2 }))
+  local outside = env.tmp .. "/elsewhere/f.md"
+  env.write(outside, "x\n")
+  ok("a file no workspace owns has no $KB_ROOT, and no workspace's values",
+    vars.get("KB_ROOT", { from = outside }) == nil and vars.resolve_path("$SHARED/x", { from = outside }).unresolved,
+    tostring(vars.get("KB_ROOT", { from = outside })))
+
+  -- a daemon older than protocol 24: workspace.of refused, the session store's table answers, once asked
+  vars._reset_for_tests()
+  local asked = 0
+  daemon._set_transport(function(method, params, cb)
+    if method == "workspace.of" then
+      asked = asked + 1
+      return cb(nil, { code = -32601, message = "the verb is unknown" })
+    end
+    daemon._real_request(method, params, cb)
+  end)
+  local old = vars.get("KB_ROOT", { from = note2 })
+  vars.get("KB_ROOT", { from = outside })
+  daemon._set_transport(nil)
+  ok("an old daemon: a from reads the session store's table", old == by_ws.KB_ROOT.value, tostring(old))
+  ok("… and workspace.of is not asked again", asked == 1, asked)
+  env.call("workspace.set_var", { "kb", "SHARED", "", { scope = "machine" } })
+  env.call("workspace.set_var", { "kb2", "SHARED", "", { scope = "machine" } })
+  vars._reset_for_tests()
+
+  -- ~ is the workspace's $HOME: an override in the KB's file moves it for the daemon and for Lua alike
   local home = env.tmp .. "/home-override"
   vim.fn.mkdir(home, "p")
   local _, herr = env.call("todos.set_var", { "HOME", home, { at = "kb", scope = "store" } })
-  ok("fixture: the store overrides $HOME", herr == nil, herr and herr.message)
+  ok("fixture: the KB overrides $HOME", herr == nil, herr and herr.message)
   vars._reset_for_tests()
-  ok("Lua reads ~ under the store's $HOME", vars.resolve_path("~/no-such.md").path == home .. "/no-such.md",
+  ok("Lua reads ~ under the KB's $HOME", vars.resolve_path("~/no-such.md").path == home .. "/no-such.md",
     vars.resolve_path("~/no-such.md").path)
   local t = todo.add({ id = "2026-10-02-home-ref", title = "A ~ ref", adr = { "~/no-such.md" } })
   ok("fixture: the task was added", t ~= nil)
