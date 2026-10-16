@@ -995,7 +995,9 @@ return {
   -- longer a built-in and is never symbolized; $PROJECT_ROOT is a user variable.
   -- A conflicted name reads nil, never the environment. A daemon older than
   -- protocol 24 (workspace.of refused, -32601) is read through todos.vars as
-  -- before. vars.workspace(opts) is new.
+  -- before. vars.workspace(opts) is new. A file no workspace owns reads
+  -- workspace.vars("") (its $HOME and the global variables), or the
+  -- environment alone where the daemon refuses the empty name.
   version     = "0.5.0",
   api_version = "0.1",
 }

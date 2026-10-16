@@ -364,6 +364,15 @@ run("vars", function()
   ok("a file no workspace owns has no $KB_ROOT, and no workspace's values",
     vars.get("KB_ROOT", { from = outside }) == nil and vars.resolve_path("$SHARED/x", { from = outside }).unresolved,
     tostring(vars.get("KB_ROOT", { from = outside })))
+  -- … but the global variables, as the daemon's index resolves it (workspace.vars(""), §2.5)
+  local _, gerr = env.call("todos.set_var", { "GLOBVAR", env.tmp .. "/glob" })
+  ok("fixture: a global variable", gerr == nil, gerr and gerr.message)
+  vars._reset_for_tests()
+  ok("a file no workspace owns resolves a global variable",
+    vars.get("GLOBVAR", { from = outside }) == env.tmp .. "/glob"
+      and vars.resolve_path("$GLOBVAR/a.md", { from = outside }).path == env.tmp .. "/glob/a.md",
+    tostring(vars.get("GLOBVAR", { from = outside })))
+  env.call("todos.set_var", { "GLOBVAR", "" })
 
   -- a daemon older than protocol 24: workspace.of refused, the session store's table answers, once asked
   vars._reset_for_tests()

@@ -27,7 +27,10 @@ decision 4 (§2.8): the resolver's meaning changes. **Needs AutoDoc protocol 24*
   before. `vars.workspace(opts)` names the owner.
   - Each table is cached and polled under the same `FRESH_MS` bound (2 s), and a
     change publishes `core.todo.vars:changed`.
-  - A file no workspace owns resolves with the environment alone.
+  - A file no workspace owns resolves with `$HOME` and the daemon's global
+    variables (`workspace.vars("")`), then the environment, as the daemon's index
+    resolves it. A daemon before AutoDoc's no-workspace variables refuses the
+    empty name: such a file then resolves with the environment alone.
 - **Writes are the workspace's.** `set(name, value, opts)` writes
   `workspace.set_var`: `scope = "machine"` (this machine's row, an absolute
   path; a new name's default), `"kb"` (the KB's `.autodoc-vars.toml`, relative to

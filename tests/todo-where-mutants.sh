@@ -68,6 +68,8 @@ mutants=(
   "$V|smoke|a name held in conflict falls back to the environment|  if row then return row.value end\n  local env = vim.env[name]|  if row and row.value then return row.value end\n  local env = vim.env[name]"
   "$V|where|machine_only is dropped for the session's store|    local o = { scope = scope == \"kb\" and \"store\" or scope, at = e.at }\n    if machine_only then o.machine_only = true end\n|    local o = { scope = scope == \"kb\" and \"store\" or scope, at = e.at }\n"
   "$V|smoke|machine_only is dropped for a workspace|    local o = { scope = scope }\n    if machine_only then o.machine_only = true end\n|    local o = { scope = scope }\n"
+  "$V|where|a file no workspace owns loses the global variables|    local list, err = daemon.rpc(\"workspace.vars\", { \"\" })|    local list, err = {}, nil"
+  "$V|smoke|a daemon before no workspace's variables is an error|      if type(err) ~= \"table\" or err.code ~= -32060 then daemon.fail(err) end|      daemon.fail(err)"
   "$V|smoke|no background read|  if _poll then return end\n  _poll = vim.uv.new_timer()|  do return end\n  _poll = vim.uv.new_timer()"
   "$V|where|~ is Neovim's home, not the store's|  if p ~= \"~\" and p:sub(1, 2) ~= \"~/\" then return p end|  do return vim.fn.expand(p) end"
   "$W|smoke|the old vars are offered every session|  if ns:get(\"carried\") then return end|  if false then return end"
