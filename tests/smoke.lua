@@ -6743,9 +6743,10 @@ local function assert_kb_state_sandboxed()
 end
 
 -- ─────────────────────── 65. todo.vars — the store's variables, from AutoDoc ──
--- ADR 1792015069 §2.5: vars.lua asks the daemon's todos.vars for the session
--- store's table instead of computing $KB_ROOT / $WORKSPACE itself. The daemon is
--- faked here (daemon._set_transport); tests/todo-where.lua runs a real one.
+-- ADR 1792015069 §2.5, ADR 1792132105: vars.lua asks the daemon for a table
+-- instead of computing one: the session store's (todos.vars), or a file's
+-- workspace's (workspace.of, workspace.vars). The daemon is faked here
+-- (daemon._set_transport); tests/todo-where.lua runs a real one.
 print("\n[65] todo.vars — the store's variables, from AutoDoc's daemon")
 ;(function()
   local state_tmp = vim.fn.tempname()
@@ -6768,15 +6769,26 @@ print("\n[65] todo.vars — the store's variables, from AutoDoc's daemon")
   local proj = vim.fn.tempname() .. "-proj"
   vim.fn.mkdir(proj, "p")
   wt.set_workspace_root(proj)
+  -- $WORKSPACE is no built-in (ADR 1792132105 §2.6); this KB sets it, deeper than
+  -- $KB_ROOT, and it is never written
   local tbl = {
     { name = "KB_ROOT", value = kbdir, builtin = true, derived = kbdir, source = "derived" },
-    { name = "WORKSPACE", value = kbdir, builtin = true, derived = kbdir, source = "derived" },
-    { name = "PROJECT_ROOT", value = "/src/proj", builtin = true, source = "store" },
     { name = "HOME", value = "/home/u", builtin = true, derived = "/home/u", source = "derived" },
+    { name = "PROJECT_ROOT", value = "/src/proj", source = "store" },
     { name = "DOCS", value = "/src/proj/docs", source = "store" },
     { name = "DUMPS", machine = true },
     { name = "LONG", value = kbdir .. "/deep", source = "global" },
+    { name = "WORKSPACE", value = kbdir .. "/ws", source = "store" },
   }
+  -- kb2: another workspace, whose files' refs resolve with its own table; HELD is a
+  -- name a pending migration holds in conflict there (ADR 1792132105 §2.7)
+  local ws2 = {
+    { name = "KB_ROOT", value = "/kb2", builtin = true, derived = "/kb2", source = "derived" },
+    { name = "HOME", value = "/home/u", builtin = true, derived = "/home/u", source = "derived" },
+    { name = "DOCS", value = "/kb2/docs", source = "kb" },
+    { name = "HELD", conflict = true },
+  }
+  local old_daemon = false -- workspace.of refused, as by a daemon older than protocol 24
   local calls = {}
   local function count(m)
     local n = 0
@@ -6786,6 +6798,18 @@ print("\n[65] todo.vars — the store's variables, from AutoDoc's daemon")
   daemon._set_transport(function(method, params, cb)
     calls[#calls + 1] = { method = method, params = vim.deepcopy(params) }
     if method == "workspace.list" then return cb({}) end
+    if method == "workspace.of" then
+      if old_daemon then return cb(nil, { code = -32601, message = "the verb is unknown" }) end
+      if params[1]:sub(1, 5) == "/kb2/" then return cb({ workspace = "kb2", root = "/kb2" }) end
+      return cb({})
+    end
+    if method == "workspace.vars" then return cb(vim.deepcopy(ws2)) end
+    if method == "workspace.set_var" then
+      local name, value = params[2], params[3]
+      for i, r in ipairs(ws2) do if r.name == name then table.remove(ws2, i) break end end
+      if value ~= "" then ws2[#ws2 + 1] = { name = name, value = value, source = params[4].scope } end
+      return cb(nil)
+    end
     if method == "todos.resolve" then
       return cb({ store = kbdir .. "/.todo-list", store_id = "s1", writable = true, claimed = true })
     end
@@ -6801,7 +6825,8 @@ print("\n[65] todo.vars — the store's variables, from AutoDoc's daemon")
 
   -- values -----------------------------------------------------
   ok("KB_ROOT is the store's, from todos.vars", vars.get("KB_ROOT") == kbdir, vars.get("KB_ROOT"))
-  ok("PROJECT_ROOT is a built-in now", vars.is_builtin("PROJECT_ROOT") and vars.get("PROJECT_ROOT") == "/src/proj")
+  ok("PROJECT_ROOT is a user variable now", not vars.is_builtin("PROJECT_ROOT") and vars.get("PROJECT_ROOT") == "/src/proj")
+  ok("WORKSPACE is no built-in", not vars.is_builtin("WORKSPACE"))
   ok("CWD is gone: the daemon has no working directory", not vars.is_builtin("CWD"))
   ok("a machine-only name not set here has no value", vars.get("DUMPS") == nil)
   vim.env.SMOKE_ONLY_ENV = "/from/env"
@@ -6817,7 +6842,7 @@ print("\n[65] todo.vars — the store's variables, from AutoDoc's daemon")
   local rows = vars.list()
   ok("list is the daemon's table, built-ins first",
     #rows == #tbl and rows[1].name == "KB_ROOT" and rows[1].builtin and rows[1].doc ~= nil
-      and rows[5].name == "DOCS" and rows[5].source == "store" and rows[6].machine == true)
+      and rows[4].name == "DOCS" and rows[4].source == "store" and rows[5].machine == true)
 
   -- resolve_path ------------------------------------------------
   local r = vars.resolve_path("$DOCS/a.md")
@@ -6832,7 +6857,8 @@ print("\n[65] todo.vars — the store's variables, from AutoDoc's daemon")
 
   -- symbolize_path: the daemon's rule ----------------------------
   ok("symbolize: under $KB_ROOT", vars.symbolize_path(kbdir .. "/adrs/x.md") == "$KB_ROOT/adrs/x.md")
-  ok("symbolize: $KB_ROOT wins its tie with $WORKSPACE", vars.symbolize_path(kbdir) == "$KB_ROOT")
+  ok("symbolize: $WORKSPACE is never written, however deep it is",
+    vars.symbolize_path(kbdir .. "/ws/a.md") == "$KB_ROOT/ws/a.md", vars.symbolize_path(kbdir .. "/ws/a.md"))
   ok("symbolize: a longer user var wins", vars.symbolize_path(kbdir .. "/deep/y.md") == "$LONG/y.md")
   ok("symbolize: $DOCS is longer than $PROJECT_ROOT", vars.symbolize_path("/src/proj/docs/a.md") == "$DOCS/a.md")
   ok("symbolize: under $PROJECT_ROOT", vars.symbolize_path("/src/proj/z.md") == "$PROJECT_ROOT/z.md")
@@ -6848,7 +6874,7 @@ print("\n[65] todo.vars — the store's variables, from AutoDoc's daemon")
   ok("a fresh table is not read again", count("todos.vars") == reads, count("todos.vars") - reads)
   local seen = 0
   local h = events.subscribe("core.todo.vars:changed", function() seen = seen + 1 end)
-  tbl[5].value = "/src/proj/doc2"
+  tbl[4].value = "/src/proj/doc2"
   local fresh = vars.FRESH_MS
   vars.FRESH_MS = -1
   ok("an old table is read again before it answers: the read has the change",
@@ -6898,7 +6924,7 @@ print("\n[65] todo.vars — the store's variables, from AutoDoc's daemon")
   local polled = 0
   local hp = events.subscribe("core.todo.vars:changed", function() polled = polled + 1 end)
   local reads = count("todos.vars")
-  tbl[5].value = "/src/proj/elsewhere"
+  tbl[4].value = "/src/proj/elsewhere"
   ok("an idle session sees a change made elsewhere: it is published with no read",
     vim.wait(2000, function() return polled > 0 end, 10), polled)
   ok("… by reading the table again", count("todos.vars") > reads)
@@ -6926,6 +6952,57 @@ print("\n[65] todo.vars — the store's variables, from AutoDoc's daemon")
   vars.get("KB_ROOT")
   ok("… so it is never offered again: a var removed in AutoDoc stays removed",
     count("todos.set_var") == 0 and vars.get("OLDV") == nil, count("todos.set_var"))
+
+  -- a file's refs resolve with ITS workspace's table (ADR 1792132105 §2.5) ------
+  vars._reset_for_tests()
+  calls = {}
+  local note2 = "/kb2/notes/n.md"
+  ok("from: a kb2 file's $KB_ROOT is kb2's; the session's is its own",
+    vars.get("KB_ROOT", { from = note2 }) == "/kb2" and vars.get("KB_ROOT") == kbdir,
+    tostring(vars.get("KB_ROOT", { from = note2 })))
+  ok("from: its refs resolve with kb2's values",
+    vars.resolve_path("$DOCS/a.md", { from = note2 }).path == "/kb2/docs/a.md")
+  ok("from: vars.workspace names it", vars.workspace({ from = note2 }) == "kb2")
+  ok("from: symbolize writes against kb2's roots",
+    vars.symbolize_path("/kb2/docs/b.md", { from = note2 }) == "$DOCS/b.md")
+  local wo = count("workspace.of")
+  vars.get("DOCS", { from = "/kb2/notes/other.md" })
+  ok("from: a file beside it is not asked about again while fresh", count("workspace.of") == wo,
+    count("workspace.of") - wo)
+  ok("from: a file no workspace owns has no $KB_ROOT", vars.get("KB_ROOT", { from = "/opt/x.md" }) == nil)
+  vim.env.HELD = "/from/env"
+  ok("a name held in conflict is unresolved, never the environment's",
+    vars.get("HELD", { from = note2 }) == nil and vars.resolve_path("$HELD/x", { from = note2 }).unresolved)
+  vim.env.HELD = nil
+  local held
+  for _, r in ipairs(vars.list({ from = note2 })) do if r.name == "HELD" then held = r end end
+  ok("… and listed as a conflict", held ~= nil and held.conflict == true, vim.inspect(held))
+  local function last_ws_set()
+    for i = #calls, 1, -1 do if calls[i].method == "workspace.set_var" then return calls[i].params end end
+  end
+  vars.set("NEWV2", "/n2", { from = note2 })
+  local q1 = last_ws_set()
+  ok("set from: a new name is this machine's, in kb2",
+    q1 and q1[1] == "kb2" and q1[2] == "NEWV2" and q1[4].scope == "machine", vim.inspect(q1))
+  vars.set("DOCS", "/kb2/d", { from = note2 })
+  ok("set from: a KB-file var stays in the KB's file", last_ws_set()[4].scope == "kb")
+  vars.set("MO", "/m", { from = note2, machine_only = true })
+  ok("set from: machine_only is sent", last_ws_set()[4].machine_only == true, vim.inspect(last_ws_set()))
+  ok("set: a scope that is none of machine, kb and global is refused", vars.set("X", "/x", { scope = "nope" }) == false)
+  local sok, serr = vars.set("X", "/x", { from = "/opt/x.md" })
+  ok("set: a file no workspace owns is refused, saying so",
+    sok == false and tostring(serr):find("no workspace", 1, true) ~= nil, serr)
+  ok("remove from: a KB-file var is cleared in the KB's file", vars.remove("DOCS", { from = note2 }) == true
+    and last_ws_set()[3] == "" and last_ws_set()[4].scope == "kb")
+  -- a daemon older than protocol 24: workspace.of refused
+  vars._reset_for_tests()
+  old_daemon = true
+  calls = {}
+  ok("an old daemon: a from reads the session store's table", vars.get("KB_ROOT", { from = note2 }) == kbdir)
+  vars.get("KB_ROOT", { from = "/opt/y.md" })
+  ok("… and workspace.of is asked once", count("workspace.of") == 1, count("workspace.of"))
+  old_daemon = false
+  vars._reset_for_tests()
 
   daemon._set_transport(nil)
   vars._reset_for_tests() -- its background read stops

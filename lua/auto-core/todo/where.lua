@@ -2,15 +2,14 @@
 ---
 ---The old store was "the root's override, else <root>/.todo-list". The daemon
 ---names a store by an `At` (ADR 1791532020 §2.4): a workspace's name, or
----`{root = "/abs/project"}`. The daemon's `$WORKSPACE` is the At's root, so the
----At matters: the rule (design note 2026-10-13 §3, decided) is
+---`{root = "/abs/project"}`. The rule (design note 2026-10-13 §3, decided) is
 ---
 ---  1. S = the root's Lua override (frozen in state `todo.dir_overrides`), else
 ---     <root>/.todo-list;
 ---  2. the At is the workspace whose <root>/.todo-list is S, else {root};
 ---  3. the daemon learns the root once: set_dir(override) or register(root);
----  4. todos.open(At): the daemon derives the store's variables itself (ADR
----     1792015069), so no kb_root is sent;
+---  4. todos.open(At): the daemon answers the store's variables, its workspace's
+---     (ADR 1792132105), so no kb_root is sent;
 ---  5. the first call claims the store (the cutover, ADR §3 step 3), with
 ---     legacy_workspace = the Neovim root, which is what Lua's $WORKSPACE meant.
 ---
@@ -59,7 +58,7 @@ local function realpath(p)
   return fs_path.normalize(p)
 end
 
----root is the session's project root, as Lua's $WORKSPACE resolves it.
+---root is the session's project root (todo.paths.workspace_root).
 ---@return string
 function M.root() return paths.workspace_root() end
 

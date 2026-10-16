@@ -986,6 +986,16 @@ return {
   -- $PROJECT_ROOT is a built-in, $CWD is gone, set keeps a new name for this
   -- machine and store. where sends todos.open no kb_root. review.draft's
   -- kb_root is auto-core.kb's. daemon.in_run is new.
-  version     = "0.4.2",
+  -- v0.5.0 (minor, Johno's decision 4 in ADR 1792132105 §2.8): variables belong
+  -- to the workspace. todo.vars' get, list, resolve_path and symbolize_path (and
+  -- paths.to_portable) take { from = path }: the file's refs resolve with the
+  -- variables of the workspace that owns it (workspace.of, then workspace.vars),
+  -- not the session's; without it, the session store's, as before. set and remove
+  -- write workspace.set_var (scope machine or kb, machine_only). $WORKSPACE is no
+  -- longer a built-in and is never symbolized; $PROJECT_ROOT is a user variable.
+  -- A conflicted name reads nil, never the environment. A daemon older than
+  -- protocol 24 (workspace.of refused, -32601) is read through todos.vars as
+  -- before. vars.workspace(opts) is new.
+  version     = "0.5.0",
   api_version = "0.1",
 }

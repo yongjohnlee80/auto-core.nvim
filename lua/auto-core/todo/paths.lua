@@ -271,12 +271,15 @@ function M.make_id(created_iso, title)
   return date_prefix .. "-" .. slug
 end
 
----Normalize a path to its portable symbolic form ($KB_ROOT / $WORKSPACE / etc.).
----Delegates to auto-core.todo.vars.symbolize_path (ADR-0031 / ADR-0083).
+---Normalize a path to its portable symbolic form ($KB_ROOT / $PROJECT_ROOT / a
+---user variable / $HOME), with the variables of opts.from's workspace, the file the
+---ref is written into (ADR 1792132105 §2.5). Delegates to
+---auto-core.todo.vars.symbolize_path.
 ---@param path string
+---@param opts? { from?: string }
 ---@return string
-function M.to_portable(path)
-  return require("auto-core.todo.vars").symbolize_path(path)
+function M.to_portable(path, opts)
+  return require("auto-core.todo.vars").symbolize_path(path, opts)
 end
 
 return M
