@@ -11,6 +11,39 @@ key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
 
+## [v0.5.0] — 2026-10-16 — a file's refs resolve with its workspace's variables
+
+ADR 1792132105 ("variables belong to the workspace"). A **minor** bump, Johno's
+decision 4 (§2.8): the resolver's meaning changes. **Needs AutoDoc protocol 24**
+(v0.1.53) for workspace-owned variables; an older daemon still answers, through
+`todos.vars` as before.
+
+- **`get`, `list`, `resolve_path` and `symbolize_path` take `{ from = path }`**,
+  the file whose refs these are, as does `todo.paths.to_portable`. The file's
+  refs resolve with the variables of the workspace that owns it, which the
+  daemon names (`workspace.of`), read from `workspace.vars`: a task or note of
+  another workspace resolves with its own `$KB_ROOT` and values, whichever store
+  is the session's. Without a `from`, it is the session store's table, as
+  before. `vars.workspace(opts)` names the owner.
+  - Each table is cached and polled under the same `FRESH_MS` bound (2 s), and a
+    change publishes `core.todo.vars:changed`.
+  - A file no workspace owns resolves with the environment alone.
+- **Writes are the workspace's.** `set(name, value, opts)` writes
+  `workspace.set_var`: `scope = "machine"` (this machine's row, an absolute
+  path; a new name's default), `"kb"` (the KB's `.autodoc-vars.toml`, relative to
+  the KB root, carried by git), or `"global"`; `machine_only = true` declares the
+  name machine-only in the KB's file. `remove(name, opts)` clears it where its
+  value comes from.
+- **`$WORKSPACE` is retired** (§2.6): no longer a built-in, never written by
+  `symbolize_path`, unresolved unless a machine or KB sets it. `$PROJECT_ROOT` is
+  a user variable. The built-ins are `$KB_ROOT` and `$HOME`.
+- **A conflict is a conflict.** A name a pending migration holds in conflict
+  reads nil and never falls back to the environment; `list` marks it
+  `conflict = true`.
+- **An older daemon** (below protocol 24) refuses `workspace.of` (-32601): every
+  `from` then reads the session store's table, and `workspace.of` is not asked
+  again this session.
+
 ## [v0.4.2] — 2026-10-15 — a todo store's variables are AutoDoc's
 
 ADR 1792015069 §2.5 ("variables belong to the store, not the route"). **Needs

@@ -319,8 +319,8 @@ run("vars", function()
     env.exists(kbfile) and env.read(kbfile):find("RELVAR", 1, true) ~= nil
       and not env.read(kbfile):find(kb .. "/sub", 1, true), env.exists(kbfile) and env.read(kbfile))
   ok("… and it resolves absolute", vars.get("RELVAR") == by_ws.KB_ROOT.value .. "/sub", vars.get("RELVAR"))
-  ok("vars.remove clears it from the file", vars.remove("RELVAR") == true
-    and not env.read(kbfile):find("RELVAR =", 1, true))
+  ok("vars.remove clears it from the file (gone with its last value, or without the name)",
+    vars.remove("RELVAR") == true and not (env.exists(kbfile) and env.read(kbfile):find("RELVAR", 1, true)))
   -- machine_only: the name declared in the KB's file, its value this machine's
   okv, verr = vars.set("MONLY", env.tmp .. "/monly", { machine_only = true })
   ok("vars.set machine_only answers true", okv == true, verr)
