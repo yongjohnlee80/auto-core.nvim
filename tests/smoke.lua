@@ -6981,9 +6981,15 @@ print("\n[65] todo.vars — the store's variables, from AutoDoc's daemon")
   ok("… but the global variables, from workspace.vars(\"\")", vars.get("GLOB", { from = "/opt/x.md" }) == "/glob")
   vars._reset_for_tests()
   old_none = true
+  -- the fallback is an empty table, so the environment answers, and nothing is an error: a refusal
+  -- passed on would answer nil and why here, as an unset name would without the environment
+  vim.env.GLOB = "/from/env"
+  local gv, gwhy = vars.get("GLOB", { from = "/opt/x.md" })
+  local _, lwhy = vars.list({ from = "/opt/x.md" })
   vim.env.GLOB = nil
-  ok("a daemon before them: the environment alone, no error", vars.get("GLOB", { from = "/opt/x.md" }) == nil
-    and vars.workspace({ from = "/opt/x.md" }) == nil)
+  ok("a daemon before them: the environment alone, no error",
+    gv == "/from/env" and gwhy == nil and lwhy == nil and vars.workspace({ from = "/opt/x.md" }) == nil,
+    vim.inspect({ value = gv, why = gwhy, list_why = lwhy }))
   old_none = false
   vars._reset_for_tests()
   vim.env.HELD = "/from/env"
