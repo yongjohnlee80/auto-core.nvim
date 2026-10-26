@@ -998,6 +998,10 @@ return {
   -- before. vars.workspace(opts) is new. A file no workspace owns reads
   -- workspace.vars("") (its $HOME and the global variables), or the
   -- environment alone where the daemon refuses the empty name.
-  version     = "0.5.0",
+  -- v0.5.1: a bare todo assignee is its own project's agent (ADR 1791532020
+  -- r15 §2.5a). todo.scope is new: assign and add carry an opaque project scope,
+  -- and the notifier delivers only its own project's rows. Needs AutoDoc
+  -- protocol 30 for the scope; with an older autodoc.nvim nothing changes.
+  version     = "0.5.1",
   api_version = "0.1",
 }
