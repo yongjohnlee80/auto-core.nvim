@@ -17,6 +17,13 @@ local mailbox  = require("auto-core.mailbox")
 local mb_path  = mailbox.path
 local registry = require("auto-core.mailbox.registry")
 local events   = require("auto-core.events")
+local scope    = require("auto-core.todo.scope")
+
+-- This Neovim's project, as auto-agents sets it at setup (ADR 1791532020 §2.5a):
+-- the fixture client's assignments carry it, and so do the direct calls below
+-- that stand in for another Neovim of the same project.
+local SCOPE = "auto-agents:project-a"
+scope.set(SCOPE)
 
 -- The cells up to the hold sections run with grace_ms = 0: a recipient not
 -- registered here is past the window at once (skipped and acked), as the
@@ -195,7 +202,7 @@ run("timer", function()
   notifier.start()
   notifier._connect()
   local t = env.call("todos.get", { "kb", "2026-10-01-task-4" })
-  local _, aerr = env.call("todos.assign", { "kb", t.id, t.rev, "agent:lector", "from outside" })
+  local _, aerr = env.call("todos.assign", { "kb", t.id, t.rev, "agent:lector", "from outside", SCOPE })
   ok("assigned directly on the daemon (as AutoDoc's GUI would)", aerr == nil, aerr and aerr.message)
   local seq = assign_seq(t.id)
   local mid = notifier.message_id(store_id, seq)
@@ -204,7 +211,7 @@ run("timer", function()
   events.publish("autodoc.session:disconnected", { reason = "test" })
   env.wait(300, function() return false end)
   local t2 = env.call("todos.get", { "kb", "2026-10-01-task-5" })
-  env.call("todos.assign", { "kb", t2.id, t2.rev, "agent:lector", "while disconnected" })
+  env.call("todos.assign", { "kb", t2.id, t2.rev, "agent:lector", "while disconnected", SCOPE })
   local seq2 = assign_seq(t2.id)
   local mid2 = notifier.message_id(store_id, seq2)
   ok("no delivery while disconnected", not env.wait(1000, function()
@@ -233,7 +240,7 @@ run("watermark", function()
   local delivered_before = #inbox(lector)
   -- while no Neovim polls, an assignment lands
   local t = env.call("todos.get", { "kb", "2026-10-01-task-6" })
-  env.call("todos.assign", { "kb", t.id, t.rev, "agent:lector", "while every Neovim was closed" })
+  env.call("todos.assign", { "kb", t.id, t.rev, "agent:lector", "while every Neovim was closed", SCOPE })
   local seq = assign_seq(t.id)
   -- a new process: a new instance id, so a new consumer
   notifier._reset_for_tests()
@@ -461,6 +468,69 @@ run("a new Neovim prunes once, at its first floor", function()
   ok("the dead process's file is gone", not f["1000000011-999999999.json"], vim.inspect(f))
   ok("this process's file carries the floor", f["7777777777-" .. vim.fn.getpid() .. ".json"]
     and notifier.watermark(store_id) == head(), vim.inspect(f))
+end)
+
+section("a bare assignee is its own project's agent (ADR 1791532020 §2.5a)")
+-- One Neovim of project A. The others sharing the store are stood in for by
+-- the scope their assignments carry: B's, or none (a legacy change, a hand
+-- edit, an unscoped --call).
+local function fresh(inst)
+  notifier._reset_for_tests()
+  mb_path.set_instance_id(inst)
+  registry.register("nvim", { root = mbroot })
+  local rec = registry.register("agent:vision", { root = mbroot })
+  notifier._configure({ poll_ms = false, watermark_dir = env.tmp .. "/wm-scope", grace_ms = 0 })
+  notifier.start()
+  notifier._connect()
+  poll()
+  return rec
+end
+---assigned makes an assignment as a client of scope s would (nil: none), and
+---returns its message id once this Neovim's notifier has polled past it.
+local function assigned(title, who, s)
+  local id = todo.add({ title = title })
+  local t = env.call("todos.get", { "kb", id })
+  local params = { "kb", t.id, t.rev, who, "scoped" }
+  if s then params[6] = s end
+  local _, err = env.call("todos.assign", params)
+  ok("assigned: " .. title, err == nil, err and err.message)
+  local seq = assign_seq(id)
+  poll()
+  return notifier.message_id(store_id, seq), seq
+end
+local function delivered(rec, mid) return env.exists(rec.subs.inbox .. "/" .. mid .. ".json") end
+
+run("the scope decides who delivers a bare name", function()
+  local vision = fresh("8888888888-11111")
+  ok("this Neovim is project A", scope.get() == SCOPE and scope.scoped(), scope.get())
+  local mine = assigned("S1", "agent:vision", SCOPE)
+  ok("A's bare assignment is delivered in A", delivered(vision, mine), mine)
+  local theirs, tseq = assigned("S2", "agent:vision", "auto-agents:project-b")
+  ok("B's bare assignment is not delivered in A", not delivered(vision, theirs), theirs)
+  ok("… and A acks it: it is B's to deliver", notifier.watermark(store_id) >= tseq, notifier.watermark(store_id))
+  local legacy, lseq = assigned("S3", "gold-man", nil)
+  ok("a bare name with no scope is delivered by none", not delivered(vision, legacy), legacy)
+  ok("… and acked", notifier.watermark(store_id) >= lseq)
+  local full = assigned("S4", "agent:vision:8888888888-11111", "auto-agents:project-b")
+  ok("a full id reaches its instance, whatever the scope", delivered(vision, full), full)
+end)
+
+run("a restart keeps the project: a new instance id still delivers A's bare names", function()
+  local vision = fresh("9999999999-22222")
+  local mid = assigned("S5", "agent:vision", SCOPE)
+  ok("delivered after the restart", delivered(vision, mid), mid)
+end)
+
+run("the rollout guard: below protocol 30, no scope is sent and the v0.5.0 rule stands", function()
+  scope._set_protocol(29)
+  local p = scope.assign_params("agent:vision", "why")
+  ok("no scope in the params", #p == 2 and p[2] == "why", vim.inspect(p))
+  local vision = fresh("1212121212-33333")
+  local mid = assigned("S6", "agent:vision", nil)
+  ok("a bare name with no scope is delivered by name, as before", delivered(vision, mid), mid)
+  scope._set_protocol(nil)
+  local q = scope.assign_params("agent:vision", nil)
+  ok("at 30 the scope follows an empty reason", #q == 3 and q[2] == "" and q[3] == SCOPE, vim.inspect(q))
 end)
 
 notifier.stop()

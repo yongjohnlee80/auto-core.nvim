@@ -161,10 +161,11 @@ function M.client()
   end
   function C.add(spec)
     local ok, t = op(function(c)
-      local task, e = daemon.rpc("todos.add", { c.at, spec })
+      local params = { c.at, unpack(require("auto-core.todo.scope").add_params(spec)) }
+      local task, e = daemon.rpc("todos.add", params)
       if e and e.code == daemon.NOT_A_STORE then
         rpc("todos.scaffold", { c.at })
-        task, e = daemon.rpc("todos.add", { c.at, spec })
+        task, e = daemon.rpc("todos.add", params)
       end
       if e then daemon.fail(e) end
       return decorate(c, task)
@@ -186,8 +187,10 @@ function M.client()
   end
   function C.update(id, patch) return mutate("update", id, patch) end
   function C.status(id, new) return mutate("status", id, new) end
+  -- an assignment's params as the direct clients build them: this Neovim's
+  -- scope, when one is set and AutoDoc takes it (ADR 1791532020 §2.5a)
   function C.assign(id, who, reason)
-    local t, e = mutate("assign", id, who or "", reason)
+    local t, e = mutate("assign", id, unpack(require("auto-core.todo.scope").assign_params(who or "", reason)))
     if t and who and who ~= "" then poke() end
     return t, e
   end
