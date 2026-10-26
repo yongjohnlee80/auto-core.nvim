@@ -11,6 +11,25 @@ key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
 
+## [Unreleased] — a bare todo assignee is its own project's agent
+
+ADR 1791532020 r15 §2.5a. Every Neovim's notifier reads AutoDoc's one change log, so an
+assignment to a bare `agent:<name>` was delivered by every Neovim, of every project, with an agent
+of that name (three such deliveries on 2026-10-26). **Needs AutoDoc protocol 30** for the scope;
+against an older daemon nothing changes.
+
+- **`auto-core.todo.scope`** (new): the project an assignment is made in. The host sets it
+  (`set`; auto-agents sets `"auto-agents:" .. session_project_key`, which survives a restart).
+  `scoped()` is autodoc.nvim's contract protocol ≥ 30; `assign_params(assignee, reason)` and
+  `add_params(spec)` are todos.assign's and todos.add's params with the scope, the one place the
+  writers build them; `bare(assignee)` tells a bare name from a full id.
+- **The notifier delivers a bare assignee only when the change's scope is its own.** Another
+  project's is skipped and acked; one with no scope (a legacy change, a hand edit, an unscoped
+  `--call`) is skipped and acked too, reaching no one rather than everyone. A full
+  `agent:<name>:<instance>` is delivered by its instance, whatever the scope. A resync routes its
+  rows the same way. Each skip is one audit line.
+- Below protocol 30 the v0.5.0 rule stands (a bare name, by this instance's registry), logged once.
+
 ## [v0.5.0] — 2026-10-16 — a file's refs resolve with its workspace's variables
 
 ADR 1792132105 ("variables belong to the workspace"). A **minor** bump, Johno's

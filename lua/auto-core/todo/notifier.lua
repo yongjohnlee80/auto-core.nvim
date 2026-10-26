@@ -9,6 +9,13 @@
 ---Each Neovim delivers only to the agents registered in its own instance, and acks
 ---its own cursor.
 ---
+---**A bare assignee is its own project's agent** (ADR 1791532020 r15 §2.5a). Every
+---Neovim reads the one change log, so an assignment carries its assigner's scope
+---(`auto-core.todo.scope`, set by the host), and a bare `agent:<name>` is
+---delivered only by a Neovim of that scope; one with no scope (a legacy change, a
+---hand edit, an unscoped `--call`) by none. A full `agent:<name>:<instance>` is
+---delivered by its instance alone, as before.
+---
 ---**A recipient not registered here yet is HELD** for a grace window counted from
 ---this process's notifier start (`GRACE_MS`, 10 min): agents spawn after Neovim
 ---starts, and the catch-up must reach them (ADR §2.5). The cursor is acked only up
@@ -364,26 +371,57 @@ end
 
 local function now_ms() return vim.uv.hrtime() / 1e6 end
 
+local _unscoped_said = false -- the below-protocol-30 notice, once per process
+
+---audit logs a skipped assignment once per message id.
+local function audit(mid, to, why)
+  if _audited[mid] then return end
+  _audited[mid] = true
+  pcall(function() log().info(LOG_COMPONENT, "assignment " .. mid .. " to " .. to .. " skipped: " .. why) end)
+end
+
 ---route decides an assign change: "deliver" (with the recipient's record),
 ---"hold" (not registered here, inside the grace window) or "skip" (nobody to
----tell: cleared, `user`, `autodoc:*`, or past the window).
+---tell: cleared, `user`, `autodoc:*`, another project's, or past the window).
+---
+---A bare assignee is this project's agent (ADR 1791532020 r15 §2.5a): it is
+---delivered only when the change's scope is this Neovim's, and one with no
+---scope (a legacy assignment, a hand edit, an unscoped `--call`) by no Neovim.
+---A full `agent:<name>:<instance>` names its instance, whatever the scope.
+---Against an AutoDoc below protocol 30, which keeps no scope, the v0.5.0 rule
+---stands: a bare name, by this instance's registry.
+---@param scope any the change's scope; nil, vim.NIL or "" for none
 ---@return "deliver"|"hold"|"skip", table?
-local function route(mid, to)
+local function route(mid, to, scope)
   if type(to) ~= "string" or to == "" or to == "user" or to:match("^autodoc:") then
     return "skip"
+  end
+  local sc = require("auto-core.todo.scope")
+  if sc.bare(to) then
+    if not sc.scoped() then
+      if not _unscoped_said then
+        _unscoped_said = true
+        pcall(function() log().info(LOG_COMPONENT, "AutoDoc is below protocol " .. sc.PROTOCOL
+          .. ": assignments carry no scope, so a bare assignee is delivered by every Neovim with that agent") end)
+      end
+    else
+      local own = sc.get()
+      if type(scope) ~= "string" or scope == "" then
+        audit(mid, to, "it records no scope (a legacy assignment, a hand edit, or an unscoped call): "
+          .. "a bare assignee reaches only its own project's agent")
+        return "skip"
+      elseif scope ~= own then
+        audit(mid, to, "it was made in " .. scope .. ", and this Neovim's scope is " .. tostring(own))
+        return "skip"
+      end
+    end
   end
   local rec = M.local_recipient(to)
   if rec then return "deliver", rec end
   local grace = _cfg.grace_ms
   if grace == nil then grace = M.GRACE_MS end
   if _started_at and now_ms() - _started_at < grace then return "hold" end
-  if not _audited[mid] then
-    _audited[mid] = true
-    pcall(function()
-      log().info(LOG_COMPONENT, "assignment " .. mid .. " to " .. to
-        .. " skipped: no such agent registered in this Neovim within the grace window")
-    end)
-  end
+  audit(mid, to, "no such agent registered in this Neovim within the grace window")
   return "skip"
 end
 
@@ -416,7 +454,7 @@ local function poll_store(store)
       local held = false
       for _, row in ipairs(daemon.list_of(page.snapshot)) do
         local mid = string.format("todo-%s-r%d-%s", store.id, cursor, tostring(row.id))
-        local verdict, rec = route(mid, row.assignee)
+        local verdict, rec = route(mid, row.assignee, row.scope)
         if verdict == "hold" then
           held = true
         elseif verdict == "deliver" and send(at, store, rec, mid, { id = row.id,
@@ -443,7 +481,7 @@ local function poll_store(store)
       if seq > floor then
         if c.kind == "assign" then
           local mid = M.message_id(store.id, seq)
-          local verdict, rec = route(mid, c.to)
+          local verdict, rec = route(mid, c.to, c.scope)
           if verdict == "hold" then
             handled = false
           elseif verdict == "deliver" and send(at, store, rec, mid,
@@ -629,7 +667,7 @@ function M._reset_for_tests()
   M.stop()
   _cfg, _floors, _backoff, _polling, _again, _waiters = {}, {}, nil, false, false, {}
   _applied, _audited, _started_at = {}, {}, nil
-  _own, _prepared = {}, false
+  _own, _prepared, _unscoped_said = {}, false, false
 end
 
 return M
