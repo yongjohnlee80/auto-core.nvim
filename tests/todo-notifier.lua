@@ -513,7 +513,7 @@ run("the scope decides who delivers a bare name", function()
   local theirs, tseq = assigned("S2", "agent:vision", "auto-agents:project-b")
   ok("B's bare assignment is not delivered in A", not delivered(vision, theirs), theirs)
   ok("… and A acks it: it is B's to deliver", notifier.watermark(store_id) >= tseq, notifier.watermark(store_id))
-  local legacy, lseq = assigned("S3", "gold-man", nil)
+  local legacy, lseq = assigned("S3", "vision", nil) -- an agent registered here: only the rule withholds it
   ok("a bare name with no scope is delivered by none", not delivered(vision, legacy), legacy)
   ok("… and acked", notifier.watermark(store_id) >= lseq)
   local full = assigned("S4", "agent:vision:8888888888-11111", "auto-agents:project-b")
