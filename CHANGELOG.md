@@ -11,7 +11,7 @@ key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
 
-## [Unreleased] — a bare todo assignee is its own project's agent
+## [v0.5.1] — 2026-10-27 — a bare todo assignee is its own project's agent
 
 ADR 1791532020 r15 §2.5a. Every Neovim's notifier reads AutoDoc's one change log, so an
 assignment to a bare `agent:<name>` was delivered by every Neovim, of every project, with an agent
