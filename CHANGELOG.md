@@ -15,8 +15,11 @@ cycle plus a major bump.
 
 ADR 1791532020 r15 §2.5a. Every Neovim's notifier reads AutoDoc's one change log, so an
 assignment to a bare `agent:<name>` was delivered by every Neovim, of every project, with an agent
-of that name (three such deliveries on 2026-10-26). **Needs AutoDoc protocol 30** for the scope;
-against an older daemon nothing changes.
+of that name (three such deliveries on 2026-10-26). **Needs AutoDoc protocol 30** for the scope.
+`scoped()` reads the protocol of autodoc.nvim's generated contracts; it does not probe the running
+daemon. That is enough because autodoc.nvim and its daemon ship from one commit, and its session
+says hello at that protocol, which an older daemon refuses. So with an autodoc.nvim below 30
+nothing changes, and a newer autodoc.nvim never talks to an older daemon at all.
 
 - **`auto-core.todo.scope`** (new): the project an assignment is made in. The host sets it
   (`set`; auto-agents sets `"auto-agents:" .. session_project_key`, which survives a restart).

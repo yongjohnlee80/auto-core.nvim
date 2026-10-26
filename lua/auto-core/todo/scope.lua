@@ -35,9 +35,10 @@ function M.get() return _scope end
 -- A test seam: the protocol autodoc.nvim's contracts declare, or a replacement.
 local _protocol = nil
 
----protocol is the protocol autodoc.nvim speaks, read from its generated contracts (the plugin
----and the daemon ship from one commit, and its session says hello at that protocol). 0 when
----autodoc.nvim can't be loaded.
+---protocol is the protocol autodoc.nvim speaks, read from its generated contracts, never probed
+---from the running daemon: the plugin and the daemon ship from one commit, and its session says
+---hello at that protocol, which an older daemon refuses, so a session never pairs a scoping plugin
+---with a daemon that drops the scope. 0 when autodoc.nvim can't be loaded.
 ---@return integer
 function M.protocol()
   if _protocol then return _protocol end
