@@ -277,8 +277,11 @@ run("resync", function()
   local acked
   faults["todos.changes"] = function(_, cb)
     cb({ resync = true, cursor = h, snapshot = {
-      { id = "2026-10-01-task-1", path = "in-progress/2026-10-01-task-1.md", assignee = "agent:lector" },
-      { id = "2026-10-01-task-2", path = "in-progress/2026-10-01-task-2.md", assignee = "agent:ghost" },
+      -- a snapshot row carries the scope of the assign that set it (ADR 1791532020 §2.5a)
+      { id = "2026-10-01-task-1", path = "in-progress/2026-10-01-task-1.md", assignee = "agent:lector", scope = SCOPE },
+      { id = "2026-10-01-task-2", path = "in-progress/2026-10-01-task-2.md", assignee = "agent:ghost", scope = SCOPE },
+      { id = "2026-10-01-task-3", path = "in-progress/2026-10-01-task-3.md", assignee = "agent:lector",
+        scope = "auto-agents:project-b" },
     } }, nil)
   end
   faults["todos.ack"] = function(params, cb, pass)
@@ -292,6 +295,8 @@ run("resync", function()
     and tostring(msg.body):find("resync", 1, true), mid)
   ok("not to the agent this Neovim does not host",
     #vim.fn.glob(lector.subs.inbox .. "/todo-*task-2*.json", false, true) == 0)
+  ok("not a row another project assigned",
+    #vim.fn.glob(lector.subs.inbox .. "/todo-*-r" .. h .. "-2026-10-01-task-3.json", false, true) == 0)
   ok("then the page's cursor was acked", acked == h, tostring(acked) .. " vs " .. h)
 end)
 
