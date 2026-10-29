@@ -11,7 +11,7 @@ key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
 
-## [Unreleased] — a stale notifier delivers no scoped assignment; a task keeps the agent's name
+## [v0.5.2] — 2026-10-29 — a stale notifier delivers no scoped assignment; a task keeps the agent's name
 
 Two gaps in v0.5.1's project scope, from 2026-10-29:
 1. A Neovim started before the upgrade kept v0.5.0's notifier loaded, and delivered two scoped
@@ -32,6 +32,8 @@ Two gaps in v0.5.1's project scope, from 2026-10-29:
   `scope.instance_of`, `scope.INSTANCE_PREFIX`.
 - A bare name keeps this Neovim's project scope, as before. A full id written straight into the
   store (a hand edit, a raw `--call`) still reaches its instance.
+- **`scope.set` refuses a project scope that starts with `@`**, the mark of an instance route, so
+  a project scope can never be read as one.
 
 ## [v0.5.1] — 2026-10-27 — a bare todo assignee is its own project's agent
 

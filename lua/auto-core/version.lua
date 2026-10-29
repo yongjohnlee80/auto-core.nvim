@@ -1002,6 +1002,10 @@ return {
   -- r15 §2.5a). todo.scope is new: assign and add carry an opaque project scope,
   -- and the notifier delivers only its own project's rows. Needs AutoDoc
   -- protocol 30 for the scope; with an older autodoc.nvim nothing changes.
-  version     = "0.5.1",
+  -- v0.5.2: the notifier tells todos.changes it reads scopes (AutoDoc protocol 33), so
+  -- the daemon withholds scoped assignees from a notifier still running older code; a full
+  -- agent:<name>:<instance> given at assign keeps only the name on the task and routes that
+  -- delivery by the scope @<instance>; scope.set refuses an @-prefixed project scope.
+  version     = "0.5.2",
   api_version = "0.1",
 }
