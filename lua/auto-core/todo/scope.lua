@@ -34,6 +34,12 @@ function M.set(scope)
   if scope ~= nil and type(scope) ~= "string" then
     error("auto-core.todo.scope.set: a string or nil, not a " .. type(scope), 2)
   end
+  if scope ~= nil and scope:sub(1, #M.INSTANCE_PREFIX) == M.INSTANCE_PREFIX then
+    -- "@<instance>" is an instance route (route_of); a project scope read as one would be
+    -- delivered by no Neovim of the project, or by the one instance it happens to name
+    error("auto-core.todo.scope.set: a project scope can't start with " .. M.INSTANCE_PREFIX
+      .. ", which marks an instance route: " .. scope, 2)
+  end
   _scope = scope
 end
 
