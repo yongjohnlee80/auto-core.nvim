@@ -538,5 +538,46 @@ run("the rollout guard: below protocol 30, no scope is sent and the v0.5.0 rule 
   ok("at 30 the scope follows an empty reason", #q == 3 and q[2] == "" and q[3] == SCOPE, vim.inspect(q))
 end)
 
+run("a full id given at assign: the task keeps the name, and only its instance delivers", function()
+  -- Johno, 2026-10-29: "assignee should only state the name of the agent, since the virtual
+  -- address/full address is only temp"
+  local p = scope.assign_params("agent:vision:8888888888-11111", "why")
+  ok("the params keep the name and route by the instance", #p == 3 and p[1] == "agent:vision"
+    and p[2] == "why" and p[3] == "@8888888888-11111", vim.inspect(p))
+  local spec = { title = "x", assignee = "agent:vision:8888888888-11111" }
+  local q = scope.add_params(spec)
+  ok("an add keeps the name too, and leaves the caller's spec alone", q[1].assignee == "agent:vision"
+    and q[2] == "@8888888888-11111" and spec.assignee == "agent:vision:8888888888-11111", vim.inspect(q))
+  local bare = scope.assign_params("agent:vision", nil)
+  ok("a bare name keeps this Neovim's project scope", bare[1] == "agent:vision" and bare[3] == SCOPE, vim.inspect(bare))
+  local vision = fresh("8888888888-11111")
+  local mine = assigned("S7", "agent:vision", "@8888888888-11111")
+  ok("routed to this instance: delivered", delivered(vision, mine), mine)
+  local theirs = assigned("S8", "agent:vision", "@7777777777-22222")
+  ok("routed to another instance: not delivered here, though the name is registered", not delivered(vision, theirs), theirs)
+end)
+
+run("the reader says it reads scopes from protocol 33", function()
+  local sent
+  local function watch() -- a fault is one-shot: armed again for each poll
+    faults["todos.changes"] = function(params, cb, pass)
+      sent = params
+      pass(params, cb)
+    end
+  end
+  scope._set_protocol(32)
+  ok("below 33: not a reads_scoped reader", not scope.reads_scoped())
+  watch()
+  poll()
+  ok("… and todos.changes is sent no scoped", sent and sent[4] == nil, vim.inspect(sent))
+  scope._set_protocol(33)
+  sent = nil
+  watch()
+  poll()
+  ok("at 33 todos.changes is sent scoped = true", sent and sent[4] == true, vim.inspect(sent))
+  scope._set_protocol(nil)
+  faults["todos.changes"] = nil
+end)
+
 notifier.stop()
 env.finish()

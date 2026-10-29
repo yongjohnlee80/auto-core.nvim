@@ -387,7 +387,9 @@ end
 ---A bare assignee is this project's agent (ADR 1791532020 r15 §2.5a): it is
 ---delivered only when the change's scope is this Neovim's, and one with no
 ---scope (a legacy assignment, a hand edit, an unscoped `--call`) by no Neovim.
----A full `agent:<name>:<instance>` names its instance, whatever the scope.
+---A full `agent:<name>:<instance>` names its instance, whatever the scope. An
+---instance scope, `@<instance>` (a full id given at assign: its task keeps only
+---the name), is delivered by that instance alone.
 ---Against an AutoDoc below protocol 30, which keeps no scope, the v0.5.0 rule
 ---stands: a bare name, by this instance's registry.
 ---@param scope any the change's scope; nil, vim.NIL or "" for none
@@ -397,7 +399,14 @@ local function route(mid, to, scope)
     return "skip"
   end
   local sc = require("auto-core.todo.scope")
-  if sc.bare(to) then
+  local inst = sc.instance_of(scope)
+  if inst then
+    -- an instance scope routes one delivery: a full id given at assign, whose task keeps the name
+    if inst ~= own_instance() then
+      audit(mid, to, "it was routed to instance " .. inst .. ", not this one")
+      return "skip"
+    end
+  elseif sc.bare(to) then
     if not sc.scoped() then
       if not _unscoped_said then
         _unscoped_said = true
@@ -442,7 +451,10 @@ local function poll_store(store)
   if floor == nil then prepare_once() end
   if floor == nil then floor = M.watermark(store.id) end
   while true do
-    local page, err = daemon.rpc("todos.changes", { at, M.consumer(), page_size })
+    local params = { at, M.consumer(), page_size }
+    -- say this reader honours scopes, so the daemon gives it scoped assignees (protocol 33)
+    if require("auto-core.todo.scope").reads_scoped() then params[4] = true end
+    local page, err = daemon.rpc("todos.changes", params)
     if err then
       warn("changes", "todos.changes failed for " .. tostring(store.path) .. ": " .. daemon.format(err))
       return

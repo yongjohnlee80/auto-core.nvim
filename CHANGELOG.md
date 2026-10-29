@@ -11,6 +11,28 @@ key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
 
+## [Unreleased] — a stale notifier delivers no scoped assignment; a task keeps the agent's name
+
+Two gaps in v0.5.1's project scope, from 2026-10-29:
+1. A Neovim started before the upgrade kept v0.5.0's notifier loaded, and delivered two scoped
+   assignments in a second project.
+2. A full mailbox id given at assign was written into the task file, where it goes stale at the
+   next restart.
+
+**Needs AutoDoc protocol 33** for the first fix.
+
+- **`todos.changes` says the reader honours scopes.** From protocol 33, `poll_store` passes
+  `scoped = true`. A reader that doesn't pass it is answered a scoped assignment without its
+  assignee, so a notifier still running from before an upgrade delivers none, where it used to
+  deliver it in every project. New: `scope.READER_PROTOCOL`, `scope.reads_scoped()`.
+- **A task's assignee is the agent's name only** (Johno, 2026-10-29: "the full address is only
+  temp"). `assign_params` and `add_params` keep `agent:<name>` from `agent:<name>:<instance>`, and
+  route that one delivery with the scope `@<instance>`. The notifier delivers an instance scope
+  only in that instance. The caller's spec is not changed. New: `scope.route_of`,
+  `scope.instance_of`, `scope.INSTANCE_PREFIX`.
+- A bare name keeps this Neovim's project scope, as before. A full id written straight into the
+  store (a hand edit, a raw `--call`) still reaches its instance.
+
 ## [v0.5.1] — 2026-10-27 — a bare todo assignee is its own project's agent
 
 ADR 1791532020 r15 §2.5a. Every Neovim's notifier reads AutoDoc's one change log, so an
