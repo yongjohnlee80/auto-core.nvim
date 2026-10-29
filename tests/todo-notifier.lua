@@ -557,6 +557,12 @@ run("a full id given at assign: the task keeps the name, and only its instance d
   ok("routed to another instance: not delivered here, though the name is registered", not delivered(vision, theirs), theirs)
 end)
 
+run("a project scope can't look like an instance route", function()
+  local okset, err = pcall(scope.set, "@8888888888-11111")
+  ok("scope.set refuses an @-prefixed scope", not okset and tostring(err):find("instance route", 1, true) ~= nil, tostring(err))
+  ok("… and keeps the scope it had", scope.get() == SCOPE, scope.get())
+end)
+
 run("the reader says it reads scopes from protocol 33", function()
   local sent
   local function watch() -- a fault is one-shot: armed again for each poll
