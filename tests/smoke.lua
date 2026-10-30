@@ -4647,6 +4647,84 @@ ok("recipient registers later → re-scan routes the pending message",
   vim.fn.filereadable(orphan_path) == 0
     and vim.tbl_contains(transp.list_inbox("agent:nobody_registered"), orphan.id))
 
+-- ── 49i2. the outbox gateway (ADR 1793271500 phase 4) ─────────
+-- A gateway that takes a message owns it: done(nil) archives the outbox file
+-- and the recipient's inbox never sees it; done(err) or a gateway that throws
+-- leaves the file for the next scan; a gateway that declines leaves the
+-- message to the file move.
+local gw_routed, gw_undeliverable, gw_calls = {}, {}, {}
+local gw_sub1 = events_m.subscribe("core.mailbox:outbox_routed", function(p)
+  if p.via == "gateway" then gw_routed[#gw_routed + 1] = p end
+end)
+local gw_sub2 = events_m.subscribe("core.mailbox:outbox_undeliverable", function(p)
+  if p.reason == "gateway_failed" then gw_undeliverable[#gw_undeliverable + 1] = p end
+end)
+local gw_mode = "take"
+router.set_gateway(function(rec, mid, msg, done)
+  gw_calls[#gw_calls + 1] = { from = rec.id, mid = mid, to = msg.to }
+  if gw_mode == "decline" then return false end
+  if gw_mode == "throw" then error("gateway exploded") end
+  vim.defer_fn(function() done(gw_mode == "fail" and "daemon refused" or nil) end, 10)
+  return true
+end)
+local function gw_send(body)
+  local m = message.build({ from = "agent:jarvis", to = "agent:gemini", body = body })
+  local path = jarvis_rec.subs.outbox .. "/" .. m.id .. ".json"
+  vim.fn.writefile({ vim.json.encode(m) }, path)
+  router.scan_now()
+  return m, path
+end
+
+local gw_taken, gw_taken_path = gw_send("through the gateway")
+vim.wait(500, function() return #gw_routed >= 1 end, 25)
+ok("gateway: a taken message is archived, announced via the gateway, and never moved to the inbox",
+  #gw_routed == 1 and gw_routed[1].id == gw_taken.id and gw_routed[1].to == "agent:gemini"
+    and vim.fn.filereadable(gw_taken_path) == 0
+    and vim.fn.filereadable(jarvis_rec.subs.archive .. "/" .. gw_taken.id .. ".json") == 1
+    and not vim.tbl_contains(transp.list_inbox("agent:gemini"), gw_taken.id),
+  vim.inspect({ gw_routed, gw_calls }))
+
+gw_mode = "fail"
+local gw_failed, gw_failed_path = gw_send("the daemon refuses this one")
+vim.wait(500, function() return #gw_undeliverable >= 1 end, 25)
+ok("gateway: done(err) leaves the file in the outbox and says gateway_failed",
+  #gw_undeliverable == 1 and gw_undeliverable[1].id == gw_failed.id
+    and gw_undeliverable[1].error == "daemon refused"
+    and vim.fn.filereadable(gw_failed_path) == 1,
+  vim.inspect(gw_undeliverable))
+
+gw_mode = "take"
+router.scan_now()
+vim.wait(500, function() return #gw_routed >= 2 end, 25)
+ok("gateway: the failed message is retried by the next scan and goes through",
+  #gw_routed == 2 and gw_routed[2].id == gw_failed.id and vim.fn.filereadable(gw_failed_path) == 0,
+  vim.inspect(gw_routed))
+
+gw_mode = "throw"
+local gw_thrown, gw_thrown_path = gw_send("the gateway throws")
+vim.wait(300, function() return #gw_undeliverable >= 2 end, 25)
+ok("gateway: a gateway that throws leaves the file and says gateway_failed",
+  #gw_undeliverable == 2 and gw_undeliverable[2].id == gw_thrown.id
+    and vim.fn.filereadable(gw_thrown_path) == 1,
+  vim.inspect(gw_undeliverable))
+
+gw_mode = "decline"
+local gw_declined = select(1, gw_send("not for the gateway"))
+vim.wait(300, function()
+  return vim.tbl_contains(transp.list_inbox("agent:gemini"), gw_declined.id)
+end, 25)
+ok("gateway: a declined message takes the file move to the recipient's inbox, as before",
+  vim.tbl_contains(transp.list_inbox("agent:gemini"), gw_declined.id))
+
+router.set_gateway(nil)
+router.scan_now() -- the thrown one, with no gateway, takes the file move now
+vim.wait(300, function() return vim.fn.filereadable(gw_thrown_path) == 0 end, 25)
+ok("gateway: unset, the file move routes what was left",
+  vim.fn.filereadable(gw_thrown_path) == 0
+    and vim.tbl_contains(transp.list_inbox("agent:gemini"), gw_thrown.id))
+events_m.unsubscribe(gw_sub1)
+events_m.unsubscribe(gw_sub2)
+
 router.stop()
 ok("router.stop drops running state", router.is_running() == false)
 

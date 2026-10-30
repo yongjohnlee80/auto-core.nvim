@@ -474,6 +474,31 @@ local function dispatch_wake(rec, kind, mid, facts)
   commands.handle_message(msg, ctx)
 end
 
+-- ── outbox gateway ────────────────────────────────────────
+--
+-- A gateway takes some outbox messages instead of the file move: the Neovim
+-- host installs one that sends a cut-over recipient's mail through the AutoDoc
+-- daemon (ADR 1793271500 phase 4). auto-core itself stays daemon-free: the
+-- gateway is only a function.
+--
+--   fn(rec, mid, msg, done) -> took: boolean
+--
+-- A gateway that returns true owns the message and calls done(err) once,
+-- from any context. done(nil) archives the outbox file (the message is
+-- delivered); done(err) leaves it in the outbox for the next scan and
+-- publishes outbox_undeliverable (reason "gateway_failed"). A gateway that
+-- returns false leaves the message to the file move, as before. While a
+-- message is with the gateway, a rescan of the same file is skipped; the
+-- gateway's own idempotency key covers a resend after a failure.
+
+local _gateway = nil
+local _gateway_inflight = {}
+
+---@param fn fun(rec: AutoCoreMailboxRecord, mid: string, msg: table, done: fun(err: any)): boolean|nil
+function M.set_gateway(fn)
+  _gateway = fn
+end
+
 -- ── outbox routing ────────────────────────────────────────
 
 ---@param rec AutoCoreMailboxRecord
@@ -495,6 +520,55 @@ local function route_outbox(rec, mid)
       })
     end
     return
+  end
+
+  if _gateway then
+    if _gateway_inflight[src] then return end
+    _gateway_inflight[src] = true
+    local finished = false
+    local function done(gerr)
+      vim.schedule(function()
+        if finished then return end
+        finished = true
+        _gateway_inflight[src] = nil
+        if gerr ~= nil then
+          events.publish("core.mailbox:outbox_undeliverable", {
+            from   = rec.bare_id,
+            from_full = rec.id,
+            to     = msg.to,
+            id     = mid,
+            reason = "gateway_failed",
+            error  = tostring(gerr),
+            path   = src,
+          })
+          return
+        end
+        local archived, aerr = vim.uv.fs_rename(src, rec.subs.archive .. "/" .. mid .. ".json")
+        events.publish("core.mailbox:outbox_routed", {
+          from   = rec.bare_id,
+          from_full = rec.id,
+          to     = msg.to,
+          id     = mid,
+          via    = "gateway",
+          archive_error = (not archived) and aerr or nil,
+        })
+      end)
+    end
+    local ok_call, took = pcall(_gateway, rec, mid, msg, done)
+    if ok_call and took then return end
+    _gateway_inflight[src] = nil
+    if not ok_call then
+      events.publish("core.mailbox:outbox_undeliverable", {
+        from   = rec.bare_id,
+        from_full = rec.id,
+        to     = msg.to,
+        id     = mid,
+        reason = "gateway_failed",
+        error  = tostring(took),
+        path   = src,
+      })
+      return
+    end
   end
 
   local recipient = registry.get(msg.to)
@@ -1117,6 +1191,8 @@ end
 ---Test-only — stops the router and drops every internal table.
 function M._reset_for_tests()
   M.stop()
+  _gateway = nil
+  _gateway_inflight = {}
   _state = {
     running    = false,
     roots      = {},
