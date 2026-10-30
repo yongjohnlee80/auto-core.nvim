@@ -4716,8 +4716,117 @@ end, 25)
 ok("gateway: a declined message takes the file move to the recipient's inbox, as before",
   vim.tbl_contains(transp.list_inbox("agent:gemini"), gw_declined.id))
 
+-- the classes of #16 r0 (Lector): ownership apart from the hook, one settlement per attempt
+local held = {}
+gw_mode = "hold"
+router.set_gateway(function(rec, mid, msg, done)
+  if gw_mode == "hold" then held[#held + 1] = done; return true end
+  if gw_mode == "sync" then done(nil); return true end
+  if gw_mode == "twice" then done(nil); done(nil); return true end
+  if gw_mode == "done-throw" then done(nil); error("after done") end
+  if gw_mode == "done-decline" then done(nil); return false end
+  return false
+end)
+local function routed_count(id)
+  local n = 0
+  for _, p in ipairs(gw_routed) do if p.id == id then n = n + 1 end end
+  return n
+end
+
+-- held, then the hook unset: no scan routes the file another way
+local m_held, p_held = gw_send("held while the hook goes away")
+vim.wait(100, function() return #held >= 1 end, 10)
 router.set_gateway(nil)
-router.scan_now() -- the thrown one, with no gateway, takes the file move now
+router.scan_now()
+vim.wait(100)
+ok("gateway: a held message is never moved once the hook is unset",
+  vim.fn.filereadable(p_held) == 1 and not vim.tbl_contains(transp.list_inbox("agent:gemini"), m_held.id))
+held[1](nil)
+vim.wait(300, function() return routed_count(m_held.id) == 1 end, 25)
+ok("gateway: the held attempt settles after the unset, archived once",
+  routed_count(m_held.id) == 1 and vim.fn.filereadable(p_held) == 0
+    and vim.fn.filereadable(jarvis_rec.subs.archive .. "/" .. m_held.id .. ".json") == 1)
+
+-- delivered, the archive refused, the hook unset: archived later, never moved
+router.set_gateway(function(rec, mid, msg, done) held[#held + 1] = done; return true end)
+local m_arch, p_arch = gw_send("delivered, archive refused")
+vim.wait(100, function() return #held >= 2 end, 10)
+vim.uv.fs_chmod(jarvis_rec.subs.archive, tonumber("500", 8))
+held[2](nil)
+vim.wait(300, function()
+  for _, p in ipairs(gw_undeliverable) do if p.id == m_arch.id and p.reason == "gateway_archive_failed" then return true end end
+  return false
+end, 25)
+router.set_gateway(nil)
+router.scan_now()
+vim.wait(100)
+ok("gateway: a delivered message whose archive failed is never moved, hook or no hook",
+  vim.fn.filereadable(p_arch) == 1 and not vim.tbl_contains(transp.list_inbox("agent:gemini"), m_arch.id)
+    and routed_count(m_arch.id) == 0)
+vim.uv.fs_chmod(jarvis_rec.subs.archive, tonumber("700", 8))
+router.scan_now()
+vim.wait(300, function() return routed_count(m_arch.id) == 1 end, 25)
+ok("gateway: the next scan archives it, once",
+  routed_count(m_arch.id) == 1 and vim.fn.filereadable(p_arch) == 0
+    and not vim.tbl_contains(transp.list_inbox("agent:gemini"), m_arch.id))
+
+router.set_gateway(function(rec, mid, msg, done)
+  if gw_mode == "sync" then done(nil); return true end
+  if gw_mode == "twice" then done(nil); done(nil); return true end
+  if gw_mode == "done-throw" then done(nil); error("after done") end
+  if gw_mode == "done-decline" then done(nil); return false end
+  held[#held + 1] = done
+  return true
+end)
+
+gw_mode = "sync"
+local m_sync, p_sync = gw_send("done before return")
+vim.wait(300, function() return routed_count(m_sync.id) == 1 end, 25)
+ok("gateway: a done() before the gateway returns waits for its acceptance, then archives",
+  routed_count(m_sync.id) == 1 and vim.fn.filereadable(p_sync) == 0)
+
+gw_mode = "twice"
+local m_twice = select(1, gw_send("done twice"))
+vim.wait(300, function() return routed_count(m_twice.id) >= 1 end, 25)
+vim.wait(100)
+ok("gateway: a second done() is ignored", routed_count(m_twice.id) == 1)
+
+gw_mode = "done-throw"
+local m_dt, p_dt = gw_send("done, then a throw")
+vim.wait(150)
+ok("gateway: done() then a throw: nothing archived, the file kept",
+  vim.fn.filereadable(p_dt) == 1 and routed_count(m_dt.id) == 0)
+
+gw_mode = "done-decline"
+local m_dd, p_dd = gw_send("done, then declined")
+vim.wait(300, function() return vim.tbl_contains(transp.list_inbox("agent:gemini"), m_dd.id) end, 25)
+ok("gateway: done() then a decline: the file move, never an archive",
+  vim.tbl_contains(transp.list_inbox("agent:gemini"), m_dd.id) and routed_count(m_dd.id) == 0)
+
+-- a stale callback after a retry settles nothing
+gw_mode = "hold"
+local before = #held
+local m_st, p_st = gw_send("retried")
+vim.wait(100, function() return #held == before + 1 end, 10)
+local first = held[#held]
+first("refused")
+vim.wait(200, function()
+  for _, p in ipairs(gw_undeliverable) do if p.id == m_st.id then return true end end
+  return false
+end, 25)
+router.scan_now()
+vim.wait(100, function() return #held == before + 2 end, 10)
+first(nil) -- the first attempt's callback, late
+vim.wait(100)
+ok("gateway: a stale callback from a failed attempt settles nothing",
+  vim.fn.filereadable(p_st) == 1 and routed_count(m_st.id) == 0)
+held[#held](nil)
+vim.wait(300, function() return routed_count(m_st.id) == 1 end, 25)
+ok("gateway: the retry's own callback settles it, once",
+  routed_count(m_st.id) == 1 and vim.fn.filereadable(p_st) == 0)
+
+router.set_gateway(nil)
+router.scan_now() -- the thrown ones, with no gateway, take the file move now
 vim.wait(300, function() return vim.fn.filereadable(gw_thrown_path) == 0 end, 25)
 ok("gateway: unset, the file move routes what was left",
   vim.fn.filereadable(gw_thrown_path) == 0

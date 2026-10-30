@@ -484,15 +484,23 @@ end
 --   fn(rec, mid, msg, done) -> took: boolean
 --
 -- A gateway that returns true owns the message and calls done(err) once,
--- from any context. done(nil) archives the outbox file (the message is
--- delivered); done(err) leaves it in the outbox for the next scan and
--- publishes outbox_undeliverable (reason "gateway_failed"). A gateway that
--- returns false leaves the message to the file move, as before. While a
--- message is with the gateway, a rescan of the same file is skipped; the
--- gateway's own idempotency key covers a resend after a failure.
+-- from any context, before or after it returns. done(nil) means delivered:
+-- the outbox file is archived. done(err) means not delivered: the file stays
+-- in the outbox for the next scan (outbox_undeliverable, reason
+-- "gateway_failed"). A gateway that returns false, or throws, has not taken
+-- it: anything it passed to done is ignored, and the message takes the file
+-- move (a throw is reported and the file kept). Every attempt is its own:
+-- a callback from an earlier attempt never settles a later one.
+--
+-- Ownership is kept apart from the hook: while an attempt is outstanding, or
+-- a delivered message's archive rename has yet to succeed, no scan routes the
+-- file another way, with or without a gateway set. A delivered file whose
+-- archive failed is archived again by the next scan, never delivered again.
 
 local _gateway = nil
-local _gateway_inflight = {}
+-- _owned[src] is the outstanding attempt for the outbox file src, or
+-- { delivered = true } once delivered and still to be archived.
+local _owned = {}
 
 ---@param fn fun(rec: AutoCoreMailboxRecord, mid: string, msg: table, done: fun(err: any)): boolean|nil
 function M.set_gateway(fn)
@@ -500,6 +508,33 @@ function M.set_gateway(fn)
 end
 
 -- ── outbox routing ────────────────────────────────────────
+
+-- archive_delivered moves a message the gateway delivered into the
+-- sender's archive. A failed rename keeps the delivered mark, so the next
+-- scan tries the archive again and never routes the message a second way.
+local function archive_delivered(rec, mid, msg, src)
+  local ok, aerr = vim.uv.fs_rename(src, rec.subs.archive .. "/" .. mid .. ".json")
+  if not ok and vim.uv.fs_stat(src) then
+    events.publish("core.mailbox:outbox_undeliverable", {
+      from   = rec.bare_id,
+      from_full = rec.id,
+      to     = msg.to,
+      id     = mid,
+      reason = "gateway_archive_failed",
+      error  = tostring(aerr),
+      path   = src,
+    })
+    return
+  end
+  _owned[src] = nil
+  events.publish("core.mailbox:outbox_routed", {
+    from   = rec.bare_id,
+    from_full = rec.id,
+    to     = msg.to,
+    id     = mid,
+    via    = "gateway",
+  })
+end
 
 ---@param rec AutoCoreMailboxRecord
 ---@param mid string
@@ -522,16 +557,21 @@ local function route_outbox(rec, mid)
     return
   end
 
+  local owned = _owned[src]
+  if owned then
+    if owned.delivered then archive_delivered(rec, mid, msg, src) end
+    return -- delivered, or with a gateway attempt: never routed another way
+  end
+
   if _gateway then
-    if _gateway_inflight[src] then return end
-    _gateway_inflight[src] = true
-    local finished = false
-    local function done(gerr)
+    local attempt = { accepted = false, closed = false }
+    _owned[src] = attempt
+    local buffered = nil -- a done() before the gateway returned, held until it says it took the message
+    local function settle(gerr)
       vim.schedule(function()
-        if finished then return end
-        finished = true
-        _gateway_inflight[src] = nil
+        if _owned[src] ~= attempt then return end -- a stale attempt: a later one, or none, owns the file
         if gerr ~= nil then
+          _owned[src] = nil
           events.publish("core.mailbox:outbox_undeliverable", {
             from   = rec.bare_id,
             from_full = rec.id,
@@ -543,20 +583,30 @@ local function route_outbox(rec, mid)
           })
           return
         end
-        local archived, aerr = vim.uv.fs_rename(src, rec.subs.archive .. "/" .. mid .. ".json")
-        events.publish("core.mailbox:outbox_routed", {
-          from   = rec.bare_id,
-          from_full = rec.id,
-          to     = msg.to,
-          id     = mid,
-          via    = "gateway",
-          archive_error = (not archived) and aerr or nil,
-        })
+        _owned[src] = { delivered = true }
+        archive_delivered(rec, mid, msg, src)
       end)
     end
+    local function done(gerr)
+      if attempt.closed then return end -- once only, and never after a decline or a throw
+      if not attempt.accepted then
+        if buffered == nil then buffered = { gerr } end
+        return
+      end
+      attempt.closed = true
+      settle(gerr)
+    end
     local ok_call, took = pcall(_gateway, rec, mid, msg, done)
-    if ok_call and took then return end
-    _gateway_inflight[src] = nil
+    if ok_call and took then
+      attempt.accepted = true
+      if buffered then
+        attempt.closed = true
+        settle(buffered[1])
+      end
+      return
+    end
+    attempt.closed = true -- declined or thrown: whatever it passed to done is void
+    _owned[src] = nil
     if not ok_call then
       events.publish("core.mailbox:outbox_undeliverable", {
         from   = rec.bare_id,
@@ -1192,7 +1242,7 @@ end
 function M._reset_for_tests()
   M.stop()
   _gateway = nil
-  _gateway_inflight = {}
+  _owned = {}
   _state = {
     running    = false,
     roots      = {},
