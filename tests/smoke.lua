@@ -4652,12 +4652,13 @@ ok("recipient registers later → re-scan routes the pending message",
 -- and the recipient's inbox never sees it; done(err) or a gateway that throws
 -- leaves the file for the next scan; a gateway that declines leaves the
 -- message to the file move.
-local gw_routed, gw_undeliverable, gw_calls = {}, {}, {}
+local gw_routed, gw_undeliverable, gw_calls, gw_archive_failed = {}, {}, {}, {}
 local gw_sub1 = events_m.subscribe("core.mailbox:outbox_routed", function(p)
   if p.via == "gateway" then gw_routed[#gw_routed + 1] = p end
 end)
 local gw_sub2 = events_m.subscribe("core.mailbox:outbox_undeliverable", function(p)
   if p.reason == "gateway_failed" then gw_undeliverable[#gw_undeliverable + 1] = p end
+  if p.reason == "gateway_archive_failed" then gw_archive_failed[#gw_archive_failed + 1] = p end
 end)
 local gw_mode = "take"
 router.set_gateway(function(rec, mid, msg, done)
@@ -4754,9 +4755,12 @@ vim.wait(100, function() return #held >= 2 end, 10)
 vim.uv.fs_chmod(jarvis_rec.subs.archive, tonumber("500", 8))
 held[2](nil)
 vim.wait(300, function()
-  for _, p in ipairs(gw_undeliverable) do if p.id == m_arch.id and p.reason == "gateway_archive_failed" then return true end end
+  for _, p in ipairs(gw_archive_failed) do if p.id == m_arch.id then return true end end
   return false
 end, 25)
+ok("gateway: the refused archive is reported as gateway_archive_failed",
+  #gw_archive_failed >= 1 and gw_archive_failed[#gw_archive_failed].id == m_arch.id,
+  vim.inspect(gw_archive_failed))
 router.set_gateway(nil)
 router.scan_now()
 vim.wait(100)
