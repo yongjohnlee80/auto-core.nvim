@@ -34,7 +34,12 @@
 ---process under `stdpath("state")/auto-core/todo_notifier/`, each written only by
 ---its own process, the maximum across them read): the catch-up at Neovim start
 ---covers what changed while every Neovim was closed, and nothing older. With no
----watermark yet (the first poll after the cutover) it starts at the log's head.
+---watermark for a store yet (a new project's store, or one no Neovim here ever
+---acked), its history from before this notifier started is skipped by each
+---change's time (`at`, less START_SKEW_MS), and every change made since is
+---delivered: an assignment written between Neovim's start and its first poll of
+---the store is never lost. A change that carries no time falls back to the log's
+---head, as before, with one warning.
 ---
 ---Delivery is at-least-once: the message is written (temp, fsync, rename) BEFORE
 ---the ack, and its id, `todo-<store_id>-<seq>`, is the same on every retry. A
@@ -67,6 +72,10 @@ M.PAGE = 200
 -- skipped and acked (one audit line). Configurable: set M.GRACE_MS before the
 -- notifier starts.
 M.GRACE_MS = 10 * 60 * 1000
+-- START_SKEW_MS: with no watermark, a change at least this much older than the
+-- notifier's start is history (skipped); anything later is delivered. Configurable
+-- (`skew_ms`) for tests.
+M.START_SKEW_MS = 2000
 -- NOTE: backoff. Reconnecting to a daemon that went away: 5 s, doubling to 60 s.
 M.BACKOFF_MS = { first = 5000, max = 60000 }
 
@@ -85,6 +94,8 @@ local _unsure = {}       -- message id → ms (hrtime) the crew's send first had
 -- crew accepts it, this notifier files no notice of it. Unset, every assignment is routed as before.
 local _crew_recipient = nil
 local _started_at = nil  -- ms (hrtime) when this process's notifier started
+local _started_wall = nil -- s (Unix, whole) when this process's notifier started
+local _timed = {}        -- store id → true while its history, with no watermark, is skipped by time
 
 local function log() return require("auto-core.log") end
 
@@ -388,6 +399,48 @@ end
 
 local function now_ms() return vim.uv.hrtime() / 1e6 end
 
+---unix_of is a change's time (`at`: RFC 3339, any offset, or Unix seconds or ms)
+---in whole Unix seconds, truncated; nil when it carries none.
+function M.unix_of(at)
+  if type(at) == "number" then
+    if at > 1e12 then at = at / 1000 end
+    return math.floor(at)
+  end
+  if type(at) ~= "string" then return nil end
+  local y, mo, d, h, mi, sec, rest = at:match("^(%d%d%d%d)-(%d%d)-(%d%d)[Tt ](%d%d):(%d%d):(%d%d)(.*)$")
+  if not y then return nil end
+  rest = rest:gsub("^%.%d+", "")
+  local off
+  if rest == "Z" or rest == "z" then
+    off = 0
+  else
+    local sign, oh, om = rest:match("^([+-])(%d%d):?(%d%d)$")
+    if not sign then return nil end
+    off = (tonumber(oh) * 3600 + tonumber(om) * 60) * (sign == "-" and -1 or 1)
+  end
+  -- days from 1970-01-01 to y-mo-d, proleptic Gregorian (H. Hinnant's days_from_civil)
+  y, mo, d = tonumber(y), tonumber(mo), tonumber(d)
+  if mo <= 2 then y = y - 1 end
+  local era = math.floor(y / 400)
+  local yoe = y - era * 400
+  local doy = math.floor((153 * (mo + (mo > 2 and -3 or 9)) + 2) / 5) + d - 1
+  local doe = yoe * 365 + math.floor(yoe / 4) - math.floor(yoe / 100) + doy
+  local days = era * 146097 + doe - 719468
+  return days * 86400 + tonumber(h) * 3600 + tonumber(mi) * 60 + tonumber(sec) - off
+end
+
+---history is whether a change, for a store with no watermark, is older than this
+---notifier's start by START_SKEW_MS (true), made since (false), or carries no time
+---(nil). Whole seconds: a change's truncated second before the start's, less the
+---skew, happened before the start whatever its fraction.
+local function history(c)
+  local at = M.unix_of(c.at)
+  if not at or not _started_wall then return nil end
+  local skew = _cfg.skew_ms
+  if skew == nil then skew = M.START_SKEW_MS end
+  return at < _started_wall - math.ceil(skew / 1000)
+end
+
 local _unscoped_said = false -- the below-protocol-30 notice, once per process
 
 ---audit logs a skipped assignment once per message id.
@@ -563,9 +616,30 @@ local function poll_store(store)
       _floors[store.id] = cursor
       return
     end
-    if floor == nil then floor = cursor end -- no watermark yet: start at the head
-    _floors[store.id] = floor
     local changes = daemon.list_of(page.changes)
+    if floor == nil then -- no watermark yet: this notifier's start splits history from news
+      floor, _timed[store.id] = 0, true
+    end
+    if _timed[store.id] then
+      for _, c in ipairs(changes) do
+        local seq = tonumber(c.seq) or 0
+        if seq > floor then
+          local old = history(c)
+          if old == true then
+            floor = seq
+          else
+            _timed[store.id] = nil
+            if old == nil then
+              warn("time", "a change of store " .. tostring(store.id) .. " carries no time: its history is skipped to the log's head")
+              floor = math.max(floor, cursor)
+            end
+            break
+          end
+        end
+      end
+      if #changes < page_size then _timed[store.id] = nil end -- at the head: what follows is news
+    end
+    _floors[store.id] = floor
     -- acked: the last change of the handled prefix (delivered, or skipped for
     -- good). A held change stops the prefix; later changes are still delivered,
     -- and the next poll reads them again from the held one, which writes nothing
@@ -715,6 +789,7 @@ function M.start()
   if _running or vim.g.auto_core_todo_notifier == false then return end
   _running = true
   _started_at = now_ms()
+  _started_wall = os.time()
   local ok, events = pcall(require, "auto-core.events")
   if ok then
     _subs = {
@@ -763,6 +838,7 @@ function M._reset_for_tests()
   M.stop()
   _cfg, _floors, _backoff, _polling, _again, _waiters = {}, {}, nil, false, false, {}
   _applied, _audited, _started_at, _unsure = {}, {}, nil, {}
+  _started_wall, _timed = nil, {}
   _own, _prepared, _unscoped_said = {}, false, false
   _crew_recipient = nil
 end
