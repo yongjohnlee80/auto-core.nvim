@@ -79,6 +79,11 @@ local _polling, _again = false, false
 local _floors = {}       -- store id → the seq this process starts after
 local _applied = {}      -- store id → the highest seq whose effects were applied
 local _audited = {}      -- message id → true once its skip was logged
+-- _crew_recipient, when a host sets it (set_crew_recipient), claims an agent name the crew
+-- delivers to: such an agent's assignment is sent by the surface that made it, through AutoDoc's
+-- crew (ADR 1793489028 §4.7), so this notifier files no notice of it. Unset, every assignment is
+-- routed as before.
+local _crew_recipient = nil
 local _started_at = nil  -- ms (hrtime) when this process's notifier started
 
 local function log() return require("auto-core.log") end
@@ -380,6 +385,17 @@ local function audit(mid, to, why)
   pcall(function() log().info(LOG_COMPONENT, "assignment " .. mid .. " to " .. to .. " skipped: " .. why) end)
 end
 
+---set_crew_recipient sets what claims an assignee as the crew's to deliver (fn(name): true for an
+---agent with a live crew session the daemon knows), or clears it (nil). A claimed assignee's change
+---is skipped and acked, with one audit line: the surface that assigned it (a window, or Neovim's
+---todos.assign) sends it through the crew, so a file-mailbox notice would tell it twice. Any other
+---assignee is routed as before; an error or a non-true answer claims nothing.
+---@param fn fun(name: string): boolean|nil
+function M.set_crew_recipient(fn)
+  if fn ~= nil and type(fn) ~= "function" then error("auto-core.todo.notifier.set_crew_recipient: fn must be a function or nil") end
+  _crew_recipient = fn
+end
+
 ---route decides an assign change: "deliver" (with the recipient's record),
 ---"hold" (not registered here, inside the grace window) or "skip" (nobody to
 ---tell: cleared, `user`, `autodoc:*`, another project's, or past the window).
@@ -397,6 +413,15 @@ end
 local function route(mid, to, scope)
   if type(to) ~= "string" or to == "" or to == "user" or to:match("^autodoc:") then
     return "skip"
+  end
+  local name = to:gsub("^agent:", ""):gsub(":.*$", "")
+  local crew = _crew_recipient
+  if crew then
+    local ok, claimed = pcall(crew, name)
+    if ok and claimed == true then
+      audit(mid, to, "a crew agent: the surface that assigned it sends it through the crew")
+      return "skip"
+    end
   end
   local sc = require("auto-core.todo.scope")
   local inst = sc.instance_of(scope)
@@ -680,6 +705,7 @@ function M._reset_for_tests()
   _cfg, _floors, _backoff, _polling, _again, _waiters = {}, {}, nil, false, false, {}
   _applied, _audited, _started_at = {}, {}, nil
   _own, _prepared, _unscoped_said = {}, false, false
+  _crew_recipient = nil
 end
 
 return M
