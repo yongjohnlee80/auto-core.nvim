@@ -32,7 +32,8 @@ local M = {}
 
 ---@class AutoCoreCommandSpec
 ---@field owner       string         -- which plugin registered it (informational)
----@field handler     fun(args: table, ctx: table): table   -- returns response value
+---@field handler     fun(args: table, ctx: table): table   -- returns response value; ctx is the
+---                  caller's dispatch context plus `from`, the command message's sender
 ---@field schema      table?         -- optional shape hint, e.g. `{ file = "string?" }`
 ---@field description string?
 
@@ -252,7 +253,10 @@ local function _handle_message_inner(msg, ctx)
     end
   end
 
-  local ok_call, ret = pcall(spec.handler, args, ctx or {})
+  -- the sender rides on the handler's ctx (the caller's ctx untouched): a verb that records who
+  -- asked (todos.assign's "Assigned by") reads ctx.from
+  local hctx = vim.tbl_extend("force", {}, ctx or {}, { from = msg.from })
+  local ok_call, ret = pcall(spec.handler, args, hctx)
   if not ok_call then
     return {
       ok    = false,

@@ -5054,6 +5054,18 @@ ok("handle_message dispatches known command",
 ok("core.command:executed fired",
   #cmd_executed >= 1 and cmd_executed[#cmd_executed].name == "harpoon")
 
+-- The handler's ctx carries the sender; the caller's ctx is left as it was.
+local seen_ctx
+commands.register("whoasks", { owner = "test", handler = function(_, c) seen_ctx = c; return {} end })
+local caller_ctx = { reason = "mailbox_wake" }
+commands.handle_message(message.build({
+  from = "agent:gold-man:1-2", to = "nvim", kind = "command", command = "whoasks",
+}), caller_ctx)
+ok("a handler's ctx carries the command's sender, beside the caller's fields",
+  type(seen_ctx) == "table" and seen_ctx.from == "agent:gold-man:1-2" and seen_ctx.reason == "mailbox_wake",
+  vim.inspect(seen_ctx))
+ok("… and the caller's ctx is not modified", caller_ctx.from == nil, vim.inspect(caller_ctx))
+
 -- kind != command is rejected (it's not a command message).
 local bad_kind = { id = "x", kind = "message", from = "a", to = "b" }
 local resp3 = commands.handle_message(bad_kind)
