@@ -638,6 +638,19 @@ run("crew recipients", function()
     and #asked == 1 and asked[1].mid == m5, vim.inspect({ s5 = s5, asked = asked }))
 
   asked = {}
+  local m9, s9 = assigned("C9", "agent:vision", "auto-agents:project-b")
+  ok("another project's assignment never reaches the hook: its own Neovim sends it", #asked == 0
+    and not delivered(vision, m9) and notifier.watermark(store_id) >= s9, vim.inspect(asked))
+  local m10 = assigned("C10", "agent:vision", "@1111111111-22222")
+  ok("another instance's assignment never reaches the hook", #asked == 0 and not delivered(vision, m10), vim.inspect(asked))
+  notifier.set_crew_recipient(function(name, m) asked[#asked + 1] = { name = name, mid = m }; return false end)
+  local m11, s11 = assigned("C11", "agent:vision", nil) -- the daemon answers mail.ambiguous: refused for certain
+  ok("an unscoped assignment the crew refuses asks the hook by name", #asked == 1 and asked[1].mid == m11, vim.inspect(asked))
+  ok("… and files no notice anywhere (the bare name's rule), acked", not delivered(vision, m11)
+    and notifier.watermark(store_id) >= s11, m11)
+
+  notifier.set_crew_recipient(function(name, m) asked[#asked + 1] = { name = name, mid = m }; return true end)
+  asked = {}
   local m6 = assigned("C6", "autodoc:cloud-strife", SCOPE)
   ok("a window's assignment is never sent here: the window hands it over", #asked == 0 and m6 ~= nil, vim.inspect(asked))
 
