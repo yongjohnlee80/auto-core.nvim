@@ -6971,6 +6971,18 @@ print("\n[65] todo.vars — the store's variables, from AutoDoc's daemon")
   local fh = assert(io.open(kbdir .. "/adrs/x.md", "w")); fh:write("# x\n"); fh:close()
   local proj = vim.fn.tempname() .. "-proj"
   vim.fn.mkdir(proj, "p")
+  -- project_root: the workspace root, else the active worktree, else opts.cwd, else Neovim's cwd
+  local saved_ws, saved_active = wt.get_workspace_root(), wt.get_active()
+  wt.set_workspace_root(nil); wt.set_active(nil)
+  ok("project_root: nothing set → Neovim's cwd", wt.project_root() == vim.fs.normalize(vim.fn.getcwd()))
+  ok("project_root: nothing set → opts.cwd before Neovim's", wt.project_root({ cwd = proj }) == proj)
+  wt.set_active(kbdir)
+  ok("project_root: the active worktree before opts.cwd", wt.project_root({ cwd = proj }) == kbdir)
+  wt.set_workspace_root(proj)
+  ok("project_root: the workspace root first", wt.project_root({ cwd = "/elsewhere" }) == proj)
+  ok("project_root: the todo store uses it", require("auto-core.todo.paths").workspace_root() == proj)
+  wt.set_active(saved_active)
+  if saved_ws then wt.set_workspace_root(saved_ws) end
   wt.set_workspace_root(proj)
   -- $WORKSPACE is no built-in (ADR 1792132105 §2.6); this KB sets it, deeper than
   -- $KB_ROOT, and it is never written
@@ -7036,7 +7048,17 @@ print("\n[65] todo.vars — the store's variables, from AutoDoc's daemon")
 
   -- values -----------------------------------------------------
   ok("KB_ROOT is the store's, from todos.vars", vars.get("KB_ROOT") == kbdir, vars.get("KB_ROOT"))
-  ok("PROJECT_ROOT is a user variable now", not vars.is_builtin("PROJECT_ROOT") and vars.get("PROJECT_ROOT") == "/src/proj")
+  -- $PROJECT_ROOT is AutoVim's (Johno, 2026-11-01): auto-core's project root, never the daemon's row
+  ok("PROJECT_ROOT is auto-core's project root, not the daemon's /src/proj",
+    vars.is_builtin("PROJECT_ROOT") and vars.get("PROJECT_ROOT") == proj, vars.get("PROJECT_ROOT"))
+  ok("… it follows the project root", (function()
+    local other = vim.fn.tempname() .. "-other"
+    wt.set_workspace_root(other)
+    local got = vars.get("PROJECT_ROOT")
+    wt.set_workspace_root(proj)
+    return got == other
+  end)())
+  ok("… and can't be set", vars.set("PROJECT_ROOT", "/x") == false and vars.remove("PROJECT_ROOT") == false)
   ok("WORKSPACE is no built-in", not vars.is_builtin("WORKSPACE"))
   ok("CWD is gone: the daemon has no working directory", not vars.is_builtin("CWD"))
   ok("a machine-only name not set here has no value", vars.get("DUMPS") == nil)
@@ -7054,6 +7076,8 @@ print("\n[65] todo.vars — the store's variables, from AutoDoc's daemon")
   ok("list is the daemon's table, built-ins first",
     #rows == #tbl and rows[1].name == "KB_ROOT" and rows[1].builtin and rows[1].doc ~= nil
       and rows[4].name == "DOCS" and rows[4].source == "store" and rows[5].machine == true)
+  ok("list's PROJECT_ROOT row is auto-core's, after HOME",
+    rows[3].name == "PROJECT_ROOT" and rows[3].value == proj and rows[3].builtin == true, vim.inspect(rows[3]))
 
   -- resolve_path ------------------------------------------------
   local r = vars.resolve_path("$DOCS/a.md")
@@ -7072,7 +7096,8 @@ print("\n[65] todo.vars — the store's variables, from AutoDoc's daemon")
     vars.symbolize_path(kbdir .. "/ws/a.md") == "$KB_ROOT/ws/a.md", vars.symbolize_path(kbdir .. "/ws/a.md"))
   ok("symbolize: a longer user var wins", vars.symbolize_path(kbdir .. "/deep/y.md") == "$LONG/y.md")
   ok("symbolize: $DOCS is longer than $PROJECT_ROOT", vars.symbolize_path("/src/proj/docs/a.md") == "$DOCS/a.md")
-  ok("symbolize: under $PROJECT_ROOT", vars.symbolize_path("/src/proj/z.md") == "$PROJECT_ROOT/z.md")
+  ok("symbolize: under $PROJECT_ROOT, auto-core's", vars.symbolize_path(proj .. "/z.md") == "$PROJECT_ROOT/z.md")
+  ok("symbolize: the daemon's PROJECT_ROOT row is never used", vars.symbolize_path("/src/proj/z.md") == "/src/proj/z.md")
   ok("symbolize: $HOME last", vars.symbolize_path("/home/u/n.md") == "$HOME/n.md")
   ok("symbolize: outside every root, unchanged", vars.symbolize_path("/opt/n.md") == "/opt/n.md")
   ok("symbolize: a bare relative path the KB holds", vars.symbolize_path("adrs/x.md") == "$KB_ROOT/adrs/x.md")
