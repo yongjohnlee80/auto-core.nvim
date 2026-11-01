@@ -445,9 +445,44 @@ local function route(mid, to, scope, at, store, p)
   end
   local grace = _cfg.grace_ms
   if grace == nil then grace = M.GRACE_MS end
-  local name = to:gsub("^agent:", ""):gsub(":.*$", "")
+  -- The scope decides first, the crew second: the hook sends under this Neovim's claim, and the
+  -- daemon resolves a bare name in that scope first, so asking it for another project's assignment
+  -- would hand that project's task to this project's agent of the same name.
+  local sc = require("auto-core.todo.scope")
+  local inst = sc.instance_of(scope)
+  local unscoped = false
+  local ask = true
+  if inst then
+    -- an instance scope routes one delivery: a full id given at assign, whose task keeps the name
+    if inst ~= own_instance() then
+      audit(mid, to, "it was routed to instance " .. inst .. ", not this one")
+      return "skip"
+    end
+  elseif sc.bare(to) then
+    if not sc.scoped() then
+      if not _unscoped_said then
+        _unscoped_said = true
+        pcall(function() log().info(LOG_COMPONENT, "AutoDoc is below protocol " .. sc.PROTOCOL
+          .. ": assignments carry no scope, so a bare assignee is delivered by every Neovim with that agent") end)
+      end
+    else
+      local own = sc.get()
+      if type(scope) ~= "string" or scope == "" then
+        -- no project made it (a legacy assignment, a hand edit, a bare --call): the crew is asked
+        -- by name, which the daemon resolves only when one live profile has it (else mail.ambiguous)
+        unscoped = true
+      elseif scope ~= own then
+        audit(mid, to, "it was made in " .. scope .. ", and this Neovim's scope is " .. tostring(own))
+        return "skip"
+      end
+    end
+  else
+    -- a full id names its instance: only that instance's Neovim asks the crew
+    ask = to:match("^agent:[^:]+:(.+)$") == own_instance()
+  end
   local crew = _crew_recipient
-  if crew then
+  if crew and ask then
+    local name = to:gsub("^agent:", ""):gsub(":.*$", "")
     describe(at, store, p)
     local ok, sent = pcall(crew, name, mid, { kind = "message", subject = subject(p), body = M.body(p) })
     if ok and sent == "retry" then
@@ -465,32 +500,10 @@ local function route(mid, to, scope, at, store, p)
       return "skip"
     end
   end
-  local sc = require("auto-core.todo.scope")
-  local inst = sc.instance_of(scope)
-  if inst then
-    -- an instance scope routes one delivery: a full id given at assign, whose task keeps the name
-    if inst ~= own_instance() then
-      audit(mid, to, "it was routed to instance " .. inst .. ", not this one")
-      return "skip"
-    end
-  elseif sc.bare(to) then
-    if not sc.scoped() then
-      if not _unscoped_said then
-        _unscoped_said = true
-        pcall(function() log().info(LOG_COMPONENT, "AutoDoc is below protocol " .. sc.PROTOCOL
-          .. ": assignments carry no scope, so a bare assignee is delivered by every Neovim with that agent") end)
-      end
-    else
-      local own = sc.get()
-      if type(scope) ~= "string" or scope == "" then
-        audit(mid, to, "it records no scope (a legacy assignment, a hand edit, or an unscoped call): "
-          .. "a bare assignee reaches only its own project's agent")
-        return "skip"
-      elseif scope ~= own then
-        audit(mid, to, "it was made in " .. scope .. ", and this Neovim's scope is " .. tostring(own))
-        return "skip"
-      end
-    end
+  if unscoped then
+    audit(mid, to, "it records no scope (a legacy assignment, a hand edit, or an unscoped call): "
+      .. "a bare assignee reaches only its own project's agent")
+    return "skip"
   end
   local rec = M.local_recipient(to)
   if rec then return "deliver", rec end
