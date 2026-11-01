@@ -79,6 +79,7 @@ local _polling, _again = false, false
 local _floors = {}       -- store id → the seq this process starts after
 local _applied = {}      -- store id → the highest seq whose effects were applied
 local _audited = {}      -- message id → true once its skip was logged
+local _unsure = {}       -- message id → ms (hrtime) the crew's send first had no outcome
 -- _crew_recipient, when a host sets it (set_crew_recipient), sends an assignment to an agent the
 -- crew delivers to, through AutoDoc's crew (ADR 1793489028 §4.7), keyed by its message id: once the
 -- crew accepts it, this notifier files no notice of it. Unset, every assignment is routed as before.
@@ -403,8 +404,12 @@ end
 ---the same message) is the same send, and answers:
 ---  - true: the crew accepted it (rang, or its host carries it). The change is skipped and acked,
 ---    with one audit line: a file-mailbox notice would tell it twice.
----  - "retry": its outcome is unknown. The change isn't acked; the next poll asks again, same mid.
----  - anything else, or an error: not the crew's (or refused for certain). Routed as before.
+---  - "retry": its outcome is unknown. The change isn't acked; the next poll asks again, same mid,
+---    for up to the grace window (GRACE_MS) from the first such answer. Past it, the file notice
+---    is filed, with one audit line: a possible duplicate beats a lost assignment.
+---  - anything else, or an error: not the crew's, or refused for certain. Routed as before. A key
+---    the daemon refuses as reused (another Neovim sent the same mid with other content) is
+---    refused for certain, so it gets the file notice too.
 ---It runs inside the notifier's daemon.run, so it may call daemon.rpc synchronously.
 ---An AutoDoc window's assignment (`autodoc:<codename>`) is skipped before fn is asked: the window
 ---hands it over itself, so it is never sent twice.
@@ -431,20 +436,33 @@ end
 ---@param p table the message's fields (id, from, reason, note), described here for the crew's send
 ---@return "deliver"|"hold"|"skip"|"retry", table?
 local function route(mid, to, scope, at, store, p)
+  -- `autodoc:<codename>` is an AutoDoc window's assignment, which the window hands over itself. Skipping
+  -- it here, before the crew hook, is the only thing that keeps the window and this notifier from
+  -- sending it twice (the window keys its send by a fresh secret, not by mid). If the window ever
+  -- writes another assignee form, it must key its send by the change's mid first.
   if type(to) ~= "string" or to == "" or to == "user" or to:match("^autodoc:") then
     return "skip"
   end
+  local grace = _cfg.grace_ms
+  if grace == nil then grace = M.GRACE_MS end
   local name = to:gsub("^agent:", ""):gsub(":.*$", "")
   local crew = _crew_recipient
   if crew then
     describe(at, store, p)
     local ok, sent = pcall(crew, name, mid, { kind = "message", subject = subject(p), body = M.body(p) })
+    if ok and sent == "retry" then
+      local first = _unsure[mid] or now_ms()
+      _unsure[mid] = first
+      if now_ms() - first < grace then
+        warn("crew", "assignment " .. mid .. " to " .. to .. ": the crew's send has no outcome yet")
+        return "retry"
+      end
+      audit(mid, to, "the crew's send had no outcome within the grace window: filed as a notice")
+    end
+    _unsure[mid] = nil
     if ok and sent == true then
       audit(mid, to, "sent through the crew")
       return "skip"
-    elseif ok and sent == "retry" then
-      warn("crew", "assignment " .. mid .. " to " .. to .. ": the crew's send has no outcome yet")
-      return "retry"
     end
   end
   local sc = require("auto-core.todo.scope")
@@ -476,8 +494,6 @@ local function route(mid, to, scope, at, store, p)
   end
   local rec = M.local_recipient(to)
   if rec then return "deliver", rec end
-  local grace = _cfg.grace_ms
-  if grace == nil then grace = M.GRACE_MS end
   if _started_at and now_ms() - _started_at < grace then return "hold" end
   audit(mid, to, "no such agent registered in this Neovim within the grace window")
   return "skip"
@@ -727,7 +743,7 @@ function M._configure(cfg) _cfg = cfg or {} end
 function M._reset_for_tests()
   M.stop()
   _cfg, _floors, _backoff, _polling, _again, _waiters = {}, {}, nil, false, false, {}
-  _applied, _audited, _started_at = {}, {}, nil
+  _applied, _audited, _started_at, _unsure = {}, {}, nil, {}
   _own, _prepared, _unscoped_said = {}, false, false
   _crew_recipient = nil
 end

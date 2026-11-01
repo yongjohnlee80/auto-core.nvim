@@ -612,6 +612,7 @@ run("crew recipients", function()
   ok("a failing hook files the notice", delivered(vision, m3), m3)
 
   local tries = {}
+  notifier._configure({ poll_ms = false, watermark_dir = env.tmp .. "/wm-scope", grace_ms = 60000 })
   notifier.set_crew_recipient(function(_, m) tries[#tries + 1] = m; return "retry" end)
   local m4, s4 = assigned("C4", "agent:vision", SCOPE)
   ok("a send with no outcome files nothing", not delivered(vision, m4), m4)
@@ -620,6 +621,11 @@ run("crew recipients", function()
   poll()
   ok("the next poll sends it again with the same key", #tries >= 2 and tries[1] == m4 and tries[#tries] == m4, vim.inspect(tries))
   ok("… and, accepted, acks it", notifier.watermark(store_id) >= s4 and not delivered(vision, m4), notifier.watermark(store_id))
+  notifier._configure({ poll_ms = false, watermark_dir = env.tmp .. "/wm-scope", grace_ms = 0 })
+  notifier.set_crew_recipient(function() return "retry" end)
+  local m4b, s4b = assigned("C4b", "agent:vision", SCOPE)
+  ok("a send with no outcome past the grace window files the notice", delivered(vision, m4b), m4b)
+  ok("… and acks it", notifier.watermark(store_id) >= s4b, notifier.watermark(store_id))
 
   asked = {}
   notifier.set_crew_recipient(function(name, m) asked[#asked + 1] = { name = name, mid = m }; return true end)
