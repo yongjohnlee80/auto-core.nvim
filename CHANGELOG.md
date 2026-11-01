@@ -11,6 +11,17 @@ key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
 
+## [v0.5.7] — 2026-11-01 — an assignment is forwarded, never the user's instruction
+
+- **The todo notifier's assignment message says it is forwarded** (#24). It reaches a crew agent
+  through AutoDoc's crew from the user, whose mail an agent takes as the user's own instruction,
+  but anyone with the store can make an assignment and write its reason (a peer's or a script's
+  bare `todos.assign`). `todo.notifier.body` now opens with `todo.notifier.FORWARDED` (forwarded,
+  the user may not have made it, so not the user's instruction), names the assigner (the scope the
+  change was made from, or `unknown`), labels the old assignee `previous` instead of `from`, and
+  quotes the reason line by line (`  > …`). Before, the body ended with a bare `Reason: <reason>`.
+  The file-mailbox notice carries the same body.
+
 ## [v0.5.6] — 2026-11-01 — $PROJECT_ROOT is AutoVim's project root
 
 - **`$PROJECT_ROOT` is a built-in auto-core provides**: the project this Neovim serves, from the new
