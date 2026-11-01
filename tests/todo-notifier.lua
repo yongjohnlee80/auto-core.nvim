@@ -255,13 +255,15 @@ run("watermark", function()
   ok("the new consumer delivered exactly the change made while closed", #got == 1
     and got[1]:find(notifier.message_id(store_id, seq), 1, true), vim.inspect(got))
   ok("nothing older was replayed to the old instance either", #inbox(lector) == delivered_before)
-  -- no watermark at all: the first poll starts at the head
+  -- no watermark at all: the history from before this notifier's start is skipped
   notifier._reset_for_tests()
   vim.fn.delete(wm, "rf")
   mb_path.set_instance_id("5555555555-66666")
   registry.register("nvim", { root = mbroot })
   local lector3 = registry.register("agent:lector", { root = mbroot })
-  notifier._configure({ poll_ms = false, watermark_dir = wm, grace_ms = 0 })
+  local past = os.time()
+  vim.wait(3000, function() return os.time() > past end, 50) -- every change so far is a second older
+  notifier._configure({ poll_ms = false, watermark_dir = wm, grace_ms = 0, skew_ms = 0 })
   notifier.start()
   notifier._connect()
   poll()
@@ -664,6 +666,56 @@ run("crew recipients", function()
   local m8 = assigned("C8", "agent:vision", SCOPE)
   ok("with no hook, every assignment is filed as before", delivered(vision, m8), m8)
   ok("a hook that isn't a function is refused", not pcall(notifier.set_crew_recipient, "yes"))
+end)
+
+section("a store with no watermark: history by time, news delivered (Vision's phase 7 finding)")
+run("unix_of", function()
+  ok("RFC 3339 in UTC", notifier.unix_of("2026-11-01T06:13:14Z") == 1793513594, notifier.unix_of("2026-11-01T06:13:14Z"))
+  ok("… with an offset, a fraction or +00:00", notifier.unix_of("2026-11-01T15:13:14.999+09:00") == 1793513594
+    and notifier.unix_of("2026-11-01T06:13:14+00:00") == 1793513594
+    and notifier.unix_of("2026-10-31T21:13:14-09:00") == 1793513594)
+  ok("Unix seconds and ms", notifier.unix_of(1793513594) == 1793513594 and notifier.unix_of(1793513594123) == 1793513594)
+  ok("no time is nil", notifier.unix_of(nil) == nil and notifier.unix_of("yesterday") == nil
+    and notifier.unix_of("2026-11-01T06:13:14") == nil)
+end)
+run("first poll after start", function()
+  local wm2 = env.tmp .. "/state/todo_notifier_first"
+  notifier._reset_for_tests()
+  vim.fn.delete(wm2, "rf")
+  mb_path.set_instance_id("7676767676-11111")
+  registry.register("nvim", { root = mbroot })
+  local fresh_lector = registry.register("agent:lector", { root = mbroot })
+  local past = os.time()
+  vim.wait(3000, function() return os.time() > past end, 50) -- every change so far is history
+  notifier._configure({ poll_ms = false, watermark_dir = wm2, grace_ms = 0, skew_ms = 0 })
+  notifier.start() -- started, not yet polled: no catch-up has run
+  local mid, seq = assigned("F1", "agent:lector", SCOPE) -- written now, then the first poll of the store
+  local got = vim.fn.glob(fresh_lector.subs.inbox .. "/todo-*.json", false, true)
+  ok("an assignment made after start, before the first poll, is delivered", #got == 1
+    and got[1]:find(mid, 1, true) ~= nil, vim.inspect(got))
+  ok("… and nothing from before the start is replayed with it", #got == 1, vim.inspect(got))
+  poll()
+  ok("… once: the next poll writes nothing more", #vim.fn.glob(fresh_lector.subs.inbox .. "/todo-*.json", false, true) == 1)
+  ok("… and the watermark passes it", (notifier.watermark(store_id) or 0) >= seq, notifier.watermark(store_id))
+
+  -- a restart with a watermark: the catch-up is the watermark's, whatever the time
+  notifier._reset_for_tests()
+  local t = todo.add({ title = "F2" })
+  local cur = env.call("todos.get", { "kb", t })
+  env.call("todos.assign", { "kb", cur.id, cur.rev, "agent:lector", "while closed", SCOPE })
+  local s2 = assign_seq(t)
+  past = os.time()
+  vim.wait(3000, function() return os.time() > past end, 50) -- F2 is older than the next start
+  mb_path.set_instance_id("7676767676-22222")
+  registry.register("nvim", { root = mbroot })
+  local next_lector = registry.register("agent:lector", { root = mbroot })
+  notifier._configure({ poll_ms = false, watermark_dir = wm2, grace_ms = 0, skew_ms = 0 })
+  notifier.start()
+  notifier._connect()
+  poll()
+  local m2 = notifier.message_id(store_id, s2)
+  ok("a restart with a watermark delivers what changed while closed, older than its start or not",
+    env.exists(next_lector.subs.inbox .. "/" .. m2 .. ".json"), m2)
 end)
 
 notifier.stop()
