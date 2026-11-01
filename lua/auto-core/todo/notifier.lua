@@ -436,10 +436,11 @@ end
 ---@param p table the message's fields (id, from, reason, note), described here for the crew's send
 ---@return "deliver"|"hold"|"skip"|"retry", table?
 local function route(mid, to, scope, at, store, p)
-  -- `autodoc:<codename>` is an AutoDoc window's assignment, which the window hands over itself. Skipping
-  -- it here, before the crew hook, is the only thing that keeps the window and this notifier from
-  -- sending it twice (the window keys its send by a fresh secret, not by mid). If the window ever
-  -- writes another assignee form, it must key its send by the change's mid first.
+  -- `autodoc:<codename>` is an AutoDoc window's assignment, which the window hands over itself. It is
+  -- skipped here, before the crew hook (and the hook below asks only for a bare name or this
+  -- instance's full `agent:` id): that is what keeps the window and this notifier from sending it
+  -- twice, since the window keys its send by a fresh secret, not by mid. If the window ever writes
+  -- another assignee form, it must key its send by the change's mid first.
   if type(to) ~= "string" or to == "" or to == "user" or to:match("^autodoc:") then
     return "skip"
   end
