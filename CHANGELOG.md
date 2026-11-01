@@ -11,6 +11,18 @@ key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
 
+## [v0.5.6] — 2026-11-01 — $PROJECT_ROOT is AutoVim's project root
+
+- **`$PROJECT_ROOT` is a built-in auto-core provides**: the project this Neovim serves, from the new
+  `git.worktree.project_root(opts)` (the workspace root, else the active worktree, else `opts.cwd`,
+  else Neovim's cwd). `todo.vars` answers it in `get`, `list` and `symbolize_path`, ignores any value
+  the daemon or a KB's `.autodoc-vars.toml` reports for it, and refuses `set` and `remove`. AutoVim
+  gave `$WORKSPACE` up to AutoDoc; `$PROJECT_ROOT` stays AutoVim's. Before, a KB file could make it
+  any folder (GlobalKB showed `~/.config/nvim/.auto-agents-config`).
+- **One project root for every consumer.** `mailbox.path.workspace_mailbox_root` and
+  `todo.paths.workspace_root` call `project_root` instead of repeating its chain; auto-agents starts
+  its slots there (v0.3.16).
+
 ## [v0.5.5] — 2026-11-01 — a store's first assignment is never skipped
 
 - **A store with no watermark skips only history from before this notifier started** (#21). Before,

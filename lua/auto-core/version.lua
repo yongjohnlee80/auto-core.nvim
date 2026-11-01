@@ -1011,6 +1011,8 @@ return {
   -- AutoDoc's crew keyed by its message id, the file notice its fallback; a command handler's
   -- ctx carries the sender (ctx.from).
   -- v0.5.5: a store with no watermark skips only history from before the notifier started.
-  version     = "0.5.5",
+  -- v0.5.6: $PROJECT_ROOT is auto-core's (AutoVim's) built-in, git.worktree.project_root(); a
+  -- daemon or KB value for it is ignored. The mailbox and todo store use project_root too.
+  version     = "0.5.6",
   api_version = "0.1",
 }
