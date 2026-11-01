@@ -11,6 +11,35 @@ key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
 
+## [v0.5.4] — 2026-11-01 — the todo notifier sends assignments through AutoDoc's crew
+
+Phase 7 of the AutoDoc crew-mail epic (ADR 1793489028 §4.7): an assignment to an agent the crew
+delivers to is sent through the crew (the doorbell), and the file-mailbox notice is the fallback.
+No change for a host that sets no hook.
+
+- **`notifier.set_crew_recipient(fn)`** (#17, #19). `fn(name, mid, msg, how)` is asked for each
+  assignment this Neovim routes, after the scope rule decides it is this Neovim's (another
+  project's or another instance's change never asks it). It sends `msg` through the crew keyed by
+  the message id `mid`, so a repeat is the same send, and answers:
+  - `true`: the crew accepted it. The change is acked and no notice is filed.
+  - `"retry"`: no outcome yet. The change stays unacked and is asked again, same `mid`, for up to
+    the grace window. Past it, the file notice is filed: a possible duplicate beats a lost
+    assignment.
+  - anything else, or an error: the file notice, as before.
+  `how.unscoped` marks a change made by no project (a bare `--call`, a hand edit): a host sends it
+  only to the one live agent of that name. An AutoDoc window's assignment (`autodoc:<codename>`)
+  is never asked: the window hands it over itself.
+- **A command handler's ctx carries the sender** (#18). `ctx.from` is the command message's
+  `from`, on a copy of the caller's ctx. `todos.assign` uses it for "Assigned by". It is the
+  sender as written, so it is information, not authority.
+
+## [v0.5.3] — 2026-10-31 — mailbox/router gains an outbox gateway hook
+
+- **`router.set_gateway(fn)`** (#16): a host can take outbox messages instead of the file move, for
+  the AutoDoc crew epic's Neovim host (ADR 1793271500, phase 4). A taken message is archived on
+  `done(nil)` and kept for the next scan on `done(err)` or a throw; a declined one takes the file
+  move, as before.
+
 ## [v0.5.2] — 2026-10-29 — a stale notifier delivers no scoped assignment; a task keeps the agent's name
 
 Two gaps in v0.5.1's project scope, from 2026-10-29:
