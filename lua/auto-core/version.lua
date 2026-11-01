@@ -1006,6 +1006,10 @@ return {
   -- the daemon withholds scoped assignees from a notifier still running older code; a full
   -- agent:<name>:<instance> given at assign keeps only the name on the task and routes that
   -- delivery by the scope @<instance>; scope.set refuses an @-prefixed project scope.
-  version     = "0.5.2",
+  -- v0.5.3: router.set_gateway(fn), an outbox gateway hook (tagged without this bump).
+  -- v0.5.4: notifier.set_crew_recipient(fn): an assignment this Neovim routes is sent through
+  -- AutoDoc's crew keyed by its message id, the file notice its fallback; a command handler's
+  -- ctx carries the sender (ctx.from).
+  version     = "0.5.4",
   api_version = "0.1",
 }
