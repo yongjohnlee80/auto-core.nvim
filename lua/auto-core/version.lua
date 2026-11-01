@@ -1010,6 +1010,7 @@ return {
   -- v0.5.4: notifier.set_crew_recipient(fn): an assignment this Neovim routes is sent through
   -- AutoDoc's crew keyed by its message id, the file notice its fallback; a command handler's
   -- ctx carries the sender (ctx.from).
-  version     = "0.5.4",
+  -- v0.5.5: a store with no watermark skips only history from before the notifier started.
+  version     = "0.5.5",
   api_version = "0.1",
 }
