@@ -397,9 +397,13 @@ local function audit(mid, to, why)
   pcall(function() log().info(LOG_COMPONENT, "assignment " .. mid .. " to " .. to .. " skipped: " .. why) end)
 end
 
----set_crew_recipient sets the host's crew send (or clears it: nil). fn(name, mid, msg) is asked for
----every assignment routed here, with the assignee's name (the `agent:` prefix and any instance
----stripped), its message id and msg = { kind, subject, body }. It sends msg through AutoDoc's crew
+---set_crew_recipient sets the host's crew send (or clears it: nil). fn(name, mid, msg, how) is asked
+---for every assignment routed here, with the assignee's name (the `agent:` prefix and any instance
+---stripped), its message id, msg = { kind, subject, body } and how = { unscoped = boolean }: an
+---unscoped change (a legacy assignment, a hand edit, a bare --call) was made by no project, so a
+---host that resolves names in its own scope first must not send it by the bare name (whichever
+---Neovim sent first would pick the recipient): it sends only to the one live profile of that name,
+---by name@scope, or answers not sent. It sends msg through AutoDoc's crew
 ---to an agent the crew delivers to, keyed by mid, so a repeat (a later poll, another Neovim with
 ---the same message) is the same send, and answers:
 ---  - true: the crew accepted it (rang, or its host carries it). The change is skipped and acked,
@@ -413,7 +417,7 @@ end
 ---It runs inside the notifier's daemon.run, so it may call daemon.rpc synchronously.
 ---An AutoDoc window's assignment (`autodoc:<codename>`) is skipped before fn is asked: the window
 ---hands it over itself, so it is never sent twice.
----@param fn fun(name: string, mid: string, msg: table): boolean|string|nil
+---@param fn fun(name: string, mid: string, msg: table, how: table): boolean|string|nil
 function M.set_crew_recipient(fn)
   if fn ~= nil and type(fn) ~= "function" then error("auto-core.todo.notifier.set_crew_recipient: fn must be a function or nil") end
   _crew_recipient = fn
@@ -485,7 +489,8 @@ local function route(mid, to, scope, at, store, p)
   if crew and ask then
     local name = to:gsub("^agent:", ""):gsub(":.*$", "")
     describe(at, store, p)
-    local ok, sent = pcall(crew, name, mid, { kind = "message", subject = subject(p), body = M.body(p) })
+    local ok, sent = pcall(crew, name, mid, { kind = "message", subject = subject(p), body = M.body(p) },
+      { unscoped = unscoped })
     if ok and sent == "retry" then
       local first = _unsure[mid] or now_ms()
       _unsure[mid] = first

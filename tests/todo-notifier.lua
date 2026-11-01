@@ -589,8 +589,8 @@ section("a crew agent's assignment is sent through the crew, keyed by its messag
 run("crew recipients", function()
   local vision = fresh("5656565656-44444")
   local asked = {}
-  notifier.set_crew_recipient(function(name, mid, msg)
-    asked[#asked + 1] = { name = name, mid = mid, msg = msg }
+  notifier.set_crew_recipient(function(name, mid, msg, how)
+    asked[#asked + 1] = { name = name, mid = mid, msg = msg, how = how }
     return name == "vision"
   end)
   local mid, seq = assigned("C1", "agent:vision", SCOPE)
@@ -603,6 +603,7 @@ run("crew recipients", function()
     and tostring(msg.subject):find("C1", 1, true) ~= nil and not tostring(msg.subject):match("^Task:")
     and tostring(msg.body):find("Reason: scoped", 1, true) ~= nil, vim.inspect(msg))
   ok("and the change is acked: the watermark passes it", notifier.watermark(store_id) >= seq, notifier.watermark(store_id))
+  ok("… and an own-scope change is told scoped", type(last.how) == "table" and last.how.unscoped == false, vim.inspect(last.how))
 
   notifier.set_crew_recipient(function() return false end)
   local m2 = assigned("C2", "agent:vision", SCOPE)
@@ -628,7 +629,7 @@ run("crew recipients", function()
   ok("… and acks it", notifier.watermark(store_id) >= s4b, notifier.watermark(store_id))
 
   asked = {}
-  notifier.set_crew_recipient(function(name, m) asked[#asked + 1] = { name = name, mid = m }; return true end)
+  notifier.set_crew_recipient(function(name, m, _, how) asked[#asked + 1] = { name = name, mid = m, how = how }; return true end)
   local id = env.call("todos.add", { "kb", { title = "C5", assignee = "agent:vision" } }) -- a bare --call: no scope
   ok("a bare todos.add with an assignee is accepted", id ~= nil)
   local s5 = assign_seq(type(id) == "table" and id.id or id)
@@ -636,6 +637,8 @@ run("crew recipients", function()
   local m5 = notifier.message_id(store_id, s5)
   ok("an assignment made by a bare todos.add reaches a crew agent through the crew", s5 > 0
     and #asked == 1 and asked[1].mid == m5, vim.inspect({ s5 = s5, asked = asked }))
+  ok("… told unscoped, so the host sends it only to the one live profile of that name",
+    asked[1] ~= nil and type(asked[1].how) == "table" and asked[1].how.unscoped == true, vim.inspect(asked[1]))
 
   asked = {}
   local m9, s9 = assigned("C9", "agent:vision", "auto-agents:project-b")
