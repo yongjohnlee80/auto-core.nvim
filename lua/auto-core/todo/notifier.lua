@@ -79,10 +79,9 @@ local _polling, _again = false, false
 local _floors = {}       -- store id → the seq this process starts after
 local _applied = {}      -- store id → the highest seq whose effects were applied
 local _audited = {}      -- message id → true once its skip was logged
--- _crew_recipient, when a host sets it (set_crew_recipient), claims an agent name the crew
--- delivers to: such an agent's assignment is sent by the surface that made it, through AutoDoc's
--- crew (ADR 1793489028 §4.7), so this notifier files no notice of it. Unset, every assignment is
--- routed as before.
+-- _crew_recipient, when a host sets it (set_crew_recipient), sends an assignment to an agent the
+-- crew delivers to, through AutoDoc's crew (ADR 1793489028 §4.7), keyed by its message id: once the
+-- crew accepts it, this notifier files no notice of it. Unset, every assignment is routed as before.
 local _crew_recipient = nil
 local _started_at = nil  -- ms (hrtime) when this process's notifier started
 
@@ -324,18 +323,30 @@ function M.body(p)
   return table.concat(lines, "\n")
 end
 
----send writes one assignment message. Runs inside daemon.run.
----@return "done"|"skip"|"retry"
-local function send(at, store, rec, mid, p)
-  if delivered(rec, mid) then return "done" end
+---describe fills p's title and file path from the task, once. Runs inside daemon.run.
+local function describe(at, store, p)
+  if p.described then return end
+  p.described = true
   local task = daemon.rpc("todos.get", { at, p.id })
   if type(task) == "table" then
     p.title = task.title
     if type(task.path) == "string" then p.file_path = store.path .. "/" .. task.path end
   end
+end
+
+---subject is the assignment message's subject. A notice, never "Task: …": the crew sends it as the
+---user, and a request from the user with that subject is the user's own instruction to its agent,
+---while this assignment may be a peer's (a bare `todos.add`), whose reason says who made it.
+local function subject(p) return "[todos] task assigned to you: " .. tostring(p.title or p.id) end
+
+---send writes one assignment message. Runs inside daemon.run.
+---@return "done"|"skip"|"retry"
+local function send(at, store, rec, mid, p)
+  if delivered(rec, mid) then return "done" end
+  describe(at, store, p)
   local opts = {
     id = mid, to = rec.id, from = "nvim", kind = "message",
-    subject = "[todos] task assigned to you: " .. tostring(p.title or p.id),
+    subject = subject(p),
     body = M.body(p),
   }
   local built, berr = require("auto-core.mailbox.message").build(opts)
@@ -385,20 +396,28 @@ local function audit(mid, to, why)
   pcall(function() log().info(LOG_COMPONENT, "assignment " .. mid .. " to " .. to .. " skipped: " .. why) end)
 end
 
----set_crew_recipient sets what claims an assignee as the crew's to deliver (fn(name): true for an
----agent with a live crew session the daemon knows), or clears it (nil). A claimed assignee's change
----is skipped and acked, with one audit line: the surface that assigned it (a window, or Neovim's
----todos.assign) sends it through the crew, so a file-mailbox notice would tell it twice. Any other
----assignee is routed as before; an error or a non-true answer claims nothing.
----@param fn fun(name: string): boolean|nil
+---set_crew_recipient sets the host's crew send (or clears it: nil). fn(name, mid, msg) is asked for
+---every assignment routed here, with the assignee's name (the `agent:` prefix and any instance
+---stripped), its message id and msg = { kind, subject, body }. It sends msg through AutoDoc's crew
+---to an agent the crew delivers to, keyed by mid, so a repeat (a later poll, another Neovim with
+---the same message) is the same send, and answers:
+---  - true: the crew accepted it (rang, or its host carries it). The change is skipped and acked,
+---    with one audit line: a file-mailbox notice would tell it twice.
+---  - "retry": its outcome is unknown. The change isn't acked; the next poll asks again, same mid.
+---  - anything else, or an error: not the crew's (or refused for certain). Routed as before.
+---It runs inside the notifier's daemon.run, so it may call daemon.rpc synchronously.
+---An AutoDoc window's assignment (`autodoc:<codename>`) is skipped before fn is asked: the window
+---hands it over itself, so it is never sent twice.
+---@param fn fun(name: string, mid: string, msg: table): boolean|string|nil
 function M.set_crew_recipient(fn)
   if fn ~= nil and type(fn) ~= "function" then error("auto-core.todo.notifier.set_crew_recipient: fn must be a function or nil") end
   _crew_recipient = fn
 end
 
 ---route decides an assign change: "deliver" (with the recipient's record),
----"hold" (not registered here, inside the grace window) or "skip" (nobody to
----tell: cleared, `user`, `autodoc:*`, another project's, or past the window).
+---"hold" (not registered here, inside the grace window), "skip" (nobody to
+---tell: cleared, `user`, `autodoc:*`, sent through the crew, another project's,
+---or past the window) or "retry" (the crew's send has no outcome yet).
 ---
 ---A bare assignee is this project's agent (ADR 1791532020 r15 §2.5a): it is
 ---delivered only when the change's scope is this Neovim's, and one with no
@@ -409,18 +428,23 @@ end
 ---Against an AutoDoc below protocol 30, which keeps no scope, the v0.5.0 rule
 ---stands: a bare name, by this instance's registry.
 ---@param scope any the change's scope; nil, vim.NIL or "" for none
----@return "deliver"|"hold"|"skip", table?
-local function route(mid, to, scope)
+---@param p table the message's fields (id, from, reason, note), described here for the crew's send
+---@return "deliver"|"hold"|"skip"|"retry", table?
+local function route(mid, to, scope, at, store, p)
   if type(to) ~= "string" or to == "" or to == "user" or to:match("^autodoc:") then
     return "skip"
   end
   local name = to:gsub("^agent:", ""):gsub(":.*$", "")
   local crew = _crew_recipient
   if crew then
-    local ok, claimed = pcall(crew, name)
-    if ok and claimed == true then
-      audit(mid, to, "a crew agent: the surface that assigned it sends it through the crew")
+    describe(at, store, p)
+    local ok, sent = pcall(crew, name, mid, { kind = "message", subject = subject(p), body = M.body(p) })
+    if ok and sent == true then
+      audit(mid, to, "sent through the crew")
       return "skip"
+    elseif ok and sent == "retry" then
+      warn("crew", "assignment " .. mid .. " to " .. to .. ": the crew's send has no outcome yet")
+      return "retry"
     end
   end
   local sc = require("auto-core.todo.scope")
@@ -491,11 +515,11 @@ local function poll_store(store)
       local held = false
       for _, row in ipairs(daemon.list_of(page.snapshot)) do
         local mid = string.format("todo-%s-r%d-%s", store.id, cursor, tostring(row.id))
-        local verdict, rec = route(mid, row.assignee, row.scope)
+        local p = { id = row.id, note = "Sent again after a resync: the original reason was lost." }
+        local verdict, rec = route(mid, row.assignee, row.scope, at, store, p)
         if verdict == "hold" then
           held = true
-        elseif verdict == "deliver" and send(at, store, rec, mid, { id = row.id,
-          note = "Sent again after a resync: the original reason was lost." }) == "retry" then
+        elseif verdict == "retry" or (verdict == "deliver" and send(at, store, rec, mid, p) == "retry") then
           return -- not acked: the next poll resyncs again
         end
       end
@@ -518,11 +542,11 @@ local function poll_store(store)
       if seq > floor then
         if c.kind == "assign" then
           local mid = M.message_id(store.id, seq)
-          local verdict, rec = route(mid, c.to, c.scope)
+          local p = { id = c.id, from = c.from, reason = c.reason }
+          local verdict, rec = route(mid, c.to, c.scope, at, store, p)
           if verdict == "hold" then
             handled = false
-          elseif verdict == "deliver" and send(at, store, rec, mid,
-            { id = c.id, from = c.from, reason = c.reason }) == "retry" then
+          elseif verdict == "retry" or (verdict == "deliver" and send(at, store, rec, mid, p) == "retry") then
             stopped = true
             break
           end

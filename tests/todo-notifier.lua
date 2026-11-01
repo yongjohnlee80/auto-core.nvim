@@ -585,24 +585,62 @@ run("the reader says it reads scopes from protocol 33", function()
   faults["todos.changes"] = nil
 end)
 
-section("a crew agent's assignment is the crew's: skipped and acked once the host claims it (ADR 1793489028 §4.7)")
+section("a crew agent's assignment is sent through the crew, keyed by its message id (ADR 1793489028 §4.7)")
 run("crew recipients", function()
   local vision = fresh("5656565656-44444")
   local asked = {}
-  notifier.set_crew_recipient(function(name) asked[#asked + 1] = name; return name == "vision" end)
+  notifier.set_crew_recipient(function(name, mid, msg)
+    asked[#asked + 1] = { name = name, mid = mid, msg = msg }
+    return name == "vision"
+  end)
   local mid, seq = assigned("C1", "agent:vision", SCOPE)
-  ok("a crew agent's assignment files no notice", not delivered(vision, mid), mid)
-  ok("the hook is asked by name, the prefix stripped", vim.tbl_contains(asked, "vision"), vim.inspect(asked))
+  local last = asked[#asked] or {}
+  ok("a crew agent's assignment files no notice once the crew has it", not delivered(vision, mid), mid)
+  ok("the hook is asked by name, the prefix stripped", last.name == "vision", vim.inspect(last.name))
+  ok("… with the change's message id as the key", last.mid == mid, vim.inspect(last.mid))
+  local msg = last.msg or {}
+  ok("… and the message: a notice naming the task, never the user's \"Task:\"", msg.kind == "message"
+    and tostring(msg.subject):find("C1", 1, true) ~= nil and not tostring(msg.subject):match("^Task:")
+    and tostring(msg.body):find("Reason: scoped", 1, true) ~= nil, vim.inspect(msg))
   ok("and the change is acked: the watermark passes it", notifier.watermark(store_id) >= seq, notifier.watermark(store_id))
-  notifier.set_crew_recipient(function() error("the hook failed") end)
+
+  notifier.set_crew_recipient(function() return false end)
   local m2 = assigned("C2", "agent:vision", SCOPE)
-  ok("a failing hook claims nothing: the notice is filed", delivered(vision, m2), m2)
-  notifier.set_crew_recipient(function(name) return name ~= "vision" end)
+  ok("a crew send that fails files the notice", delivered(vision, m2), m2)
+  notifier.set_crew_recipient(function() error("the hook failed") end)
   local m3 = assigned("C3", "agent:vision", SCOPE)
-  ok("an agent the hook doesn't claim is filed as before", delivered(vision, m3), m3)
+  ok("a failing hook files the notice", delivered(vision, m3), m3)
+
+  local tries = {}
+  notifier.set_crew_recipient(function(_, m) tries[#tries + 1] = m; return "retry" end)
+  local m4, s4 = assigned("C4", "agent:vision", SCOPE)
+  ok("a send with no outcome files nothing", not delivered(vision, m4), m4)
+  ok("… and isn't acked", notifier.watermark(store_id) < s4, notifier.watermark(store_id))
+  notifier.set_crew_recipient(function(_, m) tries[#tries + 1] = m; return true end)
+  poll()
+  ok("the next poll sends it again with the same key", #tries >= 2 and tries[1] == m4 and tries[#tries] == m4, vim.inspect(tries))
+  ok("… and, accepted, acks it", notifier.watermark(store_id) >= s4 and not delivered(vision, m4), notifier.watermark(store_id))
+
+  asked = {}
+  notifier.set_crew_recipient(function(name, m) asked[#asked + 1] = { name = name, mid = m }; return true end)
+  local id = env.call("todos.add", { "kb", { title = "C5", assignee = "agent:vision" } }) -- a bare --call: no scope
+  ok("a bare todos.add with an assignee is accepted", id ~= nil)
+  local s5 = assign_seq(type(id) == "table" and id.id or id)
+  poll()
+  local m5 = notifier.message_id(store_id, s5)
+  ok("an assignment made by a bare todos.add reaches a crew agent through the crew", s5 > 0
+    and #asked == 1 and asked[1].mid == m5, vim.inspect({ s5 = s5, asked = asked }))
+
+  asked = {}
+  local m6 = assigned("C6", "autodoc:cloud-strife", SCOPE)
+  ok("a window's assignment is never sent here: the window hands it over", #asked == 0 and m6 ~= nil, vim.inspect(asked))
+
+  notifier.set_crew_recipient(function(name) return name ~= "vision" end)
+  local m7 = assigned("C7", "agent:vision", SCOPE)
+  ok("an agent the hook doesn't claim is filed as before", delivered(vision, m7), m7)
   notifier.set_crew_recipient(nil)
-  local m4 = assigned("C4", "agent:vision", SCOPE)
-  ok("with no hook, every assignment is filed as before", delivered(vision, m4), m4)
+  local m8 = assigned("C8", "agent:vision", SCOPE)
+  ok("with no hook, every assignment is filed as before", delivered(vision, m8), m8)
   ok("a hook that isn't a function is refused", not pcall(notifier.set_crew_recipient, "yes"))
 end)
 
