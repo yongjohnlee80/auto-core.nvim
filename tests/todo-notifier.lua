@@ -687,8 +687,13 @@ run("first poll after start", function()
   local fresh_lector = registry.register("agent:lector", { root = mbroot })
   local past = os.time()
   vim.wait(3000, function() return os.time() > past end, 50) -- every change so far is history
-  notifier._configure({ poll_ms = false, watermark_dir = wm2, grace_ms = 0, skew_ms = 0 })
-  notifier.start() -- started, not yet polled: no catch-up has run
+  -- started, but never connected (ensure answers nothing), so no catch-up runs: the store's first
+  -- poll is the one after the assignment, as when a new project's store is claimed by its first write
+  notifier._configure({ poll_ms = false, watermark_dir = wm2, grace_ms = 0, skew_ms = 0, ensure = function() end })
+  notifier.start()
+  local polls_before = count("todos.changes")
+  vim.wait(200, function() return false end, 20) -- start's scheduled connect has run (and polled nothing)
+  ok("started: no poll of the store before the assignment", count("todos.changes") == polls_before)
   local mid, seq = assigned("F1", "agent:lector", SCOPE) -- written now, then the first poll of the store
   local got = vim.fn.glob(fresh_lector.subs.inbox .. "/todo-*.json", false, true)
   ok("an assignment made after start, before the first poll, is delivered", #got == 1
