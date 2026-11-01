@@ -11,6 +11,15 @@ key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
 
+## [v0.5.5] — 2026-11-01 — a store's first assignment is never skipped
+
+- **A store with no watermark skips only history from before this notifier started** (#21). Before,
+  a store no Neovim here had acked (a new project's store) started at the log's head, so an
+  assignment written between Neovim's start and its first poll of that store was skipped silently.
+  Now each change's time (`at`) splits history (older than the start, less `START_SKEW_MS`) from
+  news, and every change made since is delivered. A change with no time falls back to the head, with
+  one warning. A restart with a watermark is unchanged. New: `M.unix_of(at)`, `M.START_SKEW_MS`.
+
 ## [v0.5.4] — 2026-11-01 — the todo notifier sends assignments through AutoDoc's crew
 
 Phase 7 of the AutoDoc crew-mail epic (ADR 1793489028 §4.7): an assignment to an agent the crew
