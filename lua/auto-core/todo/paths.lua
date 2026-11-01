@@ -45,28 +45,12 @@ M.FLAT_BUCKETS = {
 
 -- ── workspace resolution ──────────────────────────────────────
 
----Resolve the canonical workspace root for the current session. Order
----of resolution mirrors `auto-core.mailbox.path.workspace_mailbox_root`:
----  1. `auto-core.git.worktree.get_workspace_root()` — the explicit
----     auto-core-set workspace.
----  2. `auto-core.git.worktree.get_active()` — the active worktree
----     path (if a workspace_root isn't set but a worktree is).
----  3. `vim.fn.getcwd()` — last-resort fallback for early-boot or
----     test scenarios.
+---Resolve the canonical workspace root for the current session: the project root
+---`auto-core.git.worktree.project_root()` answers (the workspace root, else the active
+---worktree, else `vim.fn.getcwd()`), the same one the mailbox and `$PROJECT_ROOT` use.
 ---@return string absolute path
 function M.workspace_root()
-  local ok, worktree = pcall(require, "auto-core.git.worktree")
-  if ok and worktree then
-    local ws = worktree.get_workspace_root()
-    if ws and ws ~= "" then
-      return fs_path.normalize(ws)
-    end
-    local active = worktree.get_active()
-    if active and active ~= "" then
-      return fs_path.normalize(active)
-    end
-  end
-  return fs_path.normalize(vim.fn.getcwd())
+  return fs_path.normalize(require("auto-core.git.worktree").project_root())
 end
 
 -- ── todo-dir resolution ───────────────────────────────────────

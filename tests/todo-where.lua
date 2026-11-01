@@ -283,7 +283,7 @@ run("vars", function()
     (by_ws.WORKSPACE or {}).value == nil and vars.get("WORKSPACE") == nil
       and vars.resolve_path("$WORKSPACE/docs/legacy.md").unresolved == true,
     vim.inspect({ by_ws.WORKSPACE, vars.get("WORKSPACE") }))
-  ok("… nor a built-in for Lua", not vars.is_builtin("WORKSPACE") and not vars.is_builtin("PROJECT_ROOT"))
+  ok("… nor a built-in for Lua; $PROJECT_ROOT is", not vars.is_builtin("WORKSPACE") and vars.is_builtin("PROJECT_ROOT"))
   local ref = "$KB_ROOT/adrs/x.md"
   ok("Lua resolves a ref to the daemon's value", vars.resolve_path(ref).path == by_ws.KB_ROOT.value .. "/adrs/x.md",
     vars.resolve_path(ref).path)
@@ -329,15 +329,15 @@ run("vars", function()
     env.read(kbfile))
   vars.remove("MONLY")
 
-  -- $PROJECT_ROOT is a user variable: set, it symbolizes; $WORKSPACE never does
+  -- $PROJECT_ROOT is auto-core's project root (Johno, 2026-11-01): a project path symbolizes to
+  -- it, never to $WORKSPACE, and it can't be set
   local legacy = proj .. "/docs/legacy.md"
-  ok("unset, a project path is not symbolized to $WORKSPACE", vars.symbolize_path(legacy) == legacy,
+  ok("a project path symbolizes to $PROJECT_ROOT", vars.symbolize_path(legacy) == "$PROJECT_ROOT/docs/legacy.md",
     vars.symbolize_path(legacy))
-  okv, verr = vars.set("PROJECT_ROOT", proj)
-  ok("$PROJECT_ROOT can be set (not a built-in)", okv == true, verr)
-  ok("… and a project path symbolizes to it", vars.symbolize_path(legacy) == "$PROJECT_ROOT/docs/legacy.md",
-    vars.symbolize_path(legacy))
-  vars.remove("PROJECT_ROOT")
+  ok("… which is the project root", vars.get("PROJECT_ROOT") == proj, vars.get("PROJECT_ROOT"))
+  okv, verr = vars.set("PROJECT_ROOT", kb)
+  ok("$PROJECT_ROOT can't be set", okv == false and verr ~= nil)
+  ok("… and the KB's file never holds it", not (env.exists(kbfile) and env.read(kbfile):find("PROJECT_ROOT", 1, true)))
 
   -- a file of another workspace resolves with ITS variables, whichever store is the session's (§2.5)
   local kb2 = env.new_kb("kb2")

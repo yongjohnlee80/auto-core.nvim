@@ -130,7 +130,8 @@ end
 ---resolver consults that state rather than inventing a parallel
 ---workspace answer in `auto-agents`.
 ---
----Resolution order (highest precedence first):
+---Resolution order (highest precedence first); 3–6 are
+---`auto-core.git.worktree.project_root(opts)`:
 ---  1. `_override_root` — `configure()` / `mailbox.setup({ root })`.
 ---  2. `$AUTO_AGENTS_MAILBOX_ROOT` env var.
 ---  3. `auto-core.git.worktree.get_workspace_root()` — session-scoped
@@ -160,20 +161,8 @@ function M.workspace_mailbox_root(opts)
   if env_mb and env_mb ~= "" then
     return fs_path.normalize(env_mb)
   end
-  local ok, worktree = pcall(require, "auto-core.git.worktree")
-  if ok and worktree then
-    local ws = worktree.get_workspace_root()
-    if ws and ws ~= "" then
-      return fs_path.normalize(fs_path.join(ws, WORKSPACE_MAILBOX_SUFFIX))
-    end
-    local active = worktree.get_active()
-    if active and active ~= "" then
-      return fs_path.normalize(fs_path.join(active, WORKSPACE_MAILBOX_SUFFIX))
-    end
-  end
-  opts = opts or {}
-  local start = opts.cwd or vim.fn.getcwd()
-  return fs_path.normalize(fs_path.join(start, WORKSPACE_MAILBOX_SUFFIX))
+  local root = require("auto-core.git.worktree").project_root(opts)
+  return fs_path.normalize(fs_path.join(root, WORKSPACE_MAILBOX_SUFFIX))
 end
 
 ---Back-compat alias for the v0.1.5..v0.1.32 host-fallback resolver.

@@ -18,7 +18,8 @@
 ---module asks the daemon and never computes its own.
 ---
 ---  • **Built-ins**, derived per workspace on each machine: `$KB_ROOT` and `$HOME`.
----    `$PROJECT_ROOT` is a user variable, set where a KB serves a project.
+---    `$PROJECT_ROOT` is AutoVim's, provided here: the project this Neovim serves
+---    (`auto-core.git.worktree.project_root()`), never a daemon or KB value.
 ---    `$WORKSPACE` is retired: an ordinary name, unresolved unless set.
 ---  • **User variables**: this machine's value, the KB's `.autodoc-vars.toml`
 ---    (relative to the KB root, carried by git), the daemon's global vars, the
@@ -67,16 +68,24 @@ local function now_ms() return vim.uv.hrtime() / 1e6 end
 
 -- ─── built-ins ────────────────────────────────────────────────
 
----The daemon's built-in variables (ADR 1792132105 §2.2), in its order: derived per
----workspace on each machine. A machine or KB value overrides the derived one.
----`$PROJECT_ROOT` is a user variable now, and `$WORKSPACE` is retired (§2.6).
+---The built-in variables: the daemon's (ADR 1792132105 §2.2), in its order, derived per
+---workspace on each machine, then `$PROJECT_ROOT`, which AutoVim owns and auto-core
+---provides (Johno, 2026-11-01): the project this Neovim serves. AutoVim gave up
+---`$WORKSPACE` to AutoDoc; AutoDoc never sets `$PROJECT_ROOT`, so a daemon or KB value
+---for it is ignored.
 ---@type { name: string, resolver: fun(): string?, doc: string }[]
 M.BUILTINS = {
   { name = "KB_ROOT",
     doc = "The workspace's root: the KB its documents belong to." },
   { name = "HOME",
     doc = "The daemon user's home directory." },
+  { name = "PROJECT_ROOT",
+    doc = "The AutoVim project this Neovim serves (auto-core's project root)." },
 }
+
+---project_root is `$PROJECT_ROOT`'s value: auto-core's project root.
+---@return string
+local function project_root() return require("auto-core.git.worktree").project_root() end
 
 ---@type table<string, true>
 local BUILTIN = {}
@@ -327,6 +336,7 @@ end
 ---@return string? value, string? why
 function M.get(name, opts)
   if type(name) ~= "string" or name == "" then return nil end
+  if name == "PROJECT_ROOT" then return project_root() end
   local e, why = table_now(opts)
   if not e then return nil, why end
   local row = e.by[name]
@@ -346,7 +356,15 @@ end
 function M.list(opts)
   local e, why = table_now(opts)
   if not e then return {}, why end
-  return vim.deepcopy(e.rows)
+  local rows, at = {}, nil
+  for _, r in ipairs(e.rows) do
+    if r.name ~= "PROJECT_ROOT" then rows[#rows + 1] = vim.deepcopy(r) end
+    if r.name == "HOME" then at = #rows end
+  end
+  local root = project_root()
+  table.insert(rows, (at or #rows) + 1, { name = "PROJECT_ROOT", value = root, builtin = true,
+    doc = M.BUILTINS[3].doc, source = "derived", derived = root, machine = false, conflict = false })
+  return rows
 end
 
 ---workspace is the workspace whose variables the refs of opts.from resolve with
@@ -429,6 +447,9 @@ end
 function M.set(name, value, opts)
   local okn, nerr = valid_name(name)
   if not okn then return false, nerr end
+  if name == "PROJECT_ROOT" then
+    return false, "'PROJECT_ROOT' is AutoVim's project root, provided by auto-core; it can't be set"
+  end
   if BUILTIN[name] then
     return false, "'" .. name .. "' is a built-in variable and auto-resolves; "
       .. "override it in AutoDoc's Variables tab"
@@ -539,12 +560,11 @@ function M.symbolize_path(path, opts)
       roots[#roots + 1] = { name = name, value = (value:gsub("/+$", "")) }
     end
   end
-  for _, n in ipairs({ "KB_ROOT", "PROJECT_ROOT" }) do
-    add(n, e.by[n] and e.by[n].value)
-  end
+  add("KB_ROOT", e.by.KB_ROOT and e.by.KB_ROOT.value)
+  add("PROJECT_ROOT", project_root())
   local users = {}
   for _, r in ipairs(e.rows) do
-    if not BUILTIN[r.name] and r.name ~= "PROJECT_ROOT" and r.name ~= "WORKSPACE" then
+    if not BUILTIN[r.name] and r.name ~= "WORKSPACE" then
       users[#users + 1] = r.name
     end
   end

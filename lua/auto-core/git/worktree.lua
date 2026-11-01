@@ -433,6 +433,20 @@ function M.get_workspace_root()
   return _workspace_root
 end
 
+---project_root is the AutoVim project this Neovim serves: the workspace root, else the
+---active worktree, else opts.cwd, else Neovim's cwd. It is the one answer for every
+---consumer (the mailbox, the todo store, an agent's start folder, `$PROJECT_ROOT`), and
+---never depends on the focused buffer.
+---@param opts? { cwd?: string }
+---@return string
+function M.project_root(opts)
+  if _workspace_root and _workspace_root ~= "" then return _workspace_root end
+  if _active_worktree and _active_worktree ~= "" then return _active_worktree end
+  local cwd = type(opts) == "table" and opts.cwd or nil
+  if type(cwd) ~= "string" or cwd == "" then cwd = vim.fn.getcwd() end
+  return path_mod.normalize(cwd)
+end
+
 -- ── the worktree picker (one list for every consumer) ────────────
 
 ---The worktrees a picker offers under `root`: every worktree of every repo
