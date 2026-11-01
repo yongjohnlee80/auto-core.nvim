@@ -648,6 +648,12 @@ run("crew recipients", function()
     and not delivered(vision, m9) and notifier.watermark(store_id) >= s9, vim.inspect(asked))
   local m10 = assigned("C10", "agent:vision", "@1111111111-22222")
   ok("another instance's assignment never reaches the hook", #asked == 0 and not delivered(vision, m10), vim.inspect(asked))
+  -- AutoDoc's window hands another host's agent a task itself (SPC x -> A): it assigns the bare
+  -- codename with the window's own scope, then sends the agent one Task: request through the crew.
+  -- Every Neovim's notifier leaves it alone, so the agent hears of it once.
+  local mw, sw = assigned("W1", "vision", "autodoc:0123456789abcdef")
+  ok("a window's assignment to this project's agent (bare codename, the window's scope) never reaches the hook: the window sends it",
+    #asked == 0 and not delivered(vision, mw) and notifier.watermark(store_id) >= sw, vim.inspect(asked))
   notifier.set_crew_recipient(function(name, m) asked[#asked + 1] = { name = name, mid = m }; return false end)
   local m11, s11 = assigned("C11", "agent:vision", nil) -- the daemon answers mail.ambiguous: refused for certain
   ok("an unscoped assignment the crew refuses asks the hook by name", #asked == 1 and asked[1].mid == m11, vim.inspect(asked))
