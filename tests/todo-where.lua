@@ -127,6 +127,57 @@ run("buffers", function()
   pcall(vim.api.nvim_buf_delete, buf, { force = true })
 end)
 
+section("buffers on a removed task: never a save that recreates it")
+run("removed", function()
+  local function file(name)
+    local p = env.tmp .. "/removed-" .. name .. ".md"
+    env.write(p, "---\nid: \"" .. name .. "\"\n---\n# " .. name .. "\n")
+    return p
+  end
+  ok("buffers.removed is a function", type(buffers.removed) == "function")
+  if type(buffers.removed) ~= "function" then return end
+
+  local clean = file("clean")
+  local cb = vim.fn.bufadd(clean)
+  vim.fn.bufload(cb)
+  vim.fn.delete(clean)
+  buffers.removed(clean)
+  ok("a clean buffer on a removed task is closed", not vim.api.nvim_buf_is_valid(cb)
+    or vim.api.nvim_buf_get_name(cb) ~= clean)
+
+  local unloaded = file("unloaded")
+  local ub = vim.fn.bufadd(unloaded)
+  vim.fn.delete(unloaded)
+  buffers.removed(unloaded)
+  ok("an unloaded buffer naming it is deleted", not vim.api.nvim_buf_is_valid(ub))
+
+  local dirty = file("dirty")
+  local db = vim.fn.bufadd(dirty)
+  vim.fn.bufload(db)
+  vim.api.nvim_buf_set_lines(db, -1, -1, false, { "an unsaved line" })
+  vim.fn.delete(dirty)
+  local said
+  local log = require("auto-core.log")
+  local real = log.notify
+  log.notify = function(msg, o) said = { msg = msg, level = o and o.level }; return real(msg, o) end
+  buffers.removed(dirty)
+  log.notify = real
+  ok("a modified buffer keeps its edits", vim.api.nvim_buf_is_valid(db)
+    and vim.api.nvim_get_option_value("modified", { buf = db })
+    and vim.api.nvim_buf_get_lines(db, -2, -1, false)[1] == "an unsaved line")
+  ok("… and names no file now", vim.api.nvim_buf_get_name(db) == "", vim.api.nvim_buf_get_name(db))
+  ok("… the user is told, naming the path", said ~= nil and said.level == "warn"
+    and tostring(said.msg):find(dirty, 1, true) ~= nil, vim.inspect(said))
+  local wrote = pcall(vim.api.nvim_buf_call, db, function() vim.cmd("write") end)
+  ok("… so a :w can't write it back", not wrote and not env.exists(dirty))
+  local left = 0
+  for _, b in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_get_name(b) == dirty then left = left + 1 end
+  end
+  ok("… and no buffer names the removed path any more", left == 0, left)
+  pcall(vim.api.nvim_buf_delete, db, { force = true })
+end)
+
 section(":AutoCoreTodoRefresh and the save hook")
 run("refresh", function()
   local before = #seen["core.todo:refreshed"]
