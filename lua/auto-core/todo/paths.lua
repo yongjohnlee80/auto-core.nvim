@@ -47,7 +47,7 @@ M.FLAT_BUCKETS = {
 
 ---Resolve the canonical workspace root for the current session: the project root
 ---`auto-core.git.worktree.project_root()` answers (the workspace root, else the active
----worktree, else `vim.fn.getcwd()`), the same one the mailbox and `$PROJECT_ROOT` use.
+---worktree, else `vim.fn.getcwd()`), the same one `$PROJECT_ROOT` uses.
 ---@return string absolute path
 function M.workspace_root()
   return fs_path.normalize(require("auto-core.git.worktree").project_root())

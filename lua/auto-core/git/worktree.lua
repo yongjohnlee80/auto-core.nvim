@@ -435,7 +435,7 @@ end
 
 ---project_root is the AutoVim project this Neovim serves: the workspace root, else the
 ---active worktree, else opts.cwd, else Neovim's cwd. It is the one answer for every
----consumer (the mailbox, the todo store, an agent's start folder, `$PROJECT_ROOT`), and
+---consumer (the todo store, an agent's start folder, `$PROJECT_ROOT`), and
 ---never depends on the focused buffer.
 ---@param opts? { cwd?: string }
 ---@return string

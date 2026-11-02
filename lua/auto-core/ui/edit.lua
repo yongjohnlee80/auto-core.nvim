@@ -7,7 +7,7 @@
 ---for editing owns the sanctioned way to reach a usable one — otherwise every
 ---consumer re-derives it, badly, and a fix lives on one machine.
 ---
----The motivating failure, from a mailbox agent:
+---The motivating failure, from an agent:
 ---
 ---    nvim --server $NVIM --remote-silent <file>
 ---    -> E1513: Cannot switch buffer. 'winfixbuf' is enabled
@@ -253,7 +253,7 @@ function M.open(path, opts)
   end
   local line = opts.line
   local col = opts.col
-  -- INTEGERS, matching the mailbox schema's `integer` check. These two gates
+  -- INTEGERS, matching the command schema's `integer` check. These two gates
   -- guard the same contract and the Lua one was the weaker: it accepted 2.5,
   -- `nvim_win_set_cursor` refused it, the pcall ate the error, and the response
   -- reported a line number that cannot exist in any buffer. (gold-man r0 nit 3.)
@@ -315,7 +315,7 @@ function M.open(path, opts)
   end
 
   -- REPORT THE CURSOR, NEVER THE REQUEST. The response is the only thing a
-  -- mailbox caller ever sees — it cannot look at the screen — and this used to
+  -- remote caller ever sees — it cannot look at the screen — and this used to
   -- echo `opts` back: four measured rows where the report disagreed with the
   -- window, including a `line = 2.5` that returned a line number no buffer can
   -- have. `panel_windows_skipped` already carries the argument ("an agent that

@@ -3,13 +3,13 @@
 ---Promotes the ADR-0035 bash trust model out of `todo/automation.lua`
 ---into a reusable primitive. A *capability* is a named permission for
 ---a plugin to perform an execution-class action driven by plain-text
----project files or remote (mailbox) requests — e.g. `todo.bash`,
+---project files or remote (command) requests — e.g. `todo.bash`,
 ---`run.exec`, `run.command_env`. Each capability carries:
 ---
 ---  • `enabled`                 — off by default, always.
 ---  • `first_run_acknowledged`  — set ONLY by an interactive user
 ---    path (`acknowledge_first_run`). `set{enabled=true}` refuses
----    until the ack has landed, unless `force=true` — and mailbox
+---    until the ack has landed, unless `force=true` — and command
 ---    wiring must always call with `force=false` (or omit it), so a
 ---    remote agent can never bootstrap its own trust (ADR-0035 §4.5).
 ---  • `allowlist`               — optional list of Lua patterns. When
@@ -25,7 +25,7 @@
 ---
 ---Per [[auto-core-maintenance]] #6 this module never notifies; it
 ---returns structured `(ok, reason)` pairs and consumers own the UX
----(prompts, panel warnings, mailbox error envelopes).
+---(prompts, panel warnings, command error responses).
 ---@module 'auto-core.trust'
 
 local M = {}
@@ -105,7 +105,7 @@ end
 ---Programmatic trust setter. Returns `(ok, err)`. Refuses to flip
 ---`enabled` to true unless `first_run_acknowledged` is already true —
 ---the interactive path (`acknowledge_first_run`) must land first.
----`force = true` skips that gate; mailbox wiring MUST NOT pass it
+---`force = true` skips that gate; command wiring MUST NOT pass it
 ---(ADR-0035 §4.5 / ADR-0048 §11-§12).
 ---
 ---`allowlist` accepts a list of Lua-pattern strings; `false` or `""`
@@ -153,7 +153,7 @@ function M.set(capability, opts)
 end
 
 ---Acknowledge the first-run trust prompt for a capability. Interactive
----user-command paths ONLY — never reachable from mailbox handlers.
+---user-command paths ONLY — never reachable from command handlers.
 ---@param capability string
 function M.acknowledge_first_run(capability)
   _assert_capability(capability, "auto-core.trust.acknowledge_first_run")

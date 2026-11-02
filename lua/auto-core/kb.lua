@@ -233,9 +233,9 @@ end
 
 ---Make `spec` the project's primary KB. Interactive only: it refuses
 ---unless `opts.confirmed == true`, which the caller passes after the
----user confirmed, and it is deliberately NOT a mailbox verb — a remote
+---user confirmed, and it is deliberately NOT a command verb — a remote
 ---agent can never re-point a project's KB (as `trust.acknowledge_first_run`
----is never reachable from a mailbox handler).
+---is never reachable from a command handler).
 ---
 ---Reasons on the false path: `"not_confirmed"`, `"invalid_spec"`,
 ---`"invalid_workspace"`, `"root_not_a_directory"`. Re-setting the same
