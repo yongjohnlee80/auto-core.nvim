@@ -41,7 +41,8 @@ in the auto-agents kb for the full eleven-rule contract.
 | **v0.1.0 bundle** — `lsp.reset` (tech-stack-aware) + `ui.float.multi` (gitsgraph-shaped multi-pane) + `git.graph` (multi-repo discovery + commit caches) + `git.fetch` + `git.pull` + `git.worktree.destroy` (consultative round-trip) + `files` (global file-filter prefs) + `state.namespace` `VimLeavePre` flush + `doc:pinned`/`doc:unpinned` topics | `v0.1.0` |
 | `ui.grid` — reusable tabular result model + window-owning view (ADR 0058, autodb M7) | `v0.1.64` |
 | `git.log` + `git.diff` + `ui.marks` + `ui.diffview` | `v0.2.0` |
-| `ui.edit.open` + the `editor.open` mailbox verb — open a file from outside the layout | **`v0.2.x` ← here** |
+| `ui.edit.open` + the `editor.open` verb — open a file from outside the layout | `v0.2.x` |
+| No file mailbox: `commands`, `instance`, the notifier through the crew or the host's fallback, `:AutoCoreMailboxExport` | **`v0.6.0` ← here** |
 | Family cleanup + post-1.0 prep | `v0.X.0` minors (additive only) |
 | API freeze | `v1.0.0` |
 
@@ -218,15 +219,14 @@ a panel's autocmds intercept it, and the observed outcome is `ok = true`,
 window count unchanged, and the panel's own buffer replaced by the file.
 `nvim_open_win` is not interceptable, so success means a window.
 
-### The `editor.open` mailbox verb
+### The `editor.open` verb
 
-The same surface is registered on auto-core's command registry at
-`setup()`, so anything speaking the mailbox protocol can use it. The
-fields that matter (a real message also carries `id` / `from` / `to`):
+The same surface is registered on auto-core's command registry
+(`auto-core.commands`) at `setup()`, so an agent can call it through
+auto-agents' editor socket. Its arguments:
 
 ```json
-{ "kind": "command", "command": "editor.open",
-  "args": { "path": "/abs/path/file.lua", "line": 42, "col": 7 } }
+{ "path": "/abs/path/file.lua", "line": 42, "col": 7 }
 ```
 
 ```
@@ -238,14 +238,41 @@ schema is validated **before** the handler runs, so a bad call comes back
 as `bad_args` rather than a Lua error.
 
 **This verb lives in auto-core alone — there is no matching change in
-auto-agents.** auto-core owns the whole surface an agent talks to: the
-registry is `auto-core.mailbox.commands`, dispatch is
-`auto-core.mailbox.router` calling `commands.handle_message`, and discovery
-is auto-agents' `commands_list`, whose handler is a **relay** — it calls
-`commands.list()` and forwards the entries, schema included. A verb
-registered here is therefore discovered and dispatched with no auto-agents
-change at all. Registering it in both places would be a second implementation
+auto-agents.** auto-core owns the registry: `auto-core.commands`. Dispatch is
+auto-agents' editor socket (`commands.get`, then `validate_args` against the
+verb's schema, then the handler), and discovery is auto-agents'
+`commands_list`, whose handler is a **relay** — it calls `commands.list()`
+and forwards the entries, schema included. A verb registered here is
+therefore discovered and dispatched with no auto-agents change at all. Registering it in both places would be a second implementation
 of the window logic, which is the thing this module exists to prevent.
+
+## No file mailbox (v0.6.0, ADR 1793271500 phase 5)
+
+AutoDoc's crew carries every message between agents, the user and Neovim, so
+auto-core's file mailbox is gone: `auto-core.mailbox` and all its submodules
+(router, transport, registry, path, message, bootstrap, the viewer), the
+`auto-core.debug.mailbox` probe, the `core.mailbox:*` topics,
+`core.command:executed` / `core.command:rejected`, the mailbox log events,
+`:AutoCoreMailbox` and the `mailbox` setup option. There is no shim.
+
+| Was | Now |
+|---|---|
+| `auto-core.mailbox.commands` (`register`, `get`, `list`, `unregister`, `validate_args`) | `auto-core.commands`, same signatures |
+| `commands.handle_message`, `reject_unknown` | gone: the caller dispatches (`get`, `validate_args`, the handler) |
+| `auto-core.mailbox.path.get_instance_id()` / `set_instance_id(id)` | `auto-core.instance.id()` / `set_id(id)` |
+| the notifier's file notice | the host's fallback, `notifier.set_fallback(fn)` |
+| the notifier started by `mailbox.start()` | started by `setup()` |
+
+- A leftover `mailbox = { ... }` in `setup()` is ignored, with one warning.
+- Nothing deletes or rewrites the trees an older auto-core wrote
+  (`.auto-agents/mailbox/`), and nothing creates one. `fs.watch` still ignores
+  them.
+- `:AutoCoreMailboxExport [root] [out]` reads one tree and writes each
+  `archive/*.json` message as a JSON line, `{ path, message }`. The root
+  defaults to the project's `.auto-agents/mailbox`; the output defaults to a
+  file under `stdpath("state")/auto-core/`. It refuses an output inside the
+  tree and never writes to the tree. The Lua API is
+  `require("auto-core.mailbox_export").export({ root, out })`.
 
 ## `kb` — the project's primary knowledge base (ADR 1791209945 §5)
 
@@ -293,7 +320,7 @@ without the two recursing.
 
 **`set_primary` is interactive only.** It refuses unless
 `opts.confirmed == true`, which the caller passes once the user has confirmed,
-and it is not a mailbox verb, so a remote agent cannot re-point a project's
+and it is not a command verb, so a remote agent cannot re-point a project's
 KB. It rejects a root that is not an existing directory. Each change publishes
 `core.kb:primary_changed` with
 `{ project_root, workspace, root, old, source = "set" | "import" }`.
@@ -344,7 +371,7 @@ kb.sync_managed(root?)       -- ok, err, { root, updated, kept, missing, failed,
 
 **AutoDoc's daemon owns the todo system**: the task format, its rules and every
 write. Its clients call the daemon's `todos.*` verbs themselves: auto-finder's
-todos panel, auto-agents' `todos.*` mailbox verbs, AutoDoc's own view, and
+todos panel, auto-agents' `todos.*` verbs, AutoDoc's own view, and
 `autodoc --call todos.<verb>`.
 
 **`require("auto-core.todo")` is gone** (v0.4.1). It was a forwarding shim for
@@ -386,19 +413,25 @@ store does the same, without waiting. `:AutoCoreTodoClaim` claims the store agai
 after a rollback.
 
 **Assignment notices.** `auto-core.todo.notifier` turns the daemon's `assign`
-changes into mailbox messages. It starts with the mailbox router, is the
-consumer `auto-core:<instance_id>` (one per Neovim), and delivers only to the
-agents registered in its own instance. An assignee not registered here yet is
-**held** for a grace window counted from the notifier's start
-(`require("auto-core.todo.notifier").GRACE_MS`, 10 min), so an agent spawned after
-Neovim started still gets the catch-up: the cursor stops before the held change,
-later changes are still delivered, and a new mailbox registration polls at once.
-Past the window it is skipped and acked with one audit line (the task file is the
-record). `user` and `autodoc:*` are skipped at once. It polls `todos.changes` when the
-session connects, right after a client's assignment (`poll_soon`), and every 5 s while
-connected (the daemon never pushes). Each message's id is `todo-<store_id>-<seq>`:
-a resend after a crash carries the same id, and a sender finding it already
-delivered does not write it again. A new Neovim starts after the highest change
+changes into notices for the assignee. `setup()` starts it. It is the consumer
+`auto-core:<instance_id>` (`auto-core.instance`, one per Neovim) and tells only
+the agents this Neovim runs. A notice goes through AutoDoc's crew, by the host's
+crew hook (`set_crew_recipient`); one the crew doesn't take goes to the host's
+fallback (`set_fallback`), which types it into the agent's terminal. auto-agents
+v0.4.0 sets both. With no fallback set, such a notice is dropped with one log
+line; nothing is ever written to a file. An assignee the fallback can't type to
+yet (no agent of that name runs here) is **held** for a grace window counted
+from the notifier's start (`require("auto-core.todo.notifier").GRACE_MS`, 10 min),
+so an agent spawned after Neovim started still gets the catch-up: the cursor
+stops before the held change, later changes are still delivered, and a spawn
+asks for a poll at once (`poll_soon`). Past the window it is skipped and acked
+with one audit line (the task file is the record). `user` and `autodoc:*` are
+skipped at once, and so is another Neovim's full `agent:<name>:<instance>`. It
+polls `todos.changes` when the session connects, right after a client's
+assignment (`poll_soon`), and every 5 s while connected (the daemon never
+pushes). Each notice's key is `todo-<store_id>-<seq>`, the same on every retry:
+the crew keys its send by it, a key this process typed is never offered again,
+and auto-agents' fallback keeps the keys it typed across restarts. A new Neovim starts after the highest change
 any Neovim on this machine handled, so nothing old is assigned again (each Neovim
 writes only its own watermark file, `stdpath("state")/auto-core/todo_notifier/`,
 and the highest across them is read; files of Neovims that are gone are pruned
