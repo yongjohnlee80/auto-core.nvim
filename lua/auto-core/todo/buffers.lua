@@ -130,4 +130,41 @@ function M.reload(path)
   if vim.in_fast_event() then vim.schedule(apply) else apply() end
 end
 
+---removed: the buffers naming `path`, a task the daemon removed. A save from one would write the
+---task back as a new file, a duplicate of a task that is gone. An unloaded one is deleted (Neovim
+---never unloads a modified buffer, so there is nothing to lose); an unmodified one is closed; a
+---modified one keeps its edits but names no file any more (`:w` asks for one: E32), and the user is
+---told which path it was.
+---@param path string
+function M.removed(path)
+  local function apply()
+    for _, b in ipairs(vim.api.nvim_list_bufs()) do
+      if vim.api.nvim_buf_is_valid(b) and vim.api.nvim_buf_get_name(b) == path then
+        local loaded = vim.api.nvim_buf_is_loaded(b)
+        if not loaded or not vim.api.nvim_get_option_value("modified", { buf = b }) then
+          pcall(vim.api.nvim_buf_delete, b, { force = true })
+        elseif pcall(vim.api.nvim_buf_set_name, b, "") then
+          -- set_name leaves the old name behind as an unlisted buffer: drop it, or a :w from it
+          -- writes the removed task back
+          for _, stale in ipairs(vim.api.nvim_list_bufs()) do
+            if stale ~= b and vim.api.nvim_buf_is_valid(stale) and vim.api.nvim_buf_get_name(stale) == path
+              and not (vim.api.nvim_buf_is_loaded(stale) and vim.api.nvim_get_option_value("modified", { buf = stale })) then
+              pcall(vim.api.nvim_buf_delete, stale, { force = true })
+            end
+          end
+          local ok_log, log = pcall(require, "auto-core.log")
+          if ok_log and log and type(log.notify) == "function" then
+            pcall(log.notify, string.format(
+              "task removed while you had unsaved edits; buffer %d no longer names a file (was %s). "
+              .. "Your edits are intact; :w asks for a file name, so it can't write the task back.",
+              b, path),
+              { level = "warn", component = LOG_COMPONENT })
+          end
+        end
+      end
+    end
+  end
+  if vim.in_fast_event() then vim.schedule(apply) else apply() end
+end
+
 return M
