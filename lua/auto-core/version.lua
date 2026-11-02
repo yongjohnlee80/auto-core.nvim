@@ -1018,6 +1018,10 @@ return {
   -- v0.5.8: an assignment's message states the assignment ("You've been assigned a new task."), names
   -- the task and quotes its reason as the note; it names no assigner (notifier.ASSIGNED;
   -- notifier.FORWARDED, its old name, is a deprecated alias).
-  version     = "0.5.8",
+  -- v0.6.0: the file mailbox is retired (ADR 1793271500 phase 5): its modules, topics, commands
+  -- and log events are gone; the command registry is auto-core.commands, the instance id
+  -- auto-core.instance; the notifier hands an assignment the crew didn't take to the host's
+  -- fallback, never to a file; :AutoCoreMailboxExport reads an old tree's archives.
+  version     = "0.6.0",
   api_version = "0.1",
 }

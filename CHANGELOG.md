@@ -11,6 +11,31 @@ key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
 
+## [v0.6.0] — 2026-11-02 — the file mailbox is retired
+
+ADR 1793271500, phase 5. A minor by Johno's ruling: it removes the file mailbox, a public surface,
+in v0.6.0. This is an exception to the additive-only rule above that Johno ruled deliberately, as
+the joint release with auto-agents v0.4.0. AutoDoc's crew carries every message now. **Release it
+only after auto-run v0.1.20 and AutoDoc v0.3.8**: before them, auto-run's `run.*` verbs and
+AutoDoc's Lua verbs register only on the mailbox's registry. **auto-agents v0.4.0 needs this
+release** (it uses `auto-core.commands`), so autovim moves both carets together.
+
+- **The file mailbox is gone:** the router, transport, path, message, bootstrap, viewer, debug
+  probe, its topics and log events, and `:AutoCoreMailbox`. A leftover `mailbox` option in setup is
+  ignored with one warning, and setup creates no mailbox folder.
+- **The command registry moves to `auto-core.commands`** (`register` / `get` / `list` /
+  `unregister` / `validate_args`), without the file-envelope dispatch.
+- **This Neovim's instance id moves to `auto-core.instance`** (`id`, `set_id`).
+- **The todo notifier:** an assignment the crew didn't take goes to the host's fallback
+  (`set_fallback`: auto-agents' typed notice), never to a file. It's held inside the grace window
+  while it can't be typed, and dropped with one log line when no fallback is set.
+- **`:AutoCoreMailboxExport`** (`auto-core.export_mailbox`) reads an old mailbox tree's archives
+  into JSONL outside the tree, and never writes to it.
+- **A removed task's buffer** is closed when clean, and made file-less with a warning when
+  modified, so no save recreates the file.
+- **Docs:** what went, where the registry and the instance id moved, and the notifier's crew and
+  fallback.
+
 ## [v0.5.8] — 2026-11-02 — an assignment's message states the assignment
 
 - **The todo notifier's assignment message states the assignment, not who made it** (#27). It
