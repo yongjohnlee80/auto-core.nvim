@@ -60,7 +60,7 @@ mutants=(
   "$V|required|without AutoDoc a variable falls back to vim.env|  local e, why = table_now(opts)\n  if not e then return nil, why end\n  local row = e.by[name]|  local e, why = table_now(opts)\n  if not e then return vim.env[name] end\n  local row = e.by[name]"
   "$V|smoke|an old table is never read again|  if now_ms() - read_at <= M.FRESH_MS then return e end|  if true then return e end"
   "$V|smoke|a set leaves the old table cached|  _cache, _owner = {}, {}\n  publish_changed(value == \"\" and \"remove\" or \"set\", name)|  publish_changed(value == \"\" and \"remove\" or \"set\", name)"
-  "$V|smoke|symbolize writes \$WORKSPACE again|    if not BUILTIN[r.name] and r.name ~= \"PROJECT_ROOT\" and r.name ~= \"WORKSPACE\" then|    if not BUILTIN[r.name] and r.name ~= \"PROJECT_ROOT\" then"
+  "$V|smoke|symbolize writes \$WORKSPACE again|    if not BUILTIN[r.name] and r.name ~= \"WORKSPACE\" then|    if not BUILTIN[r.name] then"
   "$V|smoke|remove ignores where the value comes from|  return put(e, name, \"\", source_scope(row))|  return put(e, name, \"\", \"machine\")"
   "$V|smoke|a stale read answers the old table|  return read(daemon, body, M.REREAD_WAIT_MS) or e|  read_again(daemon, e.key, body)\n  return e"
   "$V|where|a from reads the session's table, not its workspace's|  if type(from) == \"string\" and from ~= \"\" and not _old then|  if false then"
