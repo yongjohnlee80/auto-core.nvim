@@ -1,13 +1,18 @@
----auto-core.todo.notifier — AutoDoc's assignment changes become mailbox messages.
+---auto-core.todo.notifier — AutoDoc's assignment changes reach this Neovim's agents.
 ---
----ADR 1791532020 §2.5: AutoDoc never writes to a mailbox; auto-core turns the
----daemon's `assign` changes into messages. The daemon keeps each consumer's
----cursor: `todos.changes` answers what came after it, `todos.ack` moves it.
+---ADR 1791532020 §2.5: auto-core turns the daemon's `assign` changes into notices
+---for the assignee. The daemon keeps each consumer's cursor: `todos.changes`
+---answers what came after it, `todos.ack` moves it.
+---
+---**How a notice reaches the agent** (v0.6.0: no file mailbox, ADR 1793271500
+---phase 5). The host's crew hook (`set_crew_recipient`) sends it through AutoDoc's
+---crew. One the crew doesn't take goes to the host's fallback (`set_fallback`),
+---which types it into the agent's terminal. With neither set, it is dropped with
+---one log line: nothing is ever written to a file.
 ---
 ---**A consumer per Neovim** (Johno, 2026-10-13): the consumer is
----`auto-core:<instance_id>`, the same instance id the mailbox scopes its tree by.
----Each Neovim delivers only to the agents registered in its own instance, and acks
----its own cursor.
+---`auto-core:<instance_id>` (`auto-core.instance`). Each Neovim tells only the
+---agents it runs, and acks its own cursor.
 ---
 ---**A bare assignee is its own project's agent** (ADR 1791532020 r15 §2.5a). Every
 ---Neovim reads the one change log, so an assignment carries its assigner's scope
@@ -16,15 +21,16 @@
 ---hand edit, an unscoped `--call`) by none. A full `agent:<name>:<instance>` is
 ---delivered by its instance alone, as before.
 ---
----**A recipient not registered here yet is HELD** for a grace window counted from
----this process's notifier start (`GRACE_MS`, 10 min): agents spawn after Neovim
+---**A recipient the fallback can't type to yet is HELD** for a grace window counted
+---from this process's notifier start (`GRACE_MS`, 10 min): agents spawn after Neovim
 ---starts, and the catch-up must reach them (ADR §2.5). The cursor is acked only up
 ---to the change before the first held one; later changes are still delivered, and
----re-reading them on the next poll writes nothing twice (the sender's duplicate
----check). A new mailbox registration polls at once. Past the window a recipient
----still not registered is skipped and acked, with one audit line: an assignment
----notice is best-effort per instance, and the task file is the record. `user` and
----`autodoc:*` are skipped at once. The watermark only ever passes handled changes.
+---re-reading them on the next poll types nothing twice (this process remembers what
+---it typed). A spawn asks for a poll at once (`poll_soon`). Past the window a
+---recipient still not reached is skipped and acked, with one audit line: an
+---assignment notice is best-effort per instance, and the task file is the record.
+---`user` and `autodoc:*` are skipped at once. The watermark only ever passes
+---handled changes.
 ---
 ---**Where a new consumer starts.** The instance id is per process, so every
 ---Neovim start is a new consumer, and the daemon starts a new consumer at the
@@ -41,16 +47,15 @@
 ---the store is never lost. A change that carries no time falls back to the log's
 ---head, as before, with one warning.
 ---
----Delivery is at-least-once: the message is written (temp, fsync, rename) BEFORE
----the ack, and its id, `todo-<store_id>-<seq>`, is the same on every retry. A
----sender finding that id already in the recipient's inbox, processing or archive
----does not write it again. A resync (the consumer was away past the daemon's
----silence limit) notifies each currently assigned task once, then acks the
----page's cursor.
+---Delivery is at-least-once: the notice is sent BEFORE the ack, keyed by its id,
+---`todo-<store_id>-<seq>`, the same on every retry. The crew keys its send by it,
+---and the fallback (auto-agents' handler keeps the keys it typed) answers a key it
+---has already typed without typing it again. A resync (the consumer was away past
+---the daemon's silence limit) notifies each currently assigned task once, then
+---acks the page's cursor.
 ---@module 'auto-core.todo.notifier'
 
 local daemon  = require("auto-core.todo.daemon")
-local fs_path = require("auto-core.fs.path")
 
 local LOG_COMPONENT = "auto-core.todo.notifier"
 
@@ -65,8 +70,8 @@ M.POLL_MS = 5000
 -- While a change is held, the cursor cannot pass it, so a poll reads one page
 -- from it; the page bounds how many later changes are delivered meanwhile.
 M.PAGE = 200
--- NOTE: deadline. A change whose recipient is not registered in this instance
--- is HELD this long, counted from this process's notifier start, so an agent
+-- NOTE: deadline. A change whose recipient the fallback can't type to yet (no
+-- agent of that name runs here) is HELD this long, counted from this process's notifier start, so an agent
 -- spawned after Neovim started still gets the catch-up (ADR §2.5: an assignment
 -- made while Neovim was closed is still delivered). Past it, the change is
 -- skipped and acked (one audit line). Configurable: set M.GRACE_MS before the
@@ -91,8 +96,14 @@ local _audited = {}      -- message id → true once its skip was logged
 local _unsure = {}       -- message id → ms (hrtime) the crew's send first had no outcome
 -- _crew_recipient, when a host sets it (set_crew_recipient), sends an assignment to an agent the
 -- crew delivers to, through AutoDoc's crew (ADR 1793489028 §4.7), keyed by its message id: once the
--- crew accepts it, this notifier files no notice of it. Unset, every assignment is routed as before.
+-- crew accepts it, the fallback is never asked. Unset, every assignment goes to the fallback.
 local _crew_recipient = nil
+-- _fallback, when a host sets it (set_fallback), types an assignment the crew didn't take into the
+-- agent's terminal. _typed holds the message ids it typed in this process; _no_fallback_said, that
+-- the missing fallback was logged.
+local _fallback = nil
+local _typed = {}
+local _no_fallback_said = false
 local _started_at = nil  -- ms (hrtime) when this process's notifier started
 local _started_wall = nil -- s (Unix, whole) when this process's notifier started
 local _timed = {}        -- store id → true while its history, with no watermark, is skipped by time
@@ -106,10 +117,10 @@ end
 ---consumer is this Neovim's consumer name.
 ---@return string
 function M.consumer()
-  return "auto-core:" .. require("auto-core.mailbox.path").get_instance_id()
+  return "auto-core:" .. require("auto-core.instance").id()
 end
 
----message_id is the mailbox id of an assign change: the same on every retry.
+---message_id is the key of an assign change's notice: the same on every retry.
 ---@param store_id string
 ---@param seq integer
 ---@return string
@@ -150,7 +161,7 @@ local function watermark_dir()
   return _cfg.watermark_dir or (vim.fn.stdpath("state") .. "/auto-core/todo_notifier")
 end
 
-local function own_instance() return require("auto-core.mailbox.path").get_instance_id() end
+local function own_instance() return require("auto-core.instance").id() end
 
 ---read_json is a file's map, {} when it does not parse, nil when it is gone.
 local function read_json(path)
@@ -282,43 +293,11 @@ end
 M._watermark_write = write_own
 M._watermark_prune = prune
 
--- ─── recipients ──────────────────────────────────────────────
-
----local_recipient is the mailbox record of an assignee registered in THIS
----instance, or nil. A bare name is tried as given, then as `agent:<name>`; a full
----id names its instance, so another Neovim's agent is never found here.
----@param assignee string
----@return table? record
-function M.local_recipient(assignee)
-  if type(assignee) ~= "string" or assignee == "" then return nil end
-  if assignee == "user" or assignee:match("^autodoc:") then return nil end
-  local registry = require("auto-core.mailbox.registry")
-  local cands = { assignee }
-  if not assignee:find(":", 1, true) then cands[2] = "agent:" .. assignee end
-  for _, id in ipairs(cands) do
-    local ok, rec = pcall(registry.get, id)
-    if ok and type(rec) == "table" and rec.bare_id ~= "nvim" and rec.bare_id ~= "user" then
-      return rec
-    end
-  end
-  return nil
-end
-
-local function delivered(rec, mid)
-  for _, sub in ipairs({ "inbox", "processing", "archive" }) do
-    local dir = rec.subs and rec.subs[sub]
-    if dir and fs_path.exists(dir .. "/" .. mid .. ".json") then return true end
-  end
-  return false
-end
+-- ─── the notice ──────────────────────────────────────────────
 
 ---ASSIGNED heads every assignment message: it states the assignment, not who made it (the user in
 ---Neovim or AutoDoc, or a peer managing an epic's workload: the store doesn't know which).
 M.ASSIGNED = "You've been assigned a new task."
-
----FORWARDED is ASSIGNED's old name, kept so the v0.5 line removes nothing (deprecated: it goes with the
----file mailbox in v0.6.0).
-M.FORWARDED = M.ASSIGNED
 
 ---body is the assignment message's text: it states the assignment (M.ASSIGNED), names the task and
 ---its previous assignee (p.from), and quotes p.reason line by line as the task's note, so a reason
@@ -364,27 +343,7 @@ end
 ---while this assignment may be a peer's (a bare `todos.add`), whose reason says who made it.
 local function subject(p) return "[todos] task assigned to you: " .. tostring(p.title or p.id) end
 
----send writes one assignment message. Runs inside daemon.run.
----@return "done"|"skip"|"retry"
-local function send(at, store, rec, mid, p)
-  if delivered(rec, mid) then return "done" end
-  describe(at, store, p)
-  local opts = {
-    id = mid, to = rec.id, from = "nvim", kind = "message",
-    subject = subject(p),
-    body = M.body(p),
-  }
-  local built, berr = require("auto-core.mailbox.message").build(opts)
-  if not built then
-    -- refused for good: one bad message must not stop every later delivery
-    pcall(function() log().error(LOG_COMPONENT, "assignment " .. mid .. " not sent: " .. tostring(berr)) end)
-    return "skip"
-  end
-  local res, err = require("auto-core.mailbox").send(opts)
-  if res then return "done" end
-  warn("send", "assignment " .. mid .. " to " .. rec.id .. " not sent yet: " .. tostring(err))
-  return "retry"
-end
+local function now_ms() return vim.uv.hrtime() / 1e6 end
 
 ---effects keeps open buffers on files another client moved, and tells the panel.
 local function effects(store, c)
@@ -409,8 +368,6 @@ local function effects(store, c)
     end)
   end
 end
-
-local function now_ms() return vim.uv.hrtime() / 1e6 end
 
 ---unix_of is a change's time (`at`: RFC 3339, any offset, or Unix seconds or ms)
 ---in whole Unix seconds, truncated; nil when it carries none.
@@ -463,6 +420,43 @@ local function audit(mid, to, why)
   pcall(function() log().info(LOG_COMPONENT, "assignment " .. mid .. " to " .. to .. " skipped: " .. why) end)
 end
 
+local function grace_ms()
+  local grace = _cfg.grace_ms
+  if grace == nil then grace = M.GRACE_MS end
+  return grace
+end
+
+---deliver hands one assignment to the host's fallback, which types it into the agent's terminal.
+---Runs inside daemon.run. A key it typed in this process is never offered again. Not typed (no
+---agent of that name runs here yet, another Neovim's agent, the terminal refused, or the fallback
+---raised): held inside the grace window, so a later poll asks again; past it, skipped with one audit
+---line. No fallback set: skipped, said once.
+---@return "done"|"hold"|"skip"
+local function deliver(at, store, to, mid, p)
+  if _typed[mid] then return "done" end
+  if not _fallback then
+    if not _no_fallback_said then
+      _no_fallback_said = true
+      pcall(function() log().warn(LOG_COMPONENT, "no fallback is set: an assignment the crew doesn't take "
+        .. "reaches no agent (auto-agents v0.4.0 or later sets it)") end)
+    end
+    audit(mid, to, "the host set no fallback")
+    return "skip"
+  end
+  describe(at, store, p)
+  local recipient = to:find(":", 1, true) and to or ("agent:" .. to)
+  local ok, done, why = pcall(_fallback, { recipient = recipient, key = mid, subject = subject(p), body = M.body(p) })
+  if ok and done == true then
+    _typed[mid] = true
+    return "done"
+  end
+  if not ok then why = done end
+  if _started_at and now_ms() - _started_at < grace_ms() then return "hold" end
+  audit(mid, to, "the fallback didn't reach it within the grace window: " .. tostring(why or "no reason given"))
+  return "skip"
+end
+
+
 ---set_crew_recipient sets the host's crew send (or clears it: nil). fn(name, mid, msg, how) is asked
 ---for every assignment routed here, with the assignee's name (the `agent:` prefix and any instance
 ---stripped), its message id, msg = { kind, subject, body } and how = { unscoped = boolean }: an
@@ -473,13 +467,13 @@ end
 ---to an agent the crew delivers to, keyed by mid, so a repeat (a later poll, another Neovim with
 ---the same message) is the same send, and answers:
 ---  - true: the crew accepted it (rang, or its host carries it). The change is skipped and acked,
----    with one audit line: a file-mailbox notice would tell it twice.
+---    with one audit line: the fallback would tell it twice.
 ---  - "retry": its outcome is unknown. The change isn't acked; the next poll asks again, same mid,
----    for up to the grace window (GRACE_MS) from the first such answer. Past it, the file notice
----    is filed, with one audit line: a possible duplicate beats a lost assignment.
----  - anything else, or an error: not the crew's, or refused for certain. Routed as before. A key
----    the daemon refuses as reused (another Neovim sent the same mid with other content) is
----    refused for certain, so it gets the file notice too.
+---    for up to the grace window (GRACE_MS) from the first such answer. Past it, it goes to the
+---    fallback, with one audit line: a possible duplicate beats a lost assignment.
+---  - anything else, or an error: not the crew's, or refused for certain. It goes to the fallback.
+---    A key the daemon refuses as reused (another Neovim sent the same mid with other content) is
+---    refused for certain, so it goes to the fallback too.
 ---It runs inside the notifier's daemon.run, so it may call daemon.rpc synchronously.
 ---An AutoDoc window's assignment (`autodoc:<codename>`) is skipped before fn is asked: the window
 ---hands it over itself, so it is never sent twice.
@@ -489,10 +483,25 @@ function M.set_crew_recipient(fn)
   _crew_recipient = fn
 end
 
----route decides an assign change: "deliver" (with the recipient's record),
----"hold" (not registered here, inside the grace window), "skip" (nobody to
----tell: cleared, `user`, `autodoc:*`, sent through the crew, another project's,
----or past the window) or "retry" (the crew's send has no outcome yet).
+---set_fallback sets the host's fallback (or clears it: nil): fn(delivery) types an assignment the crew
+---didn't take into the agent's terminal, where delivery = { recipient = "agent:<name>[:<instance>]",
+---key = <message id, the same on every retry>, subject, body }. It answers true once typed, or
+---false, why: no agent of that name runs here yet, another Neovim's agent (the instance differs),
+---or the terminal refused. A key it answered true for is never offered again in this process;
+---after false (or an error) it is asked again on later polls inside the grace window, and the
+---assignment is skipped past it. auto-agents (v0.4.0) sets it. With none set, an assignment the
+---crew doesn't take is dropped with one log line: never an error, never a file.
+---It runs inside the notifier's daemon.run.
+---@param fn fun(delivery: table): boolean, string?
+function M.set_fallback(fn)
+  if fn ~= nil and type(fn) ~= "function" then error("auto-core.todo.notifier.set_fallback: fn must be a function or nil") end
+  _fallback = fn
+end
+
+---route decides an assign change: "deliver" (to the fallback: an agent of this
+---Neovim's the crew didn't take), "skip" (nobody to tell: cleared, `user`,
+---`autodoc:*`, sent through the crew, another project's, another instance's) or
+---"retry" (the crew's send has no outcome yet).
 ---
 ---A bare assignee is this project's agent (ADR 1791532020 r15 §2.5a): it is
 ---delivered only when the change's scope is this Neovim's, and one with no
@@ -501,10 +510,10 @@ end
 ---instance scope, `@<instance>` (a full id given at assign: its task keeps only
 ---the name), is delivered by that instance alone.
 ---Against an AutoDoc below protocol 30, which keeps no scope, the v0.5.0 rule
----stands: a bare name, by this instance's registry.
+---stands: a bare name is told by every Neovim that runs that agent.
 ---@param scope any the change's scope; nil, vim.NIL or "" for none
 ---@param p table the message's fields (id, from, reason, note), described here for the crew's send
----@return "deliver"|"hold"|"skip"|"retry", table?
+---@return "deliver"|"skip"|"retry"
 local function route(mid, to, scope, at, store, p)
   -- `autodoc:<codename>` is an AutoDoc window's assignment, which the window hands over itself. It is
   -- skipped here, before the crew hook (and the hook below asks only for a bare name or this
@@ -514,8 +523,7 @@ local function route(mid, to, scope, at, store, p)
   if type(to) ~= "string" or to == "" or to == "user" or to:match("^autodoc:") then
     return "skip"
   end
-  local grace = _cfg.grace_ms
-  if grace == nil then grace = M.GRACE_MS end
+  local grace = grace_ms()
   -- The scope decides first, the crew second: the hook sends under this Neovim's claim, and the
   -- daemon resolves a bare name in that scope first, so asking it for another project's assignment
   -- would hand that project's task to this project's agent of the same name.
@@ -564,7 +572,7 @@ local function route(mid, to, scope, at, store, p)
         warn("crew", "assignment " .. mid .. " to " .. to .. ": the crew's send has no outcome yet")
         return "retry"
       end
-      audit(mid, to, "the crew's send had no outcome within the grace window: filed as a notice")
+      audit(mid, to, "the crew's send had no outcome within the grace window: handed to the fallback")
     end
     _unsure[mid] = nil
     if ok and sent == true then
@@ -577,11 +585,11 @@ local function route(mid, to, scope, at, store, p)
       .. "a bare assignee reaches only its own project's agent")
     return "skip"
   end
-  local rec = M.local_recipient(to)
-  if rec then return "deliver", rec end
-  if _started_at and now_ms() - _started_at < grace then return "hold" end
-  audit(mid, to, "no such agent registered in this Neovim within the grace window")
-  return "skip"
+  if not ask then
+    audit(mid, to, "it names another Neovim's agent")
+    return "skip"
+  end
+  return "deliver"
 end
 
 local function ack(at, seq)
@@ -617,14 +625,14 @@ local function poll_store(store)
       for _, row in ipairs(daemon.list_of(page.snapshot)) do
         local mid = string.format("todo-%s-r%d-%s", store.id, cursor, tostring(row.id))
         local p = { id = row.id, scope = row.scope, note = "Sent again after a resync: the original reason was lost." }
-        local verdict, rec = route(mid, row.assignee, row.scope, at, store, p)
-        if verdict == "hold" then
-          held = true
-        elseif verdict == "retry" or (verdict == "deliver" and send(at, store, rec, mid, p) == "retry") then
+        local verdict = route(mid, row.assignee, row.scope, at, store, p)
+        if verdict == "retry" then
           return -- not acked: the next poll resyncs again
+        elseif verdict == "deliver" and deliver(at, store, row.assignee, mid, p) == "hold" then
+          held = true
         end
       end
-      if held then return end -- not acked: delivered rows are not written twice
+      if held then return end -- not acked: delivered rows are not typed twice
       if ack(at, cursor) then bump_watermark(store.id, cursor) end
       _floors[store.id] = cursor
       return
@@ -655,8 +663,8 @@ local function poll_store(store)
     _floors[store.id] = floor
     -- acked: the last change of the handled prefix (delivered, or skipped for
     -- good). A held change stops the prefix; later changes are still delivered,
-    -- and the next poll reads them again from the held one, which writes nothing
-    -- twice (the sender's duplicate check).
+    -- and the next poll reads them again from the held one, which types nothing
+    -- twice (_typed).
     local acked, held, stopped, any = nil, false, false, false
     for _, c in ipairs(changes) do
       local seq = tonumber(c.seq) or 0
@@ -665,12 +673,12 @@ local function poll_store(store)
         if c.kind == "assign" then
           local mid = M.message_id(store.id, seq)
           local p = { id = c.id, from = c.from, reason = c.reason, scope = c.scope }
-          local verdict, rec = route(mid, c.to, c.scope, at, store, p)
-          if verdict == "hold" then
-            handled = false
-          elseif verdict == "retry" or (verdict == "deliver" and send(at, store, rec, mid, p) == "retry") then
+          local verdict = route(mid, c.to, c.scope, at, store, p)
+          if verdict == "retry" then
             stopped = true
             break
+          elseif verdict == "deliver" and deliver(at, store, c.to, mid, p) == "hold" then
+            handled = false
           end
         end
         if seq > (_applied[store.id] or 0) then
@@ -728,7 +736,8 @@ function M.poll_all(done)
   end)
 end
 
----poll_soon polls now (after an assignment this Neovim made). A no-op while the
+---poll_soon polls now: after an assignment this Neovim made, or an agent's spawn (a
+---held assignment for it is typed now, not at the next tick). A no-op while the
 ---notifier is not running.
 function M.poll_soon()
   if _running then M.poll_all() end
@@ -796,8 +805,8 @@ end
 
 ---start runs the notifier: on Neovim start (once VimEnter has fired) it
 ---connects, catches up, and polls every POLL_MS while connected. Started by
----the mailbox router's start; `vim.g.auto_core_todo_notifier = false` turns it
----off. Idempotent.
+---auto-core's setup; `vim.g.auto_core_todo_notifier = false` turns it off.
+---Idempotent.
 function M.start()
   if _running or vim.g.auto_core_todo_notifier == false then return end
   _running = true
@@ -808,11 +817,6 @@ function M.start()
     _subs = {
       events.subscribe("autodoc.session:connected", function() vim.schedule(on_connected) end),
       events.subscribe("autodoc.session:disconnected", function() vim.schedule(on_disconnected) end),
-      -- A mailbox just registered (an agent spawned): poll at once, so a held
-      -- assignment for it is delivered now rather than at the next tick.
-      events.subscribe("core.mailbox:registered", function()
-        vim.schedule(function() if _running then M.poll_all() end end)
-      end),
     }
   end
   if vim.v.vim_did_enter == 1 then
@@ -854,6 +858,7 @@ function M._reset_for_tests()
   _started_wall, _timed = nil, {}
   _own, _prepared, _unscoped_said = {}, false, false
   _crew_recipient = nil
+  _fallback, _typed, _no_fallback_said = nil, {}, false
 end
 
 return M
