@@ -217,7 +217,10 @@ run("ack fails after the send", function()
 end)
 
 run("a terminal that refuses holds the change inside the window; the next poll types it, same key", function()
+  notifier.stop() -- the window counts from the notifier's start: start it again with one
   notifier._configure({ poll_ms = false, watermark_dir = wm, grace_ms = 60000 })
+  notifier.start()
+  notifier._connect()
   refusing = "the terminal refused the paste"
   local t = todo.get("2026-10-01-task-3")
   todo.assign(t.id, "agent:lector", "the terminal refuses")
@@ -230,7 +233,10 @@ run("a terminal that refuses holds the change inside the window; the next poll t
   poll()
   ok("typed on the next poll, under the same key", got(mid) ~= nil and offers(mid) == 2, offers(mid))
   ok("then acked", notifier.watermark(store_id) == seq)
+  notifier.stop()
   notifier._configure({ poll_ms = false, watermark_dir = wm, grace_ms = 0 })
+  notifier.start()
+  notifier._connect()
 end)
 
 run("a fallback that raises is a refusal, never an error", function()
