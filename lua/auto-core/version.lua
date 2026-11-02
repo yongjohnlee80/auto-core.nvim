@@ -9,19 +9,20 @@
 ---`.git`, `.tasks`, `.log`, `.health`). It bumps independently of
 ---`version`:
 ---  - patch: bug fixes only, no API change
----  - minor: API additions (new functions, new topics, new state keys)
----  - major: API removals or behavior changes
+---  - minor: API additions (new functions, new topics, new state keys), and before 1.0 an API
+---    removal too (0.1 -> 0.2: v0.6.0 removed core.mailbox)
+---  - major: API removals or behavior changes, from 1.0
 ---
 ---Consumers branch on `api_version` when they need feature-detection
 ---without pinning a specific package version:
 ---
 ---  if require("auto-core").api_version >= "0.2" then ... end
 ---
----v0.1.0 (2026-05-11) is the **solid beta** — first release covered
----by the `auto-core-maintenance` convention's additive-only minor-
----bump rule. Consumers can safely pin via `version = "^0.1.0"` (caret)
----and trust that no future v0.X.Y will rename, remove, or break-shape
----any existing function, state key, topic, or persisted schema.
+---v0.1.0 (2026-05-11) is the **solid beta**. The stability rule is additive within a minor line:
+---no v0.X.Y patch renames, removes or break-shapes an existing function, state key, topic or
+---persisted schema; a new minor (v0.X.0) may remove one, and its CHANGELOG entry names what was
+---removed and why. Consumers pin via `version = "^0.X.0"` (caret), which takes the patches of one
+---minor line and never crosses to the next unprompted.
 ---
 ---@module 'auto-core.version'
 
@@ -1022,6 +1023,7 @@ return {
   -- and log events are gone; the command registry is auto-core.commands, the instance id
   -- auto-core.instance; the notifier hands an assignment the crew didn't take to the host's
   -- fallback, never to a file; :AutoCoreMailboxExport reads an old tree's archives.
+  -- api_version 0.2: core.mailbox is gone, which a consumer can tell by it.
   version     = "0.6.0",
-  api_version = "0.1",
+  api_version = "0.2",
 }

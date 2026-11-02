@@ -3,19 +3,23 @@
 All notable changes to `auto-core.nvim` are documented here.
 
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com),
-and from `v0.1.0` onward this project follows the
-[`auto-core-maintenance`](https://github.com/yongjohnlee80/auto-agents)
-convention's **additive-only minor-bump** rule: no `v0.X.Y` will ever
-rename, remove, or break-shape an existing function, state-namespace
-key, event topic, or persisted schema. Removals require a deprecation
-cycle plus a major bump.
+and from `v0.1.0` onward this project's stability rule is
+**additive within a minor line**: no `v0.X.Y` patch renames, removes or
+break-shapes an existing function, state-namespace key, event topic or
+persisted schema. A new minor (`v0.X.0`) may remove one, and its CHANGELOG
+entry names what was removed and why. This is the rule from v0.6.0 (Johno's ruling, 2026-11-02);
+through v0.5.x it was additive-only.
 
 
 ## [v0.6.0] — 2026-11-02 — the file mailbox is retired
 
-ADR 1793271500, phase 5. A minor by Johno's ruling: it removes the file mailbox, a public surface,
-in v0.6.0. This is an exception to the additive-only rule above that Johno ruled deliberately, as
-the joint release with auto-agents v0.4.0. AutoDoc's crew carries every message now. **Release it
+ADR 1793271500, phase 5: the joint release with auto-agents v0.4.0. **It removes the file
+mailbox** (`auto-core.mailbox`: router, transport, path, message, bootstrap, viewer, its topics,
+log events and `:AutoCoreMailbox`), as a new minor may. **Why:** AutoDoc's crew carries every
+message between agents and from the user, so a second, file-based transport only split delivery
+and kept stale state. Its two parts that outlive it moved first (the command registry to
+`auto-core.commands`, the instance id to `auto-core.instance`). **`api_version` is 0.2**, so a
+consumer can tell `core.mailbox` is gone. **Release it
 only after auto-run v0.1.20 and AutoDoc v0.3.8**: before them, auto-run's `run.*` verbs and
 AutoDoc's Lua verbs register only on the mailbox's registry. **auto-agents v0.4.0 needs this
 release** (it uses `auto-core.commands`), so autovim moves both carets together.
