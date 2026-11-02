@@ -61,7 +61,12 @@ local function handler(d)
   typed[#typed + 1] = d
   return true
 end
-notifier.set_fallback(handler)
+---set_fallback sets the host's fallback, when this notifier has one (a red run against a notifier
+---from before v0.6.0 has none: its cells then fail one by one instead of the suite aborting here).
+local function set_fallback(fn)
+  if type(notifier.set_fallback) == "function" then notifier.set_fallback(fn) end
+end
+set_fallback(handler)
 
 ---inbox is what was typed to name's agent; got the delivery typed under key mid.
 local function inbox(name)
@@ -227,11 +232,14 @@ run("a terminal that refuses holds the change inside the window; the next poll t
   poll()
   local seq = assign_seq(t.id)
   local mid = notifier.message_id(store_id, seq)
-  ok("nothing typed while the terminal refuses", got(mid) == nil and offers(mid) == 1, offers(mid))
+  -- offered on every poll inside the window (the reconnect's catch-up is one more)
+  ok("nothing typed while the terminal refuses", got(mid) == nil and offers(mid) >= 1, offers(mid))
   ok("the cursor did not move past it", (notifier.watermark(store_id) or 0) < seq, notifier.watermark(store_id))
   refusing = nil
+  local asked = offers(mid)
   poll()
-  ok("typed on the next poll, under the same key", got(mid) ~= nil and offers(mid) == 2, offers(mid))
+  ok("typed on the next poll, under the same key, offered once more", got(mid) ~= nil
+    and offers(mid) == asked + 1, offers(mid) - asked)
   ok("then acked", notifier.watermark(store_id) == seq)
   notifier.stop()
   notifier._configure({ poll_ms = false, watermark_dir = wm, grace_ms = 0 })
@@ -240,7 +248,7 @@ run("a terminal that refuses holds the change inside the window; the next poll t
 end)
 
 run("a fallback that raises is a refusal, never an error", function()
-  notifier.set_fallback(function() error("the handler failed") end)
+  set_fallback(function() error("the handler failed") end)
   local t = todo.get("2026-10-01-task-2")
   local okc = pcall(todo.assign, t.id, "agent:lector", "the handler raises")
   ok("the assignment itself is unaffected", okc)
@@ -249,7 +257,7 @@ run("a fallback that raises is a refusal, never an error", function()
   ok("the poll finished", polled)
   ok("past the window (0 here) it is skipped and acked", (notifier.watermark(store_id) or 0) >= seq,
     notifier.watermark(store_id))
-  notifier.set_fallback(handler)
+  set_fallback(handler)
   ok("set_fallback refuses what isn't a function", not pcall(notifier.set_fallback, "yes"))
 end)
 
@@ -299,7 +307,7 @@ run("watermark", function()
   -- a new process: a new instance id, so a new consumer
   notifier._reset_for_tests()
   new_process("3333333333-44444")
-  notifier.set_fallback(handler)
+  set_fallback(handler)
   notifier._configure({ poll_ms = false, watermark_dir = wm, grace_ms = 0 })
   notifier.start()
   notifier._connect()
@@ -312,7 +320,7 @@ run("watermark", function()
   notifier._reset_for_tests()
   vim.fn.delete(wm, "rf")
   new_process("5555555555-66666")
-  notifier.set_fallback(handler)
+  set_fallback(handler)
   local past = os.time()
   vim.wait(3000, function() return os.time() > past end, 50) -- every change so far is a second older
   notifier._configure({ poll_ms = false, watermark_dir = wm, grace_ms = 0, skew_ms = 0 })
@@ -355,7 +363,7 @@ end)
 section("held: an assignment made before its agent starts is delivered when it starts")
 run("hold", function()
   notifier._reset_for_tests()
-  notifier.set_fallback(handler)
+  set_fallback(handler)
   notifier._configure({ poll_ms = false, watermark_dir = wm, grace_ms = 60000 })
   notifier.start()
   notifier._connect()
@@ -387,7 +395,7 @@ end)
 section("past the grace window: a recipient still with no slot is skipped and acked, once, as an audit line")
 run("grace", function()
   notifier._reset_for_tests()
-  notifier.set_fallback(handler)
+  set_fallback(handler)
   notifier._configure({ poll_ms = false, watermark_dir = wm, grace_ms = 300 })
   notifier.start()
   notifier._connect()
@@ -513,7 +521,7 @@ run("a new Neovim prunes once, at its first floor", function()
   local dir = with_dir("wm-start")
   W("1000000011-999999999", { [store_id] = head() })
   new_process("7777777777-" .. vim.fn.getpid())
-  notifier.set_fallback(handler)
+  set_fallback(handler)
   notifier.start()
   notifier._connect()
   poll()
@@ -531,7 +539,7 @@ local function fresh(inst)
   notifier._reset_for_tests()
   new_process(inst)
   slots.vision = true
-  notifier.set_fallback(handler)
+  set_fallback(handler)
   notifier._configure({ poll_ms = false, watermark_dir = env.tmp .. "/wm-scope", grace_ms = 0 })
   notifier.start()
   notifier._connect()
@@ -738,7 +746,7 @@ run("first poll after start", function()
   notifier._reset_for_tests()
   vim.fn.delete(wm2, "rf")
   new_process("7676767676-11111")
-  notifier.set_fallback(handler)
+  set_fallback(handler)
   local past = os.time()
   vim.wait(3000, function() return os.time() > past end, 50) -- every change so far is history
   -- started, but never connected (ensure answers nothing), so no catch-up runs: the store's first
@@ -764,7 +772,7 @@ run("first poll after start", function()
   past = os.time()
   vim.wait(3000, function() return os.time() > past end, 50) -- F2 is older than the next start
   new_process("7676767676-22222")
-  notifier.set_fallback(handler)
+  set_fallback(handler)
   notifier._configure({ poll_ms = false, watermark_dir = wm2, grace_ms = 0, skew_ms = 0 })
   notifier.start()
   notifier._connect()
@@ -777,12 +785,13 @@ end)
 section("no fallback set (auto-agents before v0.4.0, or not loaded): one log line, dropped, never an error, never a file")
 run("no fallback", function()
   fresh("4545454545-11111")
-  notifier.set_fallback(nil)
+  set_fallback(nil)
+  local n0 = #offered -- what the fresh start's catch-up offered, before the fallback went
   local log = require("auto-core.log")
   local m1 = assigned("N1", "agent:vision", SCOPE)
   local m2, s2 = assigned("N2", "agent:vision", SCOPE)
   ok("both are acked: dropped, not held", (notifier.watermark(store_id) or 0) >= s2, notifier.watermark(store_id))
-  ok("nothing was typed", got(m1) == nil and got(m2) == nil and #offered == 0)
+  ok("nothing was offered or typed", got(m1) == nil and got(m2) == nil and #offered == n0, #offered - n0)
   local said = 0
   for _, e in ipairs(log.recent()) do
     if tostring(e.message):find("no fallback is set", 1, true) then said = said + 1 end
@@ -791,7 +800,7 @@ run("no fallback", function()
   ok("no mailbox folder appears anywhere in the sandbox",
     #vim.fn.globpath(env.tmp, "**/.auto-agents", true, true) == 0
       and #vim.fn.globpath(env.tmp, "**/inbox", true, true) == 0)
-  notifier.set_fallback(handler)
+  set_fallback(handler)
 end)
 
 section("an assignment's message states the assignment, and quotes its reason as the note")
