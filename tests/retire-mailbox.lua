@@ -114,5 +114,81 @@ do
   end
 end
 
+-- ─── the file mailbox is gone ────────────────────────────────
+
+section("no file mailbox: the modules, the topics, the commands and the log events are gone")
+do
+  for _, name in ipairs({ "auto-core.mailbox", "auto-core.mailbox.router", "auto-core.mailbox.transport",
+      "auto-core.mailbox.registry", "auto-core.mailbox.path", "auto-core.mailbox.message",
+      "auto-core.mailbox.bootstrap", "auto-core.mailbox.ui", "auto-core.mailbox.commands",
+      "auto-core.debug.mailbox" }) do
+    ok(name .. " no longer loads", not pcall(require, name))
+  end
+  local core = require("auto-core")
+  ok("auto-core has no mailbox field", core.mailbox == nil)
+  ok("auto-core.debug has no mailbox probe", require("auto-core.debug").mailbox == nil)
+
+  local topics = require("auto-core.events.topics")
+  local left = {}
+  for topic in pairs(topics) do
+    if type(topic) == "string" and (topic:match("^core%.mailbox:") or topic == "core.command:executed"
+        or topic == "core.command:rejected") then
+      left[#left + 1] = topic
+    end
+  end
+  table.sort(left)
+  ok("no core.mailbox:* topic, nor the envelope path's command topics", #left == 0, table.concat(left, ", "))
+  ok("core.command:registered stays (the registry announces)", topics["core.command:registered"] ~= nil)
+
+  vim.cmd("runtime! plugin/auto-core.lua")
+  ok(":AutoCoreMailbox is gone", vim.fn.exists(":AutoCoreMailbox") == 0)
+  local probes = vim.fn.getcompletion("AutoCoreDebug ", "cmdline")
+  ok(":AutoCoreDebug offers no mailbox probe", not vim.tbl_contains(probes, "mailbox"), vim.inspect(probes))
+  local stale = {}
+  for _, e in ipairs(require("auto-core.log").events.list("auto-core")) do
+    if tostring(e.event):find("mailbox", 1, true) then stale[#stale + 1] = e.event end
+  end
+  ok("no mailbox log events are registered", #stale == 0, table.concat(stale, ", "))
+end
+
+-- ─── setup ───────────────────────────────────────────────────
+
+section("setup: a leftover mailbox config warns once; nothing is created; the notifier starts")
+do
+  local proj = vim.fn.tempname() .. "-proj"
+  vim.fn.mkdir(proj, "p")
+  local old_cwd = vim.fn.getcwd()
+  vim.cmd("cd " .. vim.fn.fnameescape(proj))
+  local notices = {}
+  local real_notify = vim.notify
+  vim.notify = function(msg, level) notices[#notices + 1] = { msg = tostring(msg), level = level } end
+
+  local core = require("auto-core")
+  local mbroot = proj .. "/mbroot"
+  local s_ok, s_err = pcall(core.setup, { mailbox = { root = mbroot, autostart = true } })
+  ok("setup with a leftover mailbox = {...} doesn't fail", s_ok, s_err)
+  pcall(core.setup, { mailbox = { root = mbroot } })
+  local warned = {}
+  for _, n in ipairs(notices) do
+    if n.msg:find("mailbox", 1, true) then warned[#warned + 1] = n end
+  end
+  ok("one warning names it, over two setups", #warned == 1, vim.inspect(warned))
+  ok("… at WARN", warned[1] ~= nil and warned[1].level == vim.log.levels.WARN, vim.inspect(warned[1]))
+  local before = #notices
+  pcall(core.setup, {})
+  ok("a setup without it says nothing more", #notices == before, vim.inspect(notices))
+  vim.notify = real_notify
+
+  ok("setup creates no mailbox root", vim.fn.isdirectory(mbroot) == 0)
+  ok("… and no .auto-agents/mailbox in the project", vim.fn.isdirectory(proj .. "/.auto-agents") == 0)
+  ok("… nor anywhere under it", #vim.fn.globpath(proj, "**/mailbox", true, true) == 0)
+
+  local notifier = require("auto-core.todo.notifier")
+  ok("setup starts the assignment notifier", notifier.is_running())
+  notifier.stop()
+  ok("setup registers editor.open on auto-core.commands", require("auto-core.commands").get("editor.open") ~= nil)
+  vim.cmd("cd " .. vim.fn.fnameescape(old_cwd))
+end
+
 io.stdout:write(string.format("\n%d passed, %d failed\n", pass, fail)); io.stdout:flush()
 vim.cmd(fail == 0 and "qa!" or "cq!")
