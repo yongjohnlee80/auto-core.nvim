@@ -345,7 +345,7 @@ local function subject(p) return "[todos] task assigned to you: " .. tostring(p.
 
 local function now_ms() return vim.uv.hrtime() / 1e6 end
 
----effects keeps open buffers on files another client moved, and tells the panel.
+---effects keeps open buffers on files another client moved or removed, and tells the panel.
 local function effects(store, c)
   local function abs(p)
     if type(p) ~= "string" or p == "" then return nil end
@@ -359,6 +359,8 @@ local function effects(store, c)
       buffers.retarget(from, to)
     elseif c.op == "in-place" and (to or from) then
       buffers.reload(to or from)
+    elseif c.op == "delete" and (c.kind == "remove" or c.kind == "remove_malformed") and (from or to) then
+      buffers.removed(from or to) -- a save from a buffer on it would write the task back
     end
   end
   if c.kind == "status" or c.kind == "archive" then
