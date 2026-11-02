@@ -19,10 +19,11 @@ introspection, and an agent task-queue infrastructure.
 ## Status
 
 **`v0.2.x` — solid beta.** `v0.1.0` (2026-05-11) was the first release
-covered by the **additive-only minor-bump** stability rule: every
-`v0.X.Y` from there forward will never rename, remove, or break-shape an
-existing function, state-namespace key, event topic, or persisted schema.
-Removals require deprecation + a major bump. See the
+covered by the stability rule, now **additive within a minor line**: no
+`v0.X.Y` patch renames, removes or break-shapes an existing function,
+state-namespace key, event topic or persisted schema; a new minor (`v0.X.0`)
+may remove one, and its CHANGELOG entry names what was removed and why
+(v0.6.0 removed the file mailbox). See the
 [`auto-core-maintenance` convention](https://github.com/yongjohnlee80/auto-agents)
 in the auto-agents kb for the full eleven-rule contract.
 
@@ -43,7 +44,7 @@ in the auto-agents kb for the full eleven-rule contract.
 | `git.log` + `git.diff` + `ui.marks` + `ui.diffview` | `v0.2.0` |
 | `ui.edit.open` + the `editor.open` verb — open a file from outside the layout | `v0.2.x` |
 | No file mailbox: `commands`, `instance`, the notifier through the crew or the host's fallback, `:AutoCoreMailboxExport` | **`v0.6.0` ← here** |
-| Family cleanup + post-1.0 prep | `v0.X.0` minors (additive only) |
+| Family cleanup + post-1.0 prep | `v0.X.0` minors (a removal named in its CHANGELOG entry) |
 | API freeze | `v1.0.0` |
 
 See [ADR 0006](https://github.com/yongjohnlee80/auto-agents) in the

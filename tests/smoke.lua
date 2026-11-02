@@ -114,8 +114,8 @@ ok("M.version is semver and MATCHES the CHANGELOG's newest entry", (function()
   end
   return false, "no version heading found in CHANGELOG.md"
 end)(), "module=" .. tostring(core.version))
-ok("M.api_version is 0.1 (auto-core.todo additive; all prior surfaces unchanged)",
-  select(1, eq(core.api_version, "0.1")))
+ok("M.api_version is 0.2 (v0.6.0 removed core.mailbox)",
+  select(1, eq(core.api_version, "0.2")))
 ok("M.setup is a function", type(core.setup) == "function")
 ok("M.config table present",
   type(core.config) == "table"
@@ -4057,7 +4057,7 @@ local v = require("auto-core.version")
 -- Shape only here; the CHANGELOG agreement is asserted once, above.
 ok("version is semver", type(v.version) == "string"
   and v.version:match("^%d+%.%d+%.%d+$") ~= nil, "got " .. tostring(v.version))
-ok("api_version is 0.1 (auto-core.todo additive surface)", v.api_version == "0.1")
+ok("api_version is 0.2 (v0.6.0 removed core.mailbox)", v.api_version == "0.2")
 -- :h api_version semver gate consumers will use.
 local core = require("auto-core")
 ok("M.debug is a table on the public surface",
