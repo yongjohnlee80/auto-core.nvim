@@ -3,12 +3,12 @@
 All notable changes to `auto-core.nvim` are documented here.
 
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com),
-and from `v0.1.0` onward this project's stability rule is
-**additive within a minor line**: no `v0.X.Y` patch renames, removes or
-break-shapes an existing function, state-namespace key, event topic or
-persisted schema. A new minor (`v0.X.0`) may remove one, and its CHANGELOG
-entry names what was removed and why. This is the rule from v0.6.0 (Johno's ruling, 2026-11-02);
-through v0.5.x it was additive-only.
+and its stability rule is **additive within a minor line**: no `v0.X.Y`
+patch renames, removes or break-shapes an existing function,
+state-namespace key, event topic or persisted schema. A new minor
+(`v0.X.0`) may remove one, and its CHANGELOG entry names what was removed
+and why. That is the rule from v0.6.0 (Johno's ruling, 2026-11-02); v0.1.0
+through v0.5.x were additive-only.
 
 
 ## [v0.6.0] — 2026-11-02 — the file mailbox is retired
