@@ -7,7 +7,7 @@
 ---when the scope is its own.
 ---
 ---The scope is the host's: auto-agents sets `"auto-agents:" .. session_project_key` at setup,
----a key that survives a restart where the mailbox instance id does not. auto-core knows nothing
+---a key that survives a restart where the instance id (auto-core.instance) does not. auto-core knows nothing
 ---of auto-agents. With no scope set, an assignment carries none.
 ---@module 'auto-core.todo.scope'
 
@@ -21,7 +21,7 @@ M.PROTOCOL = 30
 -- (one still loaded in a Neovim from before an upgrade) can't deliver it in every project.
 M.READER_PROTOCOL = 33
 
--- A scope that names one instance, not a project: "@" .. its mailbox instance id. It routes one
+-- A scope that names one instance, not a project: "@" .. its instance id. It routes one
 -- delivery to that instance alone; see route_of.
 M.INSTANCE_PREFIX = "@"
 
@@ -70,7 +70,7 @@ function M.reads_scoped() return M.protocol() >= M.READER_PROTOCOL end
 
 ---route_of splits an assignee into the name a task keeps and the scope that routes it. A task's
 ---assignee is the agent's name only (Johno, 2026-10-29: "the full address is only temp"), so a full
----mailbox id, `agent:<name>:<instance>`, keeps `agent:<name>` and routes this one delivery to its
+---agent id, `agent:<name>:<instance>`, keeps `agent:<name>` and routes this one delivery to its
 ---instance with the scope `@<instance>`. Any other assignee is kept as it is, with no route.
 ---@param assignee string
 ---@return string name, string|nil scope
@@ -97,7 +97,7 @@ function M.scoped() return M.protocol() >= M.PROTOCOL end
 
 ---assign_params are todos.assign's params after id and rev: the assignee, the reason, and this
 ---Neovim's scope when AutoDoc takes one and a scope is set. The one place both writers (the
----panel's Assign and the todos.assign mailbox verb) build them.
+---panel's Assign and the todos.assign verb) build them.
 ---@param assignee string "" clears
 ---@param reason string|nil
 ---@return any[]
@@ -137,7 +137,7 @@ function M.add_params(spec)
 end
 
 ---bare is whether assignee names an agent by name alone (`gold-man`, `agent:gold-man`), as
----against a full mailbox id (`agent:gold-man:<instance>`), which names its instance.
+---against a full agent id (`agent:gold-man:<instance>`), which names its instance.
 ---@param assignee string
 ---@return boolean
 function M.bare(assignee)

@@ -59,7 +59,7 @@ local _patterns = {}
 ---The static `events/topics.lua` registry stays the canonical home
 ---for auto-core's own topics; this table extends it at runtime.
 ---Entries carry `registered_by` for ownership (same clobber rule as
----the mailbox command registry: a different owner can't overwrite).
+---the command registry: a different owner can't overwrite).
 ---@type table<string, AutoCoreTopicSpec|{ registered_by: string }>
 local _dynamic_topics = {}
 
