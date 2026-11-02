@@ -1015,6 +1015,9 @@ return {
   -- daemon or KB value for it is ignored. The mailbox and todo store use project_root too.
   -- v0.5.7: an assignment's message says it is forwarded, not the user's instruction, names its
   -- assigner, and quotes its reason (the crew delivers it from the user).
-  version     = "0.5.7",
+  -- v0.5.8: an assignment's message states the assignment ("You've been assigned a new task."), names
+  -- the task and quotes its reason as the note; it names no assigner (notifier.ASSIGNED;
+  -- notifier.FORWARDED, its old name, is a deprecated alias).
+  version     = "0.5.8",
   api_version = "0.1",
 }
