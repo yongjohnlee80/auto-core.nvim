@@ -492,7 +492,7 @@ end
 ---assignment is skipped past it. auto-agents (v0.4.0) sets it. With none set, an assignment the
 ---crew doesn't take is dropped with one log line: never an error, never a file.
 ---It runs inside the notifier's daemon.run.
----@param fn fun(delivery: table): boolean, string?
+---@param fn (fun(delivery: table): boolean, string?)?
 function M.set_fallback(fn)
   if fn ~= nil and type(fn) ~= "function" then error("auto-core.todo.notifier.set_fallback: fn must be a function or nil") end
   _fallback = fn
