@@ -190,5 +190,83 @@ do
   vim.cmd("cd " .. vim.fn.fnameescape(old_cwd))
 end
 
+-- ─── the archive export ──────────────────────────────────────
+
+section(":AutoCoreMailboxExport: an old mailbox tree's archives to JSONL, read-only")
+do
+  local root = vim.fn.tempname() .. "-mailbox"
+  local function put(rel, text)
+    local p = root .. "/" .. rel
+    vim.fn.mkdir(vim.fn.fnamemodify(p, ":h"), "p")
+    local f = assert(io.open(p, "w")); f:write(text); f:close()
+  end
+  put("1793000000-1/agent:lector/archive/m1.json", vim.json.encode({ id = "m1", from = "nvim", body = "one" }))
+  put("1793000000-1/agent:lector/archive/m2.json", vim.json.encode({ id = "m2", from = "agent:vision", body = "two" }))
+  put("1793000000-1/nvim/archive/m3.json", vim.json.encode({ id = "m3", kind = "command", command = "peek" }))
+  put("1793000000-1/nvim/archive/broken.json", "{ not json")
+  put("1793000000-1/agent:lector/inbox/waiting.json", vim.json.encode({ id = "w1" }))
+  put("bootstrap-mailbox.md", "# old bootstrap\n")
+
+  local function snapshot()
+    local out = {}
+    for _, p in ipairs(vim.fn.globpath(root, "**", true, true)) do
+      local st = vim.uv.fs_stat(p)
+      out[p] = st and (st.type .. ":" .. st.size .. ":" .. st.mtime.sec .. ":" .. st.mtime.nsec) or "?"
+    end
+    return out
+  end
+  local before = snapshot()
+
+  local loaded, export = pcall(require, "auto-core.mailbox_export")
+  ok("auto-core.mailbox_export loads", loaded, export)
+  if not loaded then export = {} end
+  local out = vim.fn.tempname() .. "-export.jsonl"
+  local res, err
+  if type(export.export) == "function" then res, err = export.export({ root = root, out = out }) end
+  ok("export answers the count and the file", type(res) == "table" and res.count == 4 and res.out == out,
+    vim.inspect({ res, err }))
+  local lines = vim.fn.filereadable(out) == 1 and vim.fn.readfile(out) or {}
+  ok("one line per archived message (inbox and other files left out)", #lines == 4, #lines)
+  local rows = {}
+  for _, l in ipairs(lines) do
+    local okd, row = pcall(vim.json.decode, l)
+    if okd and type(row) == "table" then rows[#rows + 1] = row end
+  end
+  local paths = {}
+  for _, r in ipairs(rows) do paths[#paths + 1] = r.path end
+  ok("each line is JSON naming its path under the root, in path order", vim.deep_equal(paths, {
+    "1793000000-1/agent:lector/archive/m1.json", "1793000000-1/agent:lector/archive/m2.json",
+    "1793000000-1/nvim/archive/broken.json", "1793000000-1/nvim/archive/m3.json" }), vim.inspect(paths))
+  ok("a message is carried whole", rows[2] and type(rows[2].message) == "table" and rows[2].message.from == "agent:vision"
+    and rows[2].message.body == "two", vim.inspect(rows[2]))
+  ok("a file that doesn't parse is carried raw, with why", rows[3] and rows[3].message == nil
+    and rows[3].raw == "{ not json" and type(rows[3].decode_error) == "string", vim.inspect(rows[3]))
+  ok("the tree is untouched: nothing written, moved or removed", vim.deep_equal(snapshot(), before))
+
+  local inside = root .. "/export.jsonl"
+  local r2, e2
+  if type(export.export) == "function" then r2, e2 = export.export({ root = root, out = inside }) end
+  ok("an output inside the tree is refused", r2 == nil and type(e2) == "string", vim.inspect({ r2, e2 }))
+  ok("… and nothing is written there", vim.fn.filereadable(inside) == 0 and vim.deep_equal(snapshot(), before))
+  local gone = vim.fn.tempname() .. "-none"
+  local out3 = vim.fn.tempname() .. "-none.jsonl"
+  local r3, e3
+  if type(export.export) == "function" then r3, e3 = export.export({ root = gone, out = out3 }) end
+  ok("a root that doesn't exist is an error, and no file is made", r3 == nil and type(e3) == "string"
+    and vim.fn.filereadable(out3) == 0, vim.inspect({ r3, e3 }))
+
+  vim.cmd("runtime! plugin/auto-core.lua")
+  ok(":AutoCoreMailboxExport exists", vim.fn.exists(":AutoCoreMailboxExport") == 2)
+  local out4 = vim.fn.tempname() .. "-cmd.jsonl"
+  local real_notify = vim.notify
+  local said
+  vim.notify = function(msg) said = tostring(msg) end
+  pcall(vim.cmd, "AutoCoreMailboxExport " .. vim.fn.fnameescape(root) .. " " .. vim.fn.fnameescape(out4))
+  vim.notify = real_notify
+  ok(":AutoCoreMailboxExport <root> <out> writes the file and says where",
+    #(vim.fn.filereadable(out4) == 1 and vim.fn.readfile(out4) or {}) == 4 and said ~= nil and said:find(out4, 1, true) ~= nil,
+    tostring(said))
+end
+
 io.stdout:write(string.format("\n%d passed, %d failed\n", pass, fail)); io.stdout:flush()
 vim.cmd(fail == 0 and "qa!" or "cq!")
