@@ -191,6 +191,25 @@ end, {
   desc = "auto-core diagnostic probes (winlog)",
 })
 
+-- :AutoCoreMailboxExport [root] [out] — an old file mailbox's archives, as JSONL.
+--   v0.6.0 has no file mailbox; the trees an older auto-core wrote stay on disk.
+--   This only reads one (default: the project's .auto-agents/mailbox) and writes
+--   one JSON line per archived message to out (default: under stdpath("state")).
+vim.api.nvim_create_user_command("AutoCoreMailboxExport", function(opts)
+  local export = require("auto-core.mailbox_export")
+  local res, err = export.export({ root = opts.fargs[1], out = opts.fargs[2] })
+  if not res then
+    vim.notify("AutoCoreMailboxExport: " .. tostring(err), vim.log.levels.ERROR)
+    return
+  end
+  vim.notify(string.format("AutoCoreMailboxExport: %d archived message(s) written to %s", res.count, res.out),
+    vim.log.levels.INFO)
+end, {
+  nargs = "*",
+  complete = "file",
+  desc = "Export an old file mailbox's archives to JSONL (read-only)",
+})
+
 -- :AutoCoreLogEvent — manage per-event notification subscriptions
 -- registered via `auto-core.log.events`. ADR 0021 §5.
 --
