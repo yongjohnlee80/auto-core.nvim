@@ -1,6 +1,8 @@
--- tests/todo-notifier.lua — AutoDoc's assignment changes become mailbox messages
+-- tests/todo-notifier.lua — AutoDoc's assignment changes reach this Neovim's agents
 -- (ADR 1791532020 §2.5; design note 2026-10-13 §5 and the decisions: a consumer
--- per Neovim, local recipients only, skip and ack the rest).
+-- per Neovim, local recipients only, skip and ack the rest). Through the crew, or,
+-- when the crew doesn't take it, the host's fallback, which types it into the agent's
+-- terminal (v0.6.0: no file mailbox, ADR 1793271500 phase 5).
 --
 -- Run through tests/todo-daemon.sh, against a REAL daemon.
 local env = require("todo-daemon-env")
@@ -13,9 +15,7 @@ env.start_daemon()
 local todo     = env.client()
 local daemon   = require("auto-core.todo.daemon")
 local notifier = require("auto-core.todo.notifier")
-local mailbox  = require("auto-core.mailbox")
-local mb_path  = mailbox.path
-local registry = require("auto-core.mailbox.registry")
+local instance = require("auto-core.instance")
 local events   = require("auto-core.events")
 local scope    = require("auto-core.todo.scope")
 
@@ -25,9 +25,9 @@ local scope    = require("auto-core.todo.scope")
 local SCOPE = "auto-agents:project-a"
 scope.set(SCOPE)
 
--- The cells up to the hold sections run with grace_ms = 0: a recipient not
--- registered here is past the window at once (skipped and acked), as the
--- notifier treats it after GRACE_MS. The hold sections set a window.
+-- The cells up to the hold sections run with grace_ms = 0: a recipient the
+-- fallback can't type to now is past the window at once (skipped and acked), as
+-- the notifier treats it after GRACE_MS. The hold sections set a window.
 
 -- ── fixture ─────────────────────────────────────────────────────
 local kb = env.new_kb("kb")
@@ -43,17 +43,48 @@ end
 ok("fixture: the first call claims the store", #todo.list({ status = "open" }) == 6)
 local store_id = env.call("todos.resolve", { "kb" }).store_id
 
-local mbroot = env.tmp .. "/mailbox"
 local wm = env.tmp .. "/state/todo_notifier"
-mb_path.configure(mbroot)
-mb_path.set_instance_id("1111111111-22222")
-registry.register("nvim", { root = mbroot })
-local lector = registry.register("agent:lector", { root = mbroot })
+instance.set_id("1111111111-22222")
 
-local function inbox(rec) return vim.fn.glob(rec.subs.inbox .. "/todo-*.json", false, true) end
-local function inbox_json(rec, mid)
-  local text = env.read(rec.subs.inbox .. "/" .. mid .. ".json")
-  return text and vim.json.decode(text)
+-- The host's fallback, as auto-agents' handler behaves: it types a delivery into the terminal of
+-- an agent this Neovim runs and answers true, or answers false, why (no such slot yet, another
+-- Neovim's agent, or the terminal refuses). offered is every delivery it was handed, typed the ones
+-- it typed; slots the agents running here.
+local slots, typed, offered = { lector = true }, {}, {}
+local refusing = nil -- set: the terminal refuses, with this why
+local function handler(d)
+  offered[#offered + 1] = d
+  if refusing then return false, refusing end
+  local name, inst = tostring(d.recipient):match("^agent:([^:]+):?(.*)$")
+  if inst ~= "" and inst ~= instance.id() then return false, "another Neovim's agent" end
+  if not (name and slots[name]) then return false, "no slot runs " .. tostring(name) end
+  typed[#typed + 1] = d
+  return true
+end
+notifier.set_fallback(handler)
+
+---inbox is what was typed to name's agent; got the delivery typed under key mid.
+local function inbox(name)
+  local out = {}
+  for _, d in ipairs(typed) do
+    if tostring(d.recipient):match("^agent:([^:]+)") == name then out[#out + 1] = d end
+  end
+  return out
+end
+local function got(mid)
+  for _, d in ipairs(typed) do if d.key == mid then return d end end
+end
+local function offers(mid)
+  local n = 0
+  for _, d in ipairs(offered) do if d.key == mid then n = n + 1 end end
+  return n
+end
+---spawn starts an agent here: auto-agents adds its slot and asks the notifier to poll.
+local function spawn(name) slots[name] = true; notifier.poll_soon() end
+---new_process stands in for a new Neovim: a new instance id, nothing typed yet.
+local function new_process(inst)
+  instance.set_id(inst)
+  typed, offered = {}, {}
 end
 
 -- Every daemon call the fixture client and the notifier make, recorded; an optional
@@ -115,49 +146,57 @@ run("deliver", function()
   ok("the assignment landed (D1)", t and t.status == "in-progress")
   local seq = assign_seq("2026-10-01-task-1")
   local mid = notifier.message_id(store_id, seq)
-  env.wait(5000, function() return env.exists(lector.subs.inbox .. "/" .. mid .. ".json") end)
-  local msg = inbox_json(lector, mid)
-  ok("one message, id todo-<store_id>-<seq>", msg and msg.id == mid, mid)
+  env.wait(5000, function() return got(mid) ~= nil end)
+  local msg = got(mid)
+  ok("one delivery, keyed todo-<store_id>-<seq>", msg and msg.key == mid and #inbox("lector") == 1, mid)
   ok("its subject names the task", msg and tostring(msg.subject):find("Task 1", 1, true), msg and msg.subject)
   ok("its body quotes the reason", msg and tostring(msg.body):find("\n  > start with the tests", 1, true), msg and msg.body)
   ok("its body carries the file path",
     msg and tostring(msg.body):find(store .. "/in-progress/2026-10-01-task-1.md", 1, true), msg and msg.body)
-  ok("it is from the host mailbox", msg and msg.from == "nvim")
+  ok("it is addressed to the assignee", msg and msg.recipient == "agent:lector", msg and msg.recipient)
   ok("then the change is acked: the watermark is its seq", env.wait(5000, function()
     return notifier.watermark(store_id) == seq end), notifier.watermark(store_id))
   poll()
-  ok("a second poll sends nothing more", #inbox(lector) == 1, #inbox(lector))
+  ok("a second poll sends nothing more", #inbox("lector") == 1 and offers(mid) == 1, #inbox("lector"))
 end)
 
-section("recipients this Neovim does not host, past the grace window (0 here): skipped and acked")
+section("recipients this Neovim does not run, past the grace window (0 here): skipped and acked")
 run("skip", function()
   todo.assign("2026-10-01-task-2", "agent:ghost", "nobody here")
   todo.assign("2026-10-01-task-3", "user")
   todo.assign("2026-10-01-task-4", "autodoc:helper")
   poll()
-  ok("nothing for ghost, user or autodoc:helper", #inbox(lector) == 1 and vim.fn.isdirectory(mbroot
-    .. "/1111111111-22222/ghost") == 0, vim.inspect(inbox(lector)))
-  local before = #inbox(lector)
+  ok("nothing typed for ghost, user or autodoc:helper", #typed == 1, vim.inspect(typed))
+  local asked = {}
+  for _, d in ipairs(offered) do asked[#asked + 1] = d.recipient end
+  ok("user and autodoc:helper never reach the fallback; ghost is offered, and refused",
+    vim.deep_equal(asked, { "agent:lector", "agent:ghost" }), vim.inspect(asked))
+  local before = #inbox("lector")
   todo.assign("2026-10-01-task-2", "agent:lector", "now for you")
   poll()
-  ok("a later local assignment is not blocked behind them", #inbox(lector) == before + 1, #inbox(lector))
-  local other = registry.get("agent:lector:9999999999-1")
-  ok("another instance's full id is never local", notifier.local_recipient("agent:lector:9999999999-1") == nil
-    and other == nil)
-  ok("a bare name is tried as agent:<name>", notifier.local_recipient("lector") ~= nil)
+  ok("a later local assignment is not blocked behind them", #inbox("lector") == before + 1, #inbox("lector"))
+  local n = #offered
+  todo.assign("2026-10-01-task-3", "agent:lector:9999999999-1", "another Neovim's")
+  poll()
+  ok("another instance's full id never reaches this Neovim's fallback", #offered == n, vim.inspect(offered[#offered]))
+  local bid = todo.add({ title = "Bare name" })
+  todo.assign(bid, "lector", "a bare name")
+  poll()
+  local last = offered[#offered] or {}
+  ok("a bare name is offered as agent:<name>", last.recipient == "agent:lector", vim.inspect(last.recipient))
 end)
 
 section("add with an assignee notifies; a hand edit of assignee does not")
 run("add and hand edit", function()
-  local before = #inbox(lector)
+  local before = #inbox("lector")
   local id = todo.add({ title = "Created assigned", assignee = "agent:lector" })
   poll()
-  ok("todos.add with an assignee is delivered", #inbox(lector) == before + 1, #inbox(lector))
+  ok("todos.add with an assignee is delivered", #inbox("lector") == before + 1, #inbox("lector"))
   local f = store .. "/open/2026-10-01-task-5.md"
   env.write(f, (env.read(f):gsub("\nstatus: open\n", "\nstatus: open\nassignee: agent:lector\n", 1)))
   todo.refresh()
   poll()
-  ok("a hand edit of assignee sends nothing", #inbox(lector) == before + 1, #inbox(lector))
+  ok("a hand edit of assignee sends nothing", #inbox("lector") == before + 1, #inbox("lector"))
   local _ = id
 end)
 
@@ -168,31 +207,44 @@ run("ack fails after the send", function()
   poll()
   local seq = assign_seq("2026-10-01-task-6")
   local mid = notifier.message_id(store_id, seq)
-  local path = lector.subs.inbox .. "/" .. mid .. ".json"
-  ok("the message was written before the (lost) ack", env.exists(path))
+  ok("it was typed before the (lost) ack", got(mid) ~= nil)
   ok("the cursor did not move", (notifier.watermark(store_id) or 0) < seq, notifier.watermark(store_id))
-  -- the recipient processed it: it is in archive/ now
-  vim.uv.fs_rename(path, lector.subs.archive .. "/" .. mid .. ".json")
   acks_fail = false
   poll()
-  ok("the change came again (its ack was lost) and was NOT written again", not env.exists(path),
-    vim.inspect(inbox(lector)))
+  ok("the change came again (its ack was lost) and was NOT typed again, nor offered", offers(mid) == 1,
+    offers(mid))
   ok("the cursor moved on the retry", notifier.watermark(store_id) == seq, notifier.watermark(store_id))
 end)
 
-run("a failed send stops the page; the next poll resumes at the same seq", function()
-  vim.fn.setfperm(lector.subs.inbox, "r-xr-xr-x")
+run("a terminal that refuses holds the change inside the window; the next poll types it, same key", function()
+  notifier._configure({ poll_ms = false, watermark_dir = wm, grace_ms = 60000 })
+  refusing = "the terminal refused the paste"
   local t = todo.get("2026-10-01-task-3")
-  todo.assign(t.id, "agent:lector", "inbox is read-only")
+  todo.assign(t.id, "agent:lector", "the terminal refuses")
   poll()
   local seq = assign_seq(t.id)
   local mid = notifier.message_id(store_id, seq)
-  ok("nothing written while the inbox refuses", not env.exists(lector.subs.inbox .. "/" .. mid .. ".json"))
+  ok("nothing typed while the terminal refuses", got(mid) == nil and offers(mid) == 1, offers(mid))
   ok("the cursor did not move past it", (notifier.watermark(store_id) or 0) < seq, notifier.watermark(store_id))
-  vim.fn.setfperm(lector.subs.inbox, "rwxr-xr-x")
+  refusing = nil
   poll()
-  ok("delivered on the next poll, under the same id", env.exists(lector.subs.inbox .. "/" .. mid .. ".json"))
+  ok("typed on the next poll, under the same key", got(mid) ~= nil and offers(mid) == 2, offers(mid))
   ok("then acked", notifier.watermark(store_id) == seq)
+  notifier._configure({ poll_ms = false, watermark_dir = wm, grace_ms = 0 })
+end)
+
+run("a fallback that raises is a refusal, never an error", function()
+  notifier.set_fallback(function() error("the handler failed") end)
+  local t = todo.get("2026-10-01-task-2")
+  local okc = pcall(todo.assign, t.id, "agent:lector", "the handler raises")
+  ok("the assignment itself is unaffected", okc)
+  local polled = poll()
+  local seq = assign_seq(t.id)
+  ok("the poll finished", polled)
+  ok("past the window (0 here) it is skipped and acked", (notifier.watermark(store_id) or 0) >= seq,
+    notifier.watermark(store_id))
+  notifier.set_fallback(handler)
+  ok("set_fallback refuses what isn't a function", not pcall(notifier.set_fallback, "yes"))
 end)
 
 section("the timer delivers an assignment made outside this Neovim; it stops on disconnect")
@@ -206,19 +258,16 @@ run("timer", function()
   ok("assigned directly on the daemon (as AutoDoc's GUI would)", aerr == nil, aerr and aerr.message)
   local seq = assign_seq(t.id)
   local mid = notifier.message_id(store_id, seq)
-  ok("the timer delivered it", env.wait(5000, function()
-    return env.exists(lector.subs.inbox .. "/" .. mid .. ".json") end))
+  ok("the timer delivered it", env.wait(5000, function() return got(mid) ~= nil end))
   events.publish("autodoc.session:disconnected", { reason = "test" })
   env.wait(300, function() return false end)
   local t2 = env.call("todos.get", { "kb", "2026-10-01-task-5" })
   env.call("todos.assign", { "kb", t2.id, t2.rev, "agent:lector", "while disconnected", SCOPE })
   local seq2 = assign_seq(t2.id)
   local mid2 = notifier.message_id(store_id, seq2)
-  ok("no delivery while disconnected", not env.wait(1000, function()
-    return env.exists(lector.subs.inbox .. "/" .. mid2 .. ".json") end))
+  ok("no delivery while disconnected", not env.wait(1000, function() return got(mid2) ~= nil end))
   events.publish("autodoc.session:connected", {})
-  ok("delivered on reconnect (the catch-up)", env.wait(5000, function()
-    return env.exists(lector.subs.inbox .. "/" .. mid2 .. ".json") end))
+  ok("delivered on reconnect (the catch-up)", env.wait(5000, function() return got(mid2) ~= nil end))
   notifier.stop()
   notifier._configure({ poll_ms = false, watermark_dir = wm, grace_ms = 0 })
   notifier.start()
@@ -237,40 +286,35 @@ end)
 section("a new Neovim: it starts after the watermark, not at the log's beginning")
 run("watermark", function()
   notifier.stop()
-  local delivered_before = #inbox(lector)
   -- while no Neovim polls, an assignment lands
   local t = env.call("todos.get", { "kb", "2026-10-01-task-6" })
   env.call("todos.assign", { "kb", t.id, t.rev, "agent:lector", "while every Neovim was closed", SCOPE })
   local seq = assign_seq(t.id)
   -- a new process: a new instance id, so a new consumer
   notifier._reset_for_tests()
-  mb_path.set_instance_id("3333333333-44444")
-  registry.register("nvim", { root = mbroot })
-  local lector2 = registry.register("agent:lector", { root = mbroot })
+  new_process("3333333333-44444")
+  notifier.set_fallback(handler)
   notifier._configure({ poll_ms = false, watermark_dir = wm, grace_ms = 0 })
   notifier.start()
   notifier._connect()
   poll()
-  local got = vim.fn.glob(lector2.subs.inbox .. "/todo-*.json", false, true)
-  ok("the new consumer delivered exactly the change made while closed", #got == 1
-    and got[1]:find(notifier.message_id(store_id, seq), 1, true), vim.inspect(got))
-  ok("nothing older was replayed to the old instance either", #inbox(lector) == delivered_before)
+  local keys = {}
+  for _, d in ipairs(typed) do keys[#keys + 1] = d.key end
+  ok("the new consumer delivered exactly the change made while closed",
+    vim.deep_equal(keys, { notifier.message_id(store_id, seq) }), vim.inspect(keys))
   -- no watermark at all: the history from before this notifier's start is skipped
   notifier._reset_for_tests()
   vim.fn.delete(wm, "rf")
-  mb_path.set_instance_id("5555555555-66666")
-  registry.register("nvim", { root = mbroot })
-  local lector3 = registry.register("agent:lector", { root = mbroot })
+  new_process("5555555555-66666")
+  notifier.set_fallback(handler)
   local past = os.time()
   vim.wait(3000, function() return os.time() > past end, 50) -- every change so far is a second older
   notifier._configure({ poll_ms = false, watermark_dir = wm, grace_ms = 0, skew_ms = 0 })
   notifier.start()
   notifier._connect()
   poll()
-  ok("with no watermark, nothing retained is replayed",
-    #vim.fn.glob(lector3.subs.inbox .. "/todo-*.json", false, true) == 0)
+  ok("with no watermark, nothing retained is replayed", #typed == 0 and #offered == 0, vim.inspect(offered))
   ok("… and the head is recorded", notifier.watermark(store_id) == nil or notifier.watermark(store_id) >= seq)
-  lector = lector3
 end)
 
 section("resync: each assigned task once, then the page's cursor is acked")
@@ -292,19 +336,20 @@ run("resync", function()
   end
   poll()
   local mid = string.format("todo-%s-r%d-%s", store_id, h, "2026-10-01-task-1")
-  local msg = inbox_json(lector, mid)
+  local msg = got(mid)
   ok("the assigned task was sent once, saying the reason was lost", msg
-    and tostring(msg.body):find("resync", 1, true), mid)
-  ok("not to the agent this Neovim does not host",
-    #vim.fn.glob(lector.subs.inbox .. "/todo-*task-2*.json", false, true) == 0)
+    and tostring(msg.body):find("resync", 1, true) and offers(mid) == 1, mid)
+  ok("not to the agent this Neovim does not run",
+    got(string.format("todo-%s-r%d-%s", store_id, h, "2026-10-01-task-2")) == nil)
   ok("not a row another project assigned",
-    #vim.fn.glob(lector.subs.inbox .. "/todo-*-r" .. h .. "-2026-10-01-task-3.json", false, true) == 0)
+    offers(string.format("todo-%s-r%d-%s", store_id, h, "2026-10-01-task-3")) == 0)
   ok("then the page's cursor was acked", acked == h, tostring(acked) .. " vs " .. h)
 end)
 
-section("held: an assignment made before its agent registers is delivered when it registers")
+section("held: an assignment made before its agent starts is delivered when it starts")
 run("hold", function()
   notifier._reset_for_tests()
+  notifier.set_fallback(handler)
   notifier._configure({ poll_ms = false, watermark_dir = wm, grace_ms = 60000 })
   notifier.start()
   notifier._connect()
@@ -313,35 +358,30 @@ run("hold", function()
   poll()
   local nseq = assign_seq(nid)
   local nmid = notifier.message_id(store_id, nseq)
-  ok("nothing is written while the agent is not registered", vim.fn.isdirectory(mbroot
-    .. "/" .. mb_path.get_instance_id() .. "/newbie") == 0)
+  ok("nothing is typed while the agent has no slot", got(nmid) == nil and offers(nmid) >= 1, offers(nmid))
   ok("the watermark does not pass the held change", (notifier.watermark(store_id) or 0) < nseq,
     tostring(notifier.watermark(store_id)) .. " vs " .. nseq)
   local lid = todo.add({ title = "Meanwhile, for lector", assignee = "agent:lector" })
   poll()
   local lmid = notifier.message_id(store_id, assign_seq(lid))
-  local lpath = lector.subs.inbox .. "/" .. lmid .. ".json"
-  ok("a later change is delivered while the earlier one is held", env.exists(lpath))
-  local st = vim.uv.fs_stat(lpath)
-  local n_lector = #inbox(lector)
+  ok("a later change is delivered while the earlier one is held", got(lmid) ~= nil)
+  local n_lector = #inbox("lector")
   poll()
-  local st2 = vim.uv.fs_stat(lpath)
-  ok("the next poll reads it again and writes nothing twice", st2 and st.ino == st2.ino
-    and st.mtime.nsec == st2.mtime.nsec and #inbox(lector) == n_lector)
+  ok("the next poll reads it again and types nothing twice, nor offers it", #inbox("lector") == n_lector
+    and offers(lmid) == 1, offers(lmid))
   ok("the watermark still does not pass the held change", (notifier.watermark(store_id) or 0) < nseq)
-  -- the agent spawns: registration alone must deliver (the test polls no more)
-  local newbie = registry.register("agent:newbie", { root = mbroot })
-  ok("delivered when the agent registers, within the window", env.wait(5000, function()
-    return env.exists(newbie.subs.inbox .. "/" .. nmid .. ".json") end))
+  -- the agent spawns: its spawn asks for a poll (poll_soon), and that alone delivers
+  spawn("newbie")
+  ok("delivered when the agent starts, within the window", env.wait(5000, function() return got(nmid) ~= nil end))
   ok("then the watermark passes both changes", env.wait(5000, function()
     return (notifier.watermark(store_id) or 0) >= assign_seq(lid) end), notifier.watermark(store_id))
-  local st3 = vim.uv.fs_stat(lpath)
-  ok("lector's message was still written once", st3 and st3.ino == st.ino and #inbox(lector) == n_lector)
+  ok("lector's was still typed once", #inbox("lector") == n_lector and offers(lmid) == 1, offers(lmid))
 end)
 
-section("past the grace window: a recipient still not registered is skipped and acked, once, as an audit line")
+section("past the grace window: a recipient still with no slot is skipped and acked, once, as an audit line")
 run("grace", function()
   notifier._reset_for_tests()
+  notifier.set_fallback(handler)
   notifier._configure({ poll_ms = false, watermark_dir = wm, grace_ms = 300 })
   notifier.start()
   notifier._connect()
@@ -466,8 +506,8 @@ run("a new Neovim prunes once, at its first floor", function()
   notifier._reset_for_tests()
   local dir = with_dir("wm-start")
   W("1000000011-999999999", { [store_id] = head() })
-  mb_path.set_instance_id("7777777777-" .. vim.fn.getpid())
-  registry.register("nvim", { root = mbroot })
+  new_process("7777777777-" .. vim.fn.getpid())
+  notifier.set_fallback(handler)
   notifier.start()
   notifier._connect()
   poll()
@@ -483,14 +523,14 @@ section("a bare assignee is its own project's agent (ADR 1791532020 §2.5a)")
 -- edit, an unscoped --call).
 local function fresh(inst)
   notifier._reset_for_tests()
-  mb_path.set_instance_id(inst)
-  registry.register("nvim", { root = mbroot })
-  local rec = registry.register("agent:vision", { root = mbroot })
+  new_process(inst)
+  slots.vision = true
+  notifier.set_fallback(handler)
   notifier._configure({ poll_ms = false, watermark_dir = env.tmp .. "/wm-scope", grace_ms = 0 })
   notifier.start()
   notifier._connect()
   poll()
-  return rec
+  return "vision"
 end
 ---assigned makes an assignment as a client of scope s would (nil: none), and
 ---returns its message id once this Neovim's notifier has polled past it.
@@ -505,7 +545,7 @@ local function assigned(title, who, s)
   poll()
   return notifier.message_id(store_id, seq), seq
 end
-local function delivered(rec, mid) return env.exists(rec.subs.inbox .. "/" .. mid .. ".json") end
+local function delivered(_, mid) return got(mid) ~= nil end
 
 run("the scope decides who delivers a bare name", function()
   local vision = fresh("8888888888-11111")
@@ -515,7 +555,7 @@ run("the scope decides who delivers a bare name", function()
   local theirs, tseq = assigned("S2", "agent:vision", "auto-agents:project-b")
   ok("B's bare assignment is not delivered in A", not delivered(vision, theirs), theirs)
   ok("… and A acks it: it is B's to deliver", notifier.watermark(store_id) >= tseq, notifier.watermark(store_id))
-  local legacy, lseq = assigned("S3", "vision", nil) -- an agent registered here: only the rule withholds it
+  local legacy, lseq = assigned("S3", "vision", nil) -- an agent running here: only the rule withholds it
   ok("a bare name with no scope is delivered by none", not delivered(vision, legacy), legacy)
   ok("… and acked", notifier.watermark(store_id) >= lseq)
   local full = assigned("S4", "agent:vision:8888888888-11111", "auto-agents:project-b")
@@ -556,7 +596,8 @@ run("a full id given at assign: the task keeps the name, and only its instance d
   local mine = assigned("S7", "agent:vision", "@8888888888-11111")
   ok("routed to this instance: delivered", delivered(vision, mine), mine)
   local theirs = assigned("S8", "agent:vision", "@7777777777-22222")
-  ok("routed to another instance: not delivered here, though the name is registered", not delivered(vision, theirs), theirs)
+  ok("routed to another instance: not delivered here, though the agent runs here", not delivered(vision, theirs)
+    and offers(theirs) == 0, theirs)
 end)
 
 run("a project scope can't look like an instance route", function()
@@ -597,7 +638,7 @@ run("crew recipients", function()
   end)
   local mid, seq = assigned("C1", "agent:vision", SCOPE)
   local last = asked[#asked] or {}
-  ok("a crew agent's assignment files no notice once the crew has it", not delivered(vision, mid), mid)
+  ok("a crew agent's assignment never reaches the fallback once the crew has it", offers(mid) == 0, mid)
   ok("the hook is asked by name, the prefix stripped", last.name == "vision", vim.inspect(last.name))
   ok("… with the change's message id as the key", last.mid == mid, vim.inspect(last.mid))
   local msg = last.msg or {}
@@ -609,25 +650,25 @@ run("crew recipients", function()
 
   notifier.set_crew_recipient(function() return false end)
   local m2 = assigned("C2", "agent:vision", SCOPE)
-  ok("a crew send that fails files the notice", delivered(vision, m2), m2)
+  ok("a crew send that fails goes to the fallback", delivered(vision, m2), m2)
   notifier.set_crew_recipient(function() error("the hook failed") end)
   local m3 = assigned("C3", "agent:vision", SCOPE)
-  ok("a failing hook files the notice", delivered(vision, m3), m3)
+  ok("a failing hook goes to the fallback", delivered(vision, m3), m3)
 
   local tries = {}
   notifier._configure({ poll_ms = false, watermark_dir = env.tmp .. "/wm-scope", grace_ms = 60000 })
   notifier.set_crew_recipient(function(_, m) tries[#tries + 1] = m; return "retry" end)
   local m4, s4 = assigned("C4", "agent:vision", SCOPE)
-  ok("a send with no outcome files nothing", not delivered(vision, m4), m4)
+  ok("a send with no outcome offers nothing to the fallback", offers(m4) == 0, m4)
   ok("… and isn't acked", notifier.watermark(store_id) < s4, notifier.watermark(store_id))
   notifier.set_crew_recipient(function(_, m) tries[#tries + 1] = m; return true end)
   poll()
   ok("the next poll sends it again with the same key", #tries >= 2 and tries[1] == m4 and tries[#tries] == m4, vim.inspect(tries))
-  ok("… and, accepted, acks it", notifier.watermark(store_id) >= s4 and not delivered(vision, m4), notifier.watermark(store_id))
+  ok("… and, accepted, acks it", notifier.watermark(store_id) >= s4 and offers(m4) == 0, notifier.watermark(store_id))
   notifier._configure({ poll_ms = false, watermark_dir = env.tmp .. "/wm-scope", grace_ms = 0 })
   notifier.set_crew_recipient(function() return "retry" end)
   local m4b, s4b = assigned("C4b", "agent:vision", SCOPE)
-  ok("a send with no outcome past the grace window files the notice", delivered(vision, m4b), m4b)
+  ok("a send with no outcome past the grace window goes to the fallback", delivered(vision, m4b), m4b)
   ok("… and acks it", notifier.watermark(store_id) >= s4b, notifier.watermark(store_id))
 
   asked = {}
@@ -645,32 +686,34 @@ run("crew recipients", function()
   asked = {}
   local m9, s9 = assigned("C9", "agent:vision", "auto-agents:project-b")
   ok("another project's assignment never reaches the hook: its own Neovim sends it", #asked == 0
-    and not delivered(vision, m9) and notifier.watermark(store_id) >= s9, vim.inspect(asked))
+    and offers(m9) == 0 and notifier.watermark(store_id) >= s9, vim.inspect(asked))
   local m10 = assigned("C10", "agent:vision", "@1111111111-22222")
-  ok("another instance's assignment never reaches the hook", #asked == 0 and not delivered(vision, m10), vim.inspect(asked))
+  ok("another instance's assignment never reaches the hook, nor the fallback", #asked == 0 and offers(m10) == 0,
+    vim.inspect(asked))
   -- AutoDoc's window hands another host's agent a task itself (SPC x -> A): it assigns the bare
   -- codename with the window's own scope, then sends the agent one Task: request through the crew.
   -- Every Neovim's notifier leaves it alone, so the agent hears of it once.
   local mw, sw = assigned("W1", "vision", "autodoc:0123456789abcdef")
   ok("a window's assignment to this project's agent (bare codename, the window's scope) never reaches the hook: the window sends it",
-    #asked == 0 and not delivered(vision, mw) and notifier.watermark(store_id) >= sw, vim.inspect(asked))
+    #asked == 0 and offers(mw) == 0 and notifier.watermark(store_id) >= sw, vim.inspect(asked))
   notifier.set_crew_recipient(function(name, m) asked[#asked + 1] = { name = name, mid = m }; return false end)
   local m11, s11 = assigned("C11", "agent:vision", nil) -- the daemon answers mail.ambiguous: refused for certain
   ok("an unscoped assignment the crew refuses asks the hook by name", #asked == 1 and asked[1].mid == m11, vim.inspect(asked))
-  ok("… and files no notice anywhere (the bare name's rule), acked", not delivered(vision, m11)
+  ok("… and is offered to no fallback (the bare name's rule), acked", offers(m11) == 0
     and notifier.watermark(store_id) >= s11, m11)
 
   notifier.set_crew_recipient(function(name, m) asked[#asked + 1] = { name = name, mid = m }; return true end)
   asked = {}
   local m6 = assigned("C6", "autodoc:cloud-strife", SCOPE)
-  ok("a window's assignment is never sent here: the window hands it over", #asked == 0 and m6 ~= nil, vim.inspect(asked))
+  ok("a window's assignment is never sent here: the window hands it over", #asked == 0 and m6 ~= nil
+    and offers(m6) == 0, vim.inspect(asked))
 
   notifier.set_crew_recipient(function(name) return name ~= "vision" end)
   local m7 = assigned("C7", "agent:vision", SCOPE)
-  ok("an agent the hook doesn't claim is filed as before", delivered(vision, m7), m7)
+  ok("an agent the hook doesn't claim goes to the fallback", delivered(vision, m7), m7)
   notifier.set_crew_recipient(nil)
   local m8 = assigned("C8", "agent:vision", SCOPE)
-  ok("with no hook, every assignment is filed as before", delivered(vision, m8), m8)
+  ok("with no hook, every assignment goes to the fallback", delivered(vision, m8), m8)
   ok("a hook that isn't a function is refused", not pcall(notifier.set_crew_recipient, "yes"))
 end)
 
@@ -688,9 +731,8 @@ run("first poll after start", function()
   local wm2 = env.tmp .. "/state/todo_notifier_first"
   notifier._reset_for_tests()
   vim.fn.delete(wm2, "rf")
-  mb_path.set_instance_id("7676767676-11111")
-  registry.register("nvim", { root = mbroot })
-  local fresh_lector = registry.register("agent:lector", { root = mbroot })
+  new_process("7676767676-11111")
+  notifier.set_fallback(handler)
   local past = os.time()
   vim.wait(3000, function() return os.time() > past end, 50) -- every change so far is history
   -- started, but never connected (ensure answers nothing), so no catch-up runs: the store's first
@@ -701,12 +743,10 @@ run("first poll after start", function()
   vim.wait(200, function() return false end, 20) -- start's scheduled connect has run (and polled nothing)
   ok("started: no poll of the store before the assignment", count("todos.changes") == polls_before)
   local mid, seq = assigned("F1", "agent:lector", SCOPE) -- written now, then the first poll of the store
-  local got = vim.fn.glob(fresh_lector.subs.inbox .. "/todo-*.json", false, true)
-  ok("an assignment made after start, before the first poll, is delivered", #got == 1
-    and got[1]:find(mid, 1, true) ~= nil, vim.inspect(got))
-  ok("… and nothing from before the start is replayed with it", #got == 1, vim.inspect(got))
+  ok("an assignment made after start, before the first poll, is delivered", got(mid) ~= nil, mid)
+  ok("… and nothing from before the start is replayed with it", #typed == 1 and #offered == 1, vim.inspect(offered))
   poll()
-  ok("… once: the next poll writes nothing more", #vim.fn.glob(fresh_lector.subs.inbox .. "/todo-*.json", false, true) == 1)
+  ok("… once: the next poll types nothing more", #typed == 1 and #offered == 1)
   ok("… and the watermark passes it", (notifier.watermark(store_id) or 0) >= seq, notifier.watermark(store_id))
 
   -- a restart with a watermark: the catch-up is the watermark's, whatever the time
@@ -717,16 +757,35 @@ run("first poll after start", function()
   local s2 = assign_seq(t)
   past = os.time()
   vim.wait(3000, function() return os.time() > past end, 50) -- F2 is older than the next start
-  mb_path.set_instance_id("7676767676-22222")
-  registry.register("nvim", { root = mbroot })
-  local next_lector = registry.register("agent:lector", { root = mbroot })
+  new_process("7676767676-22222")
+  notifier.set_fallback(handler)
   notifier._configure({ poll_ms = false, watermark_dir = wm2, grace_ms = 0, skew_ms = 0 })
   notifier.start()
   notifier._connect()
   poll()
   local m2 = notifier.message_id(store_id, s2)
   ok("a restart with a watermark delivers what changed while closed, older than its start or not",
-    env.exists(next_lector.subs.inbox .. "/" .. m2 .. ".json"), m2)
+    got(m2) ~= nil, m2)
+end)
+
+section("no fallback set (auto-agents before v0.4.0, or not loaded): one log line, dropped, never an error, never a file")
+run("no fallback", function()
+  fresh("4545454545-11111")
+  notifier.set_fallback(nil)
+  local log = require("auto-core.log")
+  local m1 = assigned("N1", "agent:vision", SCOPE)
+  local m2, s2 = assigned("N2", "agent:vision", SCOPE)
+  ok("both are acked: dropped, not held", (notifier.watermark(store_id) or 0) >= s2, notifier.watermark(store_id))
+  ok("nothing was typed", got(m1) == nil and got(m2) == nil and #offered == 0)
+  local said = 0
+  for _, e in ipairs(log.recent()) do
+    if tostring(e.message):find("no fallback is set", 1, true) then said = said + 1 end
+  end
+  ok("one log line says so, for both", said == 1, said)
+  ok("no mailbox folder appears anywhere in the sandbox",
+    #vim.fn.globpath(env.tmp, "**/.auto-agents", true, true) == 0
+      and #vim.fn.globpath(env.tmp, "**/inbox", true, true) == 0)
+  notifier.set_fallback(handler)
 end)
 
 section("an assignment's message states the assignment, and quotes its reason as the note")
@@ -749,7 +808,7 @@ run("states it, quoted", function()
     ok("assigned, " .. name, err == nil, err and err.message)
     local mid = notifier.message_id(store_id, assign_seq(id))
     poll()
-    local msg = inbox_json(vision, mid)
+    local msg = got(mid)
     local body = msg and tostring(msg.body) or ""
     ok(name .. ": it opens with the assignment, stated", body:sub(1, #"You've been assigned a new task.\n") == "You've been assigned a new task.\n", body)
     ok(name .. ": no assigner, no forwarding, no 'not the user's instruction'",
