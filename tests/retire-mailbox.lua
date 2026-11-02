@@ -217,8 +217,8 @@ do
   end
   local before = snapshot()
 
-  local loaded, export = pcall(require, "auto-core.mailbox_export")
-  ok("auto-core.mailbox_export loads", loaded, export)
+  local loaded, export = pcall(require, "auto-core.export_mailbox")
+  ok("auto-core.export_mailbox loads", loaded, export)
   if not loaded then export = {} end
   local out = vim.fn.tempname() .. "-export.jsonl"
   local res, err

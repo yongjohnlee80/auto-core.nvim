@@ -1,4 +1,4 @@
----auto-core.mailbox_export — an old file mailbox's archives, as JSONL.
+---auto-core.export_mailbox — an old file mailbox's archives, as JSONL.
 ---
 ---v0.6.0 has no file mailbox (ADR 1793271500 phase 5): AutoDoc's crew carries every
 ---message. The trees an older auto-core wrote stay on disk, and nothing deletes or
@@ -6,7 +6,7 @@
 ---order, becomes one line, `{ path, message }`, with the path relative to the root.
 ---A file that doesn't parse is carried as `{ path, raw, decode_error }`. It only
 ---ever reads the tree, and it refuses an output inside it.
----@module 'auto-core.mailbox_export'
+---@module 'auto-core.export_mailbox'
 
 local M = {}
 

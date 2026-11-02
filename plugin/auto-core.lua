@@ -196,7 +196,7 @@ end, {
 --   This only reads one (default: the project's .auto-agents/mailbox) and writes
 --   one JSON line per archived message to out (default: under stdpath("state")).
 vim.api.nvim_create_user_command("AutoCoreMailboxExport", function(opts)
-  local export = require("auto-core.mailbox_export")
+  local export = require("auto-core.export_mailbox")
   local res, err = export.export({ root = opts.fargs[1], out = opts.fargs[2] })
   if not res then
     vim.notify("AutoCoreMailboxExport: " .. tostring(err), vim.log.levels.ERROR)

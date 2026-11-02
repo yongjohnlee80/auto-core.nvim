@@ -2796,12 +2796,12 @@ do
   state._reset_for_tests()
   log.events.register("auto-finder", { "scan.started" })
   log.events.register("auto-agents", { "spawn.failed" })
-  log.events.register("auto-core",   { "mailbox.delivered" })
+  log.events.register("auto-core",   { "notice.delivered" })
   local all = log.events.list()
   ok("ADR 0021 §5: list() with no plugin filter returns events across plugins",
     #all == 3
       and all[1].event == "auto-agents.spawn.failed"
-      and all[2].event == "auto-core.mailbox.delivered"
+      and all[2].event == "auto-core.notice.delivered"
       and all[3].event == "auto-finder.scan.started",
     vim.inspect(all))
 

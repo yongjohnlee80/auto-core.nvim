@@ -272,7 +272,7 @@ auto-core's file mailbox is gone: `auto-core.mailbox` and all its submodules
   defaults to the project's `.auto-agents/mailbox`; the output defaults to a
   file under `stdpath("state")/auto-core/`. It refuses an output inside the
   tree and never writes to the tree. The Lua API is
-  `require("auto-core.mailbox_export").export({ root, out })`.
+  `require("auto-core.export_mailbox").export({ root, out })`.
 
 ## `kb` — the project's primary knowledge base (ADR 1791209945 §5)
 
