@@ -140,7 +140,7 @@ local notifier = require("auto-core.todo.notifier")
 notifier.start()
 notifier._connect()
 vim.wait(200, function() return false end, 10)
-ok("it starts (as the mailbox router does) and asks nothing", notifier.is_running())
+ok("it starts (as setup does) and asks nothing", notifier.is_running())
 notifier.stop()
 
 vim.notify = real_notify

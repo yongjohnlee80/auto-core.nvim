@@ -351,23 +351,23 @@ function M.open(path, opts)
   }, nil
 end
 
--- ── the mailbox verb ────────────────────────────────────────────
+-- ── the `editor.open` verb ──────────────────────────────────────
 --
 -- ONE repo, not two. The task this came from assumed a matching change in
 -- auto-agents, on the grounds that "agents do not call Lua". They do not — but
--- auto-core owns the whole surface an agent talks to:
+-- auto-core owns the registry an agent's verbs live in:
 --
---   * the REGISTRY lives in auto-core.mailbox.commands
---   * DISPATCH is auto-core.mailbox.router calling commands.handle_message
+--   * the REGISTRY lives in auto-core.commands
+--   * DISPATCH is auto-agents' editor socket: commands.get, validate_args
+--     against the verb's schema, then the handler (until v0.6.0, the file
+--     mailbox's router did it through commands.handle_message)
 --   * DISCOVERY is auto-agents' `commands_list`, whose handler is a relay:
---     it calls core.mailbox.commands.list() and forwards the entries, schema
---     included
+--     it calls commands.list() and forwards the entries, schema included
 --
 -- So a verb registered here is discovered and dispatched with no auto-agents
--- change at all. Verified end to end before writing this: registered as owner
--- `auto-core`, it appeared in commands.list() with its schema, dispatched
--- through handle_message, and a bad `path` was rejected as `bad_args` BEFORE
--- the handler ran.
+-- change at all: registered as owner `auto-core`, it appears in
+-- commands.list() with its schema, and a bad `path` is refused by the schema
+-- BEFORE the handler runs (smoke [88]).
 --
 -- It also removes the risk the task warned about — "if the verb grows its own
 -- window logic, that is the third implementation this task exists to prevent".
@@ -379,7 +379,7 @@ end
 ---owner/name replaces the spec, and a DIFFERENT owner is refused.
 ---@return boolean ok, string? err
 function M.register_command()
-  local commands = require("auto-core.mailbox.commands")
+  local commands = require("auto-core.commands")
   return commands.register("editor.open", {
     owner       = "auto-core",
     description = "Open a file in a window that can take a buffer, at an "

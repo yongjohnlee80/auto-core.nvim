@@ -159,108 +159,12 @@ local function _winlog_dispatch(sub, rest)
     vim.log.levels.ERROR)
 end
 
--- :AutoCoreMailbox [open|close|toggle] — the mailbox viewer.
---   open / close are explicit; bare command toggles. Idempotent on
---   either side. The viewer subscribes to core.mailbox:* internally
---   so it refreshes live as the router fires events.
-vim.api.nvim_create_user_command("AutoCoreMailbox", function(opts)
-  local mailbox = require("auto-core").mailbox
-  local sub = opts.fargs[1] or "toggle"
-  if sub == "open" then
-    mailbox.ui.open()
-  elseif sub == "close" then
-    mailbox.ui.close()
-  elseif sub == "toggle" then
-    mailbox.ui.toggle()
-  elseif sub == "refresh" then
-    mailbox.ui.refresh()
-  else
-    vim.notify("AutoCoreMailbox: unknown subcommand '" .. tostring(sub)
-      .. "' — expected open|close|toggle|refresh",
-      vim.log.levels.ERROR)
-  end
-end, {
-  nargs = "?",
-  complete = function() return { "open", "close", "toggle", "refresh" } end,
-  desc = "Open/close/toggle the auto-core mailbox viewer",
-})
-
--- Mailbox probe dispatcher. Subcommands mirror the winlog shape so
--- :h AutoCoreDebug stays one mental model.
-local function _mailbox_dispatch(sub, rest)
-  local probe = require("auto-core").debug.mailbox
-  sub = (sub == "" or sub == nil) and "status" or sub
-
-  local function render_lines_in_scratch(buf_name, lines, ft)
-    -- Replace any existing viewer with the same name so repeated
-    -- invocations don't accumulate buffers.
-    for _, b in ipairs(vim.api.nvim_list_bufs()) do
-      if vim.api.nvim_buf_is_valid(b)
-          and vim.api.nvim_buf_get_name(b):find(buf_name, 1, true)
-      then
-        pcall(vim.api.nvim_buf_delete, b, { force = true })
-      end
-    end
-    vim.cmd("botright new")
-    local buf = vim.api.nvim_get_current_buf()
-    pcall(vim.api.nvim_buf_set_name, buf, buf_name)
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-    vim.bo[buf].buftype    = "nofile"
-    vim.bo[buf].bufhidden  = "wipe"
-    vim.bo[buf].swapfile   = false
-    vim.bo[buf].modifiable = false
-    if ft then vim.bo[buf].filetype = ft end
-  end
-
-  if sub == "status" or sub == "registry" then
-    render_lines_in_scratch("auto-core://mailbox-registry",
-      probe.registry_lines(), "auto-core-mailbox")
-    return
-  end
-  if sub == "tail" then
-    local n = tonumber(rest[1]) or 40
-    render_lines_in_scratch("auto-core://mailbox-tail",
-      probe.tail_lines(n), "auto-core-mailbox")
-    return
-  end
-  if sub == "follow" then
-    local act = rest[1] or "toggle"
-    if act == "on" or act == "start" then
-      probe.follow_start()
-      vim.notify("auto-core mailbox follow: ON", vim.log.levels.INFO)
-      return
-    end
-    if act == "off" or act == "stop" then
-      probe.follow_stop()
-      vim.notify("auto-core mailbox follow: OFF", vim.log.levels.INFO)
-      return
-    end
-    -- toggle
-    if probe.follow_is_running() then
-      probe.follow_stop()
-      vim.notify("auto-core mailbox follow: OFF", vim.log.levels.INFO)
-    else
-      probe.follow_start()
-      vim.notify("auto-core mailbox follow: ON", vim.log.levels.INFO)
-    end
-    return
-  end
-  if sub == "clear" then
-    probe.clear()
-    vim.notify("auto-core: event trace cleared (global)", vim.log.levels.INFO)
-    return
-  end
-  vim.notify("AutoCoreDebug mailbox: unknown subcmd '" .. tostring(sub)
-    .. "' — expected status|tail|registry|follow|clear",
-    vim.log.levels.ERROR)
-end
-
 vim.api.nvim_create_user_command("AutoCoreDebug", function(opts)
   local args = opts.fargs
   local probe = args[1]
   if not probe or probe == "" then
     vim.notify("AutoCoreDebug: usage `:AutoCoreDebug <probe> <subcmd>`\n"
-      .. "  probes: winlog, mailbox", vim.log.levels.INFO)
+      .. "  probes: winlog", vim.log.levels.INFO)
     return
   end
   if probe == "winlog" then
@@ -270,34 +174,21 @@ vim.api.nvim_create_user_command("AutoCoreDebug", function(opts)
     _winlog_dispatch(sub, rest)
     return
   end
-  if probe == "mailbox" then
-    local sub = args[2]
-    local rest = {}
-    for i = 3, #args do rest[#rest + 1] = args[i] end
-    _mailbox_dispatch(sub, rest)
-    return
-  end
   vim.notify("AutoCoreDebug: unknown probe '" .. probe
-    .. "' — known: winlog, mailbox", vim.log.levels.ERROR)
+    .. "' — known: winlog", vim.log.levels.ERROR)
 end, {
   nargs = "*",
   complete = function(_, line)
     local parts = vim.split(line, "%s+")
     if #parts <= 2 then
-      return { "winlog", "mailbox" }
+      return { "winlog" }
     end
     if parts[2] == "winlog" and #parts == 3 then
       return { "on", "off", "toggle", "status", "tail", "clear", "path" }
     end
-    if parts[2] == "mailbox" and #parts == 3 then
-      return { "status", "tail", "registry", "follow", "clear" }
-    end
-    if parts[2] == "mailbox" and parts[3] == "follow" and #parts == 4 then
-      return { "on", "off", "toggle" }
-    end
     return {}
   end,
-  desc = "auto-core diagnostic probes (winlog, mailbox)",
+  desc = "auto-core diagnostic probes (winlog)",
 })
 
 -- :AutoCoreLogEvent — manage per-event notification subscriptions
@@ -453,32 +344,6 @@ end, {
 -- consumer plugin. We do NOT call setup() here — consumers install
 -- via lazy.nvim's `dependencies = { "yongjohnlee80/auto-core.nvim" }`
 -- and call setup themselves at the appropriate event.
-
--- Register auto-core's OWN log events so `:AutoCoreLogEvent list`
--- discovers them (ADR 0021 §5). These cover the mailbox router +
--- command-execution observability surface added in v0.1.24 — every
--- inbox arrival, response arrival, wake dispatch, wake skip, command
--- execution, and command rejection emits an entry to the
--- `auto-core.log` ring tagged with one of the event ids below.
---
--- Events fire at INFO (normal dispatch), WARN (rejections / setup
--- bugs like an unregistered wake command), DEBUG (wake-skipped on a
--- mailbox with no wake config — informational only), or ERROR (a
--- handler raised inside the pcall barrier). Subscribe via
--- `:AutoCoreLogEvent notify <event>` to also see them as toasts.
-do
-  local ok, log_mod = pcall(require, "auto-core.log")
-  if ok and log_mod and log_mod.events and log_mod.events.register then
-    log_mod.events.register("auto-core", {
-      "mailbox.router.inbox_arrival",
-      "mailbox.router.response_arrival",
-      "mailbox.router.wake_dispatched",
-      "mailbox.router.wake_skipped",
-      "mailbox.commands.command_executed",
-      "mailbox.commands.command_rejected",
-    })
-  end
-end
 
 -- ─── the todo store — user commands + autocmd (ADR 1791532020) ───
 --
