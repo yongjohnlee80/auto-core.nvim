@@ -25,11 +25,11 @@
 ---  M.debug         diagnostic probes (v0.1.3 — opt-in winlog probe
 ---                  for panel singleton bugs; see `:AutoCoreDebug
 ---                  winlog`)
----  M.mailbox       durable file-backed mailbox transport + central
----                  router + command registry (v0.1.6 — ADR 0013,
----                  Phase 1: per-mailbox roots under each agent's
----                  tool config dir, walk-and-watch router that
----                  routes outbox→inbox and dispatches wake hooks)
+---  M.commands      the whitelisted command registry (auto-core.commands)
+---  M.instance      this Neovim's instance id (auto-core.instance)
+---
+---The file mailbox (`M.mailbox`, ADR 0013) is gone in v0.6.0: AutoDoc's crew
+---carries every message (ADR 1793271500 phase 5).
 ---
 ---Hard rule from ADR 0006: this module never `require`s a family
 ---plugin (no `require("auto-agents")`, etc.). Dependency direction
@@ -46,7 +46,6 @@ M.api_version = v.api_version
 ---@field events { fire_autocmds: boolean?, strict_topics: boolean?, trace_capacity: integer? }?
 ---@field log    { level: string }?           -- "error" | "warn" | "info" | "debug" | "trace"
 ---@field state  { persist_dir: string }?     -- override the default persist root (~/.config/nvim/.auto-core/)
----@field mailbox { root: string?, autostart: boolean? }?  -- host-side fallback root + whether setup() starts the router
 M.defaults = {
   events = {
     -- Opt-in compatibility shim per ADR §6: when true, `publish(topic)`
@@ -64,12 +63,6 @@ M.defaults = {
   },
   log    = { level = "info" },
   state  = { persist_dir = nil },
-  -- Mailbox config. `root` is the HOST-SIDE FALLBACK for mailboxes
-  -- registered without an explicit per-mailbox root (e.g. `nvim`,
-  -- `user`). Agent mailboxes always pass their own root (typically
-  -- a tool config dir like `~/.claude/mailbox`). `autostart`, when
-  -- true, makes setup() also start the central router.
-  mailbox = { root = nil, autostart = false },
 }
 
 ---@type AutoCoreConfig
@@ -103,16 +96,31 @@ M.debug  = require("auto-core.debug")
 -- Neither knows what a review is.
 M.docstore = require("auto-core.docstore")
 M.drafts   = require("auto-core.drafts")
-M.mailbox = require("auto-core.mailbox")
+M.commands = require("auto-core.commands")
+M.instance = require("auto-core.instance")
 M.trust   = require("auto-core.trust")
 -- ADR 1791209945 §5: the project's primary KB, and the one KB-root resolver.
 M.kb      = require("auto-core.kb")
+
+local _mailbox_said = false -- a leftover `mailbox` option was warned about (once per process)
 
 ---Initialize auto-core. Idempotent — re-calling re-applies opts and
 ---propagates the relevant subset to each subsystem.
 ---@param opts AutoCoreConfig?
 function M.setup(opts)
-  M.config = vim.tbl_deep_extend("force", vim.deepcopy(M.defaults), opts or {})
+  opts = opts or {}
+  -- v0.6.0 has no file mailbox: a config written for an older auto-core still starts, and is told
+  -- once that its `mailbox` option does nothing now.
+  if opts.mailbox ~= nil then
+    opts = vim.deepcopy(opts)
+    opts.mailbox = nil
+    if not _mailbox_said then
+      _mailbox_said = true
+      vim.notify("auto-core: the `mailbox` option is ignored. auto-core v0.6.0 has no file mailbox: "
+        .. "AutoDoc's crew carries every message. Remove it from your setup.", vim.log.levels.WARN)
+    end
+  end
+  M.config = vim.tbl_deep_extend("force", vim.deepcopy(M.defaults), opts)
 
   -- Forward events config. Done on every setup so a re-setup with
   -- new opts (e.g. flipping fire_autocmds on mid-session) takes
@@ -132,7 +140,7 @@ function M.setup(opts)
     persist_dir = M.config.state and M.config.state.persist_dir,
   })
 
-  -- auto-core's FIRST mailbox verb of its own: `editor.open`.
+  -- auto-core's own command: `editor.open`.
   --
   -- Registered here rather than left to the consumer, because the point of the
   -- verb is that an agent DISCOVERS it through `commands_list` — a verb a
@@ -140,7 +148,7 @@ function M.setup(opts)
   -- finding. auto-core owns the registry and the dispatch, so registering here
   -- makes it available family-wide with no sibling change.
   --
-  -- pcall'd and non-fatal: setup must not fail because a mailbox surface is
+  -- pcall'd and non-fatal: setup must not fail because the command surface is
   -- unavailable in some embedding, and the registry itself refuses a
   -- conflicting owner rather than clobbering.
   local ok_reg, reg_err = pcall(function()
@@ -157,14 +165,10 @@ function M.setup(opts)
     level = M.config.log and M.config.log.level,
   })
 
-  -- Forward mailbox config. `root` is the host-side fallback;
-  -- nil → resolve via env/default. `autostart` flips the router on
-  -- as part of setup() — typical hosts leave this false and start
-  -- the router after registering their mailboxes.
-  M.mailbox.configure({
-    root      = M.config.mailbox and M.config.mailbox.root,
-    autostart = M.config.mailbox and M.config.mailbox.autostart,
-  })
+  -- The todo assignment notifier (auto-core.todo.notifier): it connects only once VimEnter has
+  -- fired, and not at all without AutoDoc; `vim.g.auto_core_todo_notifier = false` keeps it off.
+  -- Until v0.6.0 the mailbox router's start started it.
+  pcall(function() require("auto-core.todo.notifier").start() end)
 
   M._initialized = true
 end

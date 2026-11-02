@@ -83,12 +83,12 @@ local DEFAULT_IGNORE = {
   "%.swo$",             -- vim secondary swap
   "~$",                 -- vim backup file
   "/4913$",             -- vim's "is the dir writable" probe
-  -- Agent mailbox transport (ADR 0013). It lives INSIDE the watched
-  -- workspace and a multi-agent session writes to it constantly
-  -- (outbox -> inbox -> responses -> archive), so agent traffic used
-  -- to finance its own refresh load: every write published a
-  -- `core.file:*` event, and every new instance/agent subdirectory
-  -- consumed another per-directory watch handle.
+  -- The file mailbox's trees (ADR 0013; retired in v0.6.0, ADR 1793271500
+  -- phase 5). Nothing writes them any more, but they stay on disk (auto-core
+  -- never deletes them, and :AutoCoreMailboxExport reads their archives), and
+  -- watching them would spend one handle per old instance/agent directory.
+  -- While the transport lived, agent traffic financed its own refresh load:
+  -- every write published a `core.file:*` event.
   --
   -- Scoped to `mailbox/` deliberately, NOT the whole `.auto-agents/`
   -- tree: the sibling `kb/` holds documents a user genuinely browses
