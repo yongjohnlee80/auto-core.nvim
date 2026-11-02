@@ -207,6 +207,8 @@ run_standalone "no file mailbox: commands, instance, notifier fallback, export (
 if [ -n "${AUTOCORE_TEST_AUTODOC_BIN:-}" ] && [ -n "${AUTOCORE_TEST_AUTODOC:-}" ]; then
   echo "── todo where + notifier (real AutoDoc daemon) ─"
   if bash tests/todo-daemon.sh | sed 's/^/ /'; [ "${PIPESTATUS[0]}" -ne 0 ]; then overall=1; fi
+  echo "── todo-daemon.sh stops its daemons (a symlinked binary) ─"
+  if bash tests/todo-daemon-stop.sh | sed 's/^/ /'; [ "${PIPESTATUS[0]}" -ne 0 ]; then overall=1; fi
 else
   echo "── todo where + notifier (real AutoDoc daemon) ─"
   echo "   ⚠ NOT RUN: set AUTOCORE_TEST_AUTODOC and AUTOCORE_TEST_AUTODOC_BIN (tests/todo-daemon.sh)"
