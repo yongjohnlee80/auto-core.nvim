@@ -141,7 +141,8 @@ do
   ok("core.command:registered stays (the registry announces)", topics["core.command:registered"] ~= nil)
 
   vim.cmd("runtime! plugin/auto-core.lua")
-  ok(":AutoCoreMailbox is gone", vim.fn.exists(":AutoCoreMailbox") == 0)
+  -- by its exact name: exists(":AutoCoreMailbox") also matches :AutoCoreMailboxExport, a prefix match
+  ok(":AutoCoreMailbox is gone", vim.api.nvim_get_commands({})["AutoCoreMailbox"] == nil)
   local probes = vim.fn.getcompletion("AutoCoreDebug ", "cmdline")
   ok(":AutoCoreDebug offers no mailbox probe", not vim.tbl_contains(probes, "mailbox"), vim.inspect(probes))
   local stale = {}
@@ -256,7 +257,7 @@ do
     and vim.fn.filereadable(out3) == 0, vim.inspect({ r3, e3 }))
 
   vim.cmd("runtime! plugin/auto-core.lua")
-  ok(":AutoCoreMailboxExport exists", vim.fn.exists(":AutoCoreMailboxExport") == 2)
+  ok(":AutoCoreMailboxExport exists", vim.api.nvim_get_commands({})["AutoCoreMailboxExport"] ~= nil)
   local out4 = vim.fn.tempname() .. "-cmd.jsonl"
   local real_notify = vim.notify
   local said
