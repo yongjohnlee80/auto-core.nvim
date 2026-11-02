@@ -78,12 +78,7 @@ local M = {}
 
 local WORKSPACE_MAILBOX_SUFFIX = ".auto-agents/mailbox"
 
--- v0.1.8 instance_id state. Set once per nvim process (or overridden
--- via M.set_instance_id by tests / consumers). Format:
--- `<unix-seconds>-<pid>` — sortable, globally unique even when two
--- nvims spawn in the same second.
-local _instance_id   = nil ---@type string?
-local _instance_lock = false  -- guards lazy init
+-- The instance id is auto-core.instance's (v0.6.0); get/set_instance_id answer it.
 
 -- Pattern that matches the instance_id suffix at the tail of a full
 -- mailbox id (`...:<digits>-<digits>$`). Used to detect whether an
@@ -295,30 +290,14 @@ end
 ---on first call. Stable for the lifetime of this nvim process
 ---(unless explicitly overridden).
 ---@return string
-function M.get_instance_id()
-  if _instance_id then return _instance_id end
-  if _instance_lock then
-    return "0-0"
-  end
-  _instance_lock = true
-  _instance_id = string.format("%d-%d", os.time(), vim.fn.getpid())
-  _instance_lock = false
-  return _instance_id
-end
+function M.get_instance_id() return require("auto-core.instance").id() end
 
 ---Override the instance_id. Consumers (typically tests) call this
 ---before any `register()` to set the suffix used for subsequent
 ---registrations. Pass `nil` to clear and fall back to the default
 ---computation.
 ---@param id string?
-function M.set_instance_id(id)
-  if id == nil then _instance_id = nil; return end
-  if type(id) ~= "string" or not id:match("^[0-9A-Za-z%-]+$") then
-    error("auto-core.mailbox.path.set_instance_id: invalid id; expected "
-      .. "non-empty [0-9A-Za-z-]+ string")
-  end
-  _instance_id = id
-end
+function M.set_instance_id(id) return require("auto-core.instance").set_id(id) end
 
 ---True iff `id` already carries an instance_id suffix
 ---(matches `...:<digits>-<digits>$`).
@@ -367,8 +346,7 @@ end
 ---Test-only — clears the override so each test starts from defaults.
 function M._reset_for_tests()
   _override_root = nil
-  _instance_id   = nil
-  _instance_lock = false
+  require("auto-core.instance").set_id(nil)
 end
 
 M.WORKSPACE_MAILBOX_SUFFIX = WORKSPACE_MAILBOX_SUFFIX
