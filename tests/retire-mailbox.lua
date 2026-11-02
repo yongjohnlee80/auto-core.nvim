@@ -90,5 +90,29 @@ do
   end
 end
 
+-- ─── the instance id ─────────────────────────────────────────
+
+section("auto-core.instance: this Neovim's instance id, the notifier's consumer and the agents' suffix")
+do
+  local loaded, instance = pcall(require, "auto-core.instance")
+  ok("auto-core.instance loads", loaded, instance)
+  if not loaded then instance = {} end
+  ok("auto-core.instance.id and set_id are functions",
+    type(instance.id) == "function" and type(instance.set_id) == "function")
+  if type(instance.id) == "function" and type(instance.set_id) == "function" then
+    local first = instance.id()
+    ok("id is <unix-seconds>-<pid>", type(first) == "string" and first:match("^%d+%-%d+$") ~= nil, first)
+    ok("id is this process's", type(first) == "string" and first:match("%-(%d+)$") == tostring(vim.fn.getpid()), first)
+    ok("id stays the same for the process", instance.id() == first)
+    instance.set_id("1111111111-22222")
+    ok("set_id overrides it", instance.id() == "1111111111-22222")
+    ok("set_id refuses an id with a separator", not pcall(instance.set_id, "a/b"))
+    ok("a refused set_id leaves the id alone", instance.id() == "1111111111-22222")
+    instance.set_id(nil)
+    ok("set_id(nil) clears the override", instance.id():match("^%d+%-%d+$") ~= nil
+      and instance.id() ~= "1111111111-22222", instance.id())
+  end
+end
+
 io.stdout:write(string.format("\n%d passed, %d failed\n", pass, fail)); io.stdout:flush()
 vim.cmd(fail == 0 and "qa!" or "cq!")
