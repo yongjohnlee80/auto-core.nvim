@@ -201,6 +201,7 @@ run_standalone "ui.modal confirm (ADR-0195 P1)" tests/adr0195-ui-modal.lua
 run_standalone "fs.scan + dir:dirty + git.status v2 (ADR-0200)" tests/adr0200-fs-scan.lua
 run_standalone "mailbox wake ctx: arrival sender, subject, response outcome" tests/mailbox-wake-ctx.lua
 run_standalone "todo store resolution without AutoDoc (ADR 1791532020)" tests/todo-where-required.lua
+run_standalone "no file mailbox: commands, instance, notifier fallback, export (ADR 1793271500 phase 5)" tests/retire-mailbox.lua
 # The store resolution and the assignment notifier against a REAL AutoDoc daemon:
 # they need an autodoc checkout and its binary (tests/todo-daemon.sh). Without
 # them the run says so; it is not a pass.
