@@ -11,6 +11,18 @@ key, event topic, or persisted schema. Removals require a deprecation
 cycle plus a major bump.
 
 
+## [v0.5.8] — 2026-11-02 — an assignment's message states the assignment
+
+- **The todo notifier's assignment message states the assignment, not who made it** (#27). It
+  opens with `todo.notifier.ASSIGNED`, "You've been assigned a new task.", then the task's id,
+  title, file and previous assignee, and the reason quoted line by line under `Note:`. An assignment
+  comes from the user in Neovim or AutoDoc, or from a peer managing an epic's workload, and the store
+  doesn't know which: v0.5.7's message said "AutoDoc forwards the assignment … not the user's
+  instruction" and named the assigner by an opaque scope id, wrong for the user's own assignment.
+  `todo.notifier.FORWARDED` stays as a deprecated alias of `ASSIGNED`.
+- **Tests:** the notifier leaves an AutoDoc window's assignment to another host's agent to the window
+  (a bare assignee with an `autodoc:` scope: #26).
+
 ## [v0.5.7] — 2026-11-01 — an assignment is forwarded, never the user's instruction
 
 - **The todo notifier's assignment message says it is forwarded** (#24). It reaches a crew agent

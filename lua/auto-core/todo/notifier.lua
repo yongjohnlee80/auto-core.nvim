@@ -316,6 +316,10 @@ end
 ---Neovim or AutoDoc, or a peer managing an epic's workload: the store doesn't know which).
 M.ASSIGNED = "You've been assigned a new task."
 
+---FORWARDED is ASSIGNED's old name, kept so the v0.5 line removes nothing (deprecated: it goes with the
+---file mailbox in v0.6.0).
+M.FORWARDED = M.ASSIGNED
+
 ---body is the assignment message's text: it states the assignment (M.ASSIGNED), names the task and
 ---its previous assignee (p.from), and quotes p.reason line by line as the task's note, so a reason
 ---that reads as an instruction never stands as the message's own words. It names no assigner.
