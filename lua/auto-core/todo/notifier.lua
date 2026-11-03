@@ -461,7 +461,10 @@ end
 
 ---set_crew_recipient sets the host's crew send (or clears it: nil). fn(name, mid, msg, how) is asked
 ---for every assignment routed here, with the assignee's name (the `agent:` prefix and any instance
----stripped), its message id, msg = { kind, subject, body } and how = { unscoped = boolean }: an
+---stripped), its message id, msg = { kind, subject, body } and how = { unscoped = boolean, by, store,
+---seq, task }: by is who made it as the daemon recorded it (codename@scope; nil for the user's
+---surface), and store, seq (0 for a resync's row) and task say where, so an agent's assignment can be
+---sent from that agent (AutoDoc's inbox.forward), never as the user's. how.unscoped: an
 ---unscoped change (a legacy assignment, a hand edit, a bare --call) was made by no project, so a
 ---host that resolves names in its own scope first must not send it by the bare name (whichever
 ---Neovim sent first would pick the recipient): it sends only to the one live profile of that name,
@@ -565,8 +568,12 @@ local function route(mid, to, scope, at, store, p)
   if crew and ask then
     local name = to:gsub("^agent:", ""):gsub(":.*$", "")
     describe(at, store, p)
+    -- who made it, as the daemon recorded it from the caller's hello (the change's by; "" or nil for
+    -- the user's surface), and where it was recorded: an agent's assignment is sent from that agent
+    -- (inbox.forward, by store, seq and task), never as the user's
+    local by = type(p.by) == "string" and p.by ~= "" and p.by or nil
     local ok, sent = pcall(crew, name, mid, { kind = "message", subject = subject(p), body = M.body(p) },
-      { unscoped = unscoped })
+      { unscoped = unscoped, by = by, store = store and store.id, seq = tonumber(p.seq) or 0, task = p.id })
     if ok and sent == "retry" then
       local first = _unsure[mid] or now_ms()
       _unsure[mid] = first
@@ -626,7 +633,8 @@ local function poll_store(store)
       local held = false
       for _, row in ipairs(daemon.list_of(page.snapshot)) do
         local mid = string.format("todo-%s-r%d-%s", store.id, cursor, tostring(row.id))
-        local p = { id = row.id, scope = row.scope, note = "Sent again after a resync: the original reason was lost." }
+        local p = { id = row.id, scope = row.scope, by = row.by, seq = 0,
+          note = "Sent again after a resync: the original reason was lost." }
         local verdict = route(mid, row.assignee, row.scope, at, store, p)
         if verdict == "retry" then
           return -- not acked: the next poll resyncs again
@@ -674,7 +682,7 @@ local function poll_store(store)
       if seq > floor then
         if c.kind == "assign" then
           local mid = M.message_id(store.id, seq)
-          local p = { id = c.id, from = c.from, reason = c.reason, scope = c.scope }
+          local p = { id = c.id, from = c.from, reason = c.reason, scope = c.scope, by = c.by, seq = seq }
           local verdict = route(mid, c.to, c.scope, at, store, p)
           if verdict == "retry" then
             stopped = true
