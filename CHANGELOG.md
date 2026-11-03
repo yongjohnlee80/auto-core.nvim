@@ -32,7 +32,10 @@ release** (it uses `auto-core.commands`), so autovim moves both carets together.
 - **This Neovim's instance id moves to `auto-core.instance`** (`id`, `set_id`).
 - **The todo notifier:** an assignment the crew didn't take goes to the host's fallback
   (`set_fallback`: auto-agents' typed notice), never to a file. It's held inside the grace window
-  while it can't be typed, and dropped with one log line when no fallback is set.
+  while it can't be typed, and dropped with one log line when no fallback is set. **The crew hook
+  is told who made an assignment** (`how.by`, the change's maker as AutoDoc recorded it from the
+  caller's hello) and where it was recorded (`how.store`, `how.seq`, `how.task`), so an agent's
+  assignment can be sent from that agent rather than as the user's.
 - **`:AutoCoreMailboxExport`** (`auto-core.export_mailbox`) reads an old mailbox tree's archives
   into JSONL outside the tree, and never writes to it.
 - **A removed task's buffer** is closed when clean, and made file-less with a warning when

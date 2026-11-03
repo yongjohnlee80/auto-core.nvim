@@ -665,6 +665,35 @@ run("crew recipients", function()
     and tostring(msg.body):find("\n  > scoped", 1, true) ~= nil, vim.inspect(msg))
   ok("and the change is acked: the watermark passes it", notifier.watermark(store_id) >= seq, notifier.watermark(store_id))
   ok("… and an own-scope change is told scoped", type(last.how) == "table" and last.how.unscoped == false, vim.inspect(last.how))
+  ok("… and, the user's own (no maker), tells the hook no maker", type(last.how) == "table" and last.how.by == nil,
+    vim.inspect(last.how))
+
+  -- an agent's assignment: the daemon's change names its maker (by, as the agent's hello proved it);
+  -- the notifier's own read is given that by, the fixture's probe reads pass untouched
+  local made = {}
+  notifier.set_crew_recipient(function(name, m, _, how) made[#made + 1] = { name = name, mid = m, how = how }; return true end)
+  local function with_maker()
+    faults["todos.changes"] = function(params, cb, pass)
+      if params[2] ~= notifier.consumer() then
+        with_maker()
+        return pass(params, cb)
+      end
+      pass(params, function(res, err)
+        for _, c in ipairs(type(res) == "table" and res.changes or {}) do
+          if c.kind == "assign" then c.by = "gold@autodoc:aaaa" end
+        end
+        cb(res, err)
+      end)
+    end
+  end
+  with_maker()
+  local mm, sm = assigned("Made by an agent", "agent:vision", SCOPE)
+  faults["todos.changes"] = nil
+  local h = (made[#made] or {}).how or {}
+  ok("an agent's assignment reaches the hook with its maker, as the daemon recorded it", (made[#made] or {}).mid == mm
+    and h.by == "gold@autodoc:aaaa", vim.inspect(made[#made]))
+  ok("… and where it was recorded: the store, the change's seq and the task, to send it from its maker",
+    h.store == store_id and h.seq == sm and type(h.task) == "string" and h.task ~= "", vim.inspect(h))
 
   notifier.set_crew_recipient(function() return false end)
   local m2 = assigned("C2", "agent:vision", SCOPE)
