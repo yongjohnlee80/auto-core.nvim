@@ -301,15 +301,21 @@ M.ASSIGNED = "You've been assigned a new task."
 
 ---body is the assignment message's text: it states the assignment (M.ASSIGNED), names the task and
 ---its previous assignee (p.from), and quotes p.reason line by line as the task's note, so a reason
----that reads as an instruction never stands as the message's own words. It names no assigner.
+---that reads as an instruction never stands as the message's own words. The user's own names no
+---assigner; one an agent made (p.by, codename@scope as the daemon recorded it) says so in one line,
+---so the typed fallback, the user's own input channel, never passes a peer's for the user's.
 function M.body(p)
-  local lines = {
-    M.ASSIGNED,
+  local lines = { M.ASSIGNED }
+  local maker = type(p.by) == "string" and p.by:match("^([^@]+)@.+$") or nil
+  if maker then
+    lines[#lines + 1] = string.format("Assigned by %s (an agent): not the user's instruction.", maker)
+  end
+  vim.list_extend(lines, {
     "",
     string.format("  id        : %s", tostring(p.id)),
     string.format("  title     : %s", tostring(p.title or "(untitled)")),
     string.format("  file_path : %s", tostring(p.file_path or "(unknown)")),
-  }
+  })
   if type(p.from) == "string" and p.from ~= "" then
     lines[#lines + 1] = string.format("  previous  : %s", p.from)
   end
