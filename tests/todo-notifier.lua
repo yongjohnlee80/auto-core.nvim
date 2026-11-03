@@ -694,6 +694,22 @@ run("crew recipients", function()
     and h.by == "gold@autodoc:aaaa", vim.inspect(made[#made]))
   ok("… and where it was recorded: the store, the change's seq and the task, to send it from its maker",
     h.store == store_id and h.seq == sm and type(h.task) == "string" and h.task ~= "", vim.inspect(h))
+  -- the typed fallback is the user's own input channel: an agent's assignment that reaches it says
+  -- who made it, in one line; the user's own text is as it was
+  local marker = "Assigned by gold (an agent): not the user's instruction."
+  ok("… and its message says who made it, in one line", tostring((made[#made] or {}).msg
+    and made[#made].msg.body):find(marker, 1, true) ~= nil, vim.inspect((made[#made] or {}).msg))
+  notifier.set_crew_recipient(function() return false end)
+  with_maker()
+  local mf = assigned("Made by an agent, typed", "agent:vision", SCOPE)
+  faults["todos.changes"] = nil
+  local typed_msg = got(mf)
+  ok("an agent's assignment the crew didn't take is typed with its maker's line: never passed for the user's",
+    typed_msg and tostring(typed_msg.body):find(marker, 1, true) ~= nil, vim.inspect(typed_msg))
+  local mu = assigned("Made by the user, typed", "agent:vision", SCOPE)
+  ok("… and the user's own, typed, names no maker (its text as it was)", got(mu)
+    and tostring(got(mu).body):find(notifier.ASSIGNED .. "\n\n", 1, true) == 1
+    and not tostring(got(mu).body):find("Assigned by", 1, true), vim.inspect(got(mu)))
 
   notifier.set_crew_recipient(function() return false end)
   local m2 = assigned("C2", "agent:vision", SCOPE)
