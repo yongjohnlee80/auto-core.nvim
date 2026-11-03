@@ -35,7 +35,9 @@ release** (it uses `auto-core.commands`), so autovim moves both carets together.
   while it can't be typed, and dropped with one log line when no fallback is set. **The crew hook
   is told who made an assignment** (`how.by`, the change's maker as AutoDoc recorded it from the
   caller's hello) and where it was recorded (`how.store`, `how.seq`, `how.task`), so an agent's
-  assignment can be sent from that agent rather than as the user's.
+  assignment can be sent from that agent rather than as the user's. Its message says who made it,
+  in one line ("Assigned by <codename> (an agent): not the user's instruction."), so the typed
+  fallback never passes it for the user's; the user's own reads as before.
 - **`:AutoCoreMailboxExport`** (`auto-core.export_mailbox`) reads an old mailbox tree's archives
   into JSONL outside the tree, and never writes to it.
 - **A removed task's buffer** is closed when clean, and made file-less with a warning when
