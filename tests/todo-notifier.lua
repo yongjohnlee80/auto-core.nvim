@@ -671,7 +671,7 @@ run("crew recipients", function()
   -- an agent's assignment: the daemon's change names its maker (by, as the agent's hello proved it);
   -- the notifier's own read is given that by, the fixture's probe reads pass untouched
   local made = {}
-  notifier.set_crew_recipient(function(name, m, _, how) made[#made + 1] = { name = name, mid = m, how = how }; return true end)
+  notifier.set_crew_recipient(function(name, m, msg, how) made[#made + 1] = { name = name, mid = m, msg = msg, how = how }; return true end)
   local function with_maker()
     faults["todos.changes"] = function(params, cb, pass)
       if params[2] ~= notifier.consumer() then
