@@ -39,6 +39,10 @@ release** (it uses `auto-core.commands`), so autovim moves both carets together.
   modified, so no save recreates the file.
 - **Docs:** what went, where the registry and the instance id moved, and the notifier's crew and
   fallback.
+- **Tests:** the todo suites stop the AutoDoc daemon they started by their own sandbox (its
+  `--config` under it), after each suite and on exit, until none is left. A name match missed a
+  daemon started through a symlinked binary, which outlived the run; it no longer stops another
+  run's daemons either. `todo-daemon-stop.sh` pins it.
 
 ## [v0.5.8] — 2026-11-02 — an assignment's message states the assignment
 
