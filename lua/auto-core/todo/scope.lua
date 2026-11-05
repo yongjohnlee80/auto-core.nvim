@@ -21,11 +21,16 @@ M.PROTOCOL = 30
 -- (one still loaded in a Neovim from before an upgrade) can't deliver it in every project.
 M.READER_PROTOCOL = 33
 
+-- The protocol todos.assign and todos.add take crew at (AutoDoc's rpc Protocol 54): the assigner's
+-- crew scope, from which the answer's reach says where a bare agent assignee is told.
+M.CREW_PROTOCOL = 54
+
 -- A scope that names one instance, not a project: "@" .. its instance id. It routes one
 -- delivery to that instance alone; see route_of.
 M.INSTANCE_PREFIX = "@"
 
 local _scope = nil -- the host's; nil until set
+local _crew = nil -- the host's crew scope reader (set_crew); nil until set
 
 ---set records this Neovim's scope; nil or "" clears it.
 ---@param scope string|nil
@@ -46,6 +51,41 @@ end
 ---get is this Neovim's scope, nil for none.
 ---@return string|nil
 function M.get() return _scope end
+
+---set_crew sets how this Neovim's crew scope is read (or clears it: nil): fn() answers the scope
+---its crew claim holds now (autovim:<project>), or nil while it holds none. It is read at each
+---assignment, never kept: a claim is taken and lost while Neovim runs. auto-agents sets it.
+---@param fn (fun(): string|nil)|nil
+function M.set_crew(fn)
+  if fn ~= nil and type(fn) ~= "function" then
+    error("auto-core.todo.scope.set_crew: a function or nil, not a " .. type(fn), 2)
+  end
+  _crew = fn
+end
+
+---crew is this Neovim's crew scope now, nil for none (no reader set, no claim held, or a reader
+---that failed): what todos.assign's and todos.add's crew carry.
+---@return string|nil
+function M.crew()
+  if not _crew then return nil end
+  local ok, sc = pcall(_crew)
+  if ok and type(sc) == "string" and sc ~= "" then return sc end
+  return nil
+end
+
+---reach_message is what an assignment's answer says of who it reaches (AutoDoc's reach, protocol
+---54): its warning when nobody will be told, else its note when another project's agent is, else
+---nil. The daemon words both, so every surface says it the same way.
+---@param answer any todos.assign's or todos.add's answer
+---@return string|nil message
+---@return boolean warn true for a warning (nobody will be told), false for a note
+function M.reach_message(answer)
+  local r = type(answer) == "table" and answer.reach or nil
+  if type(r) ~= "table" then return nil, false end
+  if type(r.warning) == "string" and r.warning ~= "" then return r.warning, true end
+  if type(r.note) == "string" and r.note ~= "" then return r.note, false end
+  return nil, false
+end
 
 -- A test seam: the protocol autodoc.nvim's contracts declare, or a replacement.
 local _protocol = nil
@@ -95,9 +135,10 @@ end
 ---@return boolean
 function M.scoped() return M.protocol() >= M.PROTOCOL end
 
----assign_params are todos.assign's params after id and rev: the assignee, the reason, and this
----Neovim's scope when AutoDoc takes one and a scope is set. The one place both writers (the
----panel's Assign and the todos.assign verb) build them.
+---assign_params are todos.assign's params after id and rev: the assignee, the reason, this
+---Neovim's scope when AutoDoc takes one and a scope is set, and its crew scope when AutoDoc takes
+---crew (protocol 54) and a claim is held, so the answer says who the assignee reaches. The one
+---place both writers (the panel's Assign and the todos.assign verb) build them.
 ---@param assignee string "" clears
 ---@param reason string|nil
 ---@return any[]
@@ -110,10 +151,15 @@ function M.assign_params(assignee, reason)
     scope = routed or scope
     if scope then
       p[1], p[2], p[3] = name, reason or "", scope
-      return p
     end
   end
-  if reason and reason ~= "" then
+  local crew = M.protocol() >= M.CREW_PROTOCOL and M.crew() or nil
+  if crew then
+    -- positional: crew follows scope, so an unset reason or scope is sent as "" (none)
+    p[2], p[3], p[4] = p[2] or reason or "", p[3] or "", crew
+    return p
+  end
+  if p[3] == nil and reason and reason ~= "" then
     p[2] = reason
   end
   return p
@@ -132,6 +178,10 @@ function M.add_params(spec)
       p[1] = vim.tbl_extend("force", {}, spec, { assignee = name }) -- the caller's spec untouched
     end
     p[2] = routed or scope
+    local crew = M.protocol() >= M.CREW_PROTOCOL and M.crew() or nil
+    if crew then
+      p[2], p[3] = p[2] or "", crew -- positional: crew follows scope
+    end
   end
   return p
 end
