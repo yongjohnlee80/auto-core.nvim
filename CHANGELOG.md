@@ -11,6 +11,14 @@ and why. That is the rule from v0.6.0 (Johno's ruling, 2026-11-02); v0.1.0
 through v0.5.x were additive-only.
 
 
+
+## [Unreleased]
+
+- **`auto-core.todo.scope`: an assignment carries its crew scope.** `set_crew(fn)` sets how this
+  Neovim's crew scope is read; `crew()` reads it. `assign_params` and `add_params` send it as
+  AutoDoc's `crew` (protocol 54) after the project scope. `reach_message(answer)` is the answer's
+  warning (nobody will be told) or note (another project's agent), as the daemon words them.
+  Additive: a host that sets no reader, or an AutoDoc below 54, sends what it sent before.
 ## [v0.6.0] — 2026-11-02 — the file mailbox is retired
 
 ADR 1793271500, phase 5: the joint release with auto-agents v0.4.0. **It removes the file
