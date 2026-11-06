@@ -212,6 +212,13 @@ if [ -n "${AUTOCORE_TEST_AUTODOC_BIN:-}" ] && [ -n "${AUTOCORE_TEST_AUTODOC:-}" 
 else
   echo "── todo where + notifier (real AutoDoc daemon) ─"
   echo "   ⚠ NOT RUN: set AUTOCORE_TEST_AUTODOC and AUTOCORE_TEST_AUTODOC_BIN (tests/todo-daemon.sh)"
+  # Where the daemon suites are required (CI sets AUTOCORE_TEST_AUTODOC_REQUIRED=1), a run
+  # without them is a failure, not a quiet skip: their cells (the store's resolution, the
+  # notifier, an assignment's crew reach) would otherwise never run anywhere automated.
+  if [ "${AUTOCORE_TEST_AUTODOC_REQUIRED:-}" = 1 ]; then
+    echo "   ✗ AUTOCORE_TEST_AUTODOC_REQUIRED=1, and the daemon suites did not run"
+    overall=1
+  fi
 fi
 run_pty
 run_bench

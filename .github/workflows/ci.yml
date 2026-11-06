@@ -52,7 +52,8 @@ jobs:
     # it is INVOCATION-dependent — it deadlocks through run-all.sh, the
     # invocation this job uses. The per-test watchdog bounds each test; this
     # bounds the job, so the failure mode is a red run rather than a hung one.
-    timeout-minutes: 15
+    # 25, not 15: the job also builds AutoDoc and runs the real-daemon suites.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -143,7 +144,35 @@ jobs:
       # so a headless assertion on that path passes while testing nothing.
       # `script` (util-linux) is present on ubuntu-latest, so CI runs the one
       # gate a headless developer environment cannot.
-      - name: tests/run-all.sh (smoke + standalones + pty + bench)
+      # The real-daemon suites (tests/todo-daemon.sh: the store's resolution, the
+      # assignment notifier, an assignment's crew reach) need an AutoDoc checkout
+      # (its lua/ is autodoc.nvim) and its binary. Without them run-all.sh skipped
+      # them with a warning and the job still passed, so those cells ran nowhere
+      # automated. Built as auto-agents' CI builds it: without cgo, as AutoDoc's
+      # Makefile does. Pinned by commit; the pin moves with the AutoDoc release
+      # auto-core's todo surface targets.
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: "1.26.10" # autodoc v0.3.11 go.mod
+          cache: false
+
+      - name: build AutoDoc (the real daemon the todo suites start)
+        env:
+          AUTODOC_REF: "31519e12bb74b42832a3bd3f8d6d0a4248d44a48" # autodoc v0.3.11
+        run: |
+          dir="$RUNNER_TEMP/autodoc"
+          git clone --filter=blob:none https://github.com/yongjohnlee80/autodoc "$dir"
+          git -C "$dir" checkout --quiet "$AUTODOC_REF"
+          ( cd "$dir" && GOWORK=off CGO_ENABLED=0 GOFLAGS=-buildvcs=false \
+              go build -o bin/autodoc ./cmd/autodoc )
+          "$dir/bin/autodoc" --version
+          echo "AUTOCORE_TEST_AUTODOC=$dir" >> "$GITHUB_ENV"
+          echo "AUTOCORE_TEST_AUTODOC_BIN=$dir/bin/autodoc" >> "$GITHUB_ENV"
+
+      - name: tests/run-all.sh (smoke + standalones + real-daemon suites + pty + bench)
+        env:
+          # A skipped daemon suite fails the run here (run-all.sh), rather than passing quietly.
+          AUTOCORE_TEST_AUTODOC_REQUIRED: "1"
         run: ./tests/run-all.sh
 
       # The pty runner writes its transcript to tests/ui/.<name>.log. Locally
