@@ -14,6 +14,8 @@ through v0.5.x were additive-only.
 
 ## [Unreleased]
 
+## [v0.6.1] — 2026-11-07 — an assignment carries its crew scope
+
 - **`auto-core.todo.scope`: an assignment carries its crew scope.** `set_crew(fn)` sets how this
   Neovim's crew scope is read; `crew()` reads it. `assign_params` and `add_params` send it as
   AutoDoc's `crew` (protocol 54) after the project scope. `reach_message(answer)` is the answer's
