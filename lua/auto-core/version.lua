@@ -1024,6 +1024,9 @@ return {
   -- auto-core.instance; the notifier hands an assignment the crew didn't take to the host's
   -- fallback, never to a file; :AutoCoreMailboxExport reads an old tree's archives.
   -- api_version 0.2: core.mailbox is gone, which a consumer can tell by it.
-  version     = "0.6.0",
-  api_version = "0.2",
+  -- v0.6.1: todo.scope carries this Neovim's crew scope (set_crew, crew; assign_params and
+  -- add_params send it as AutoDoc's crew, protocol 54), and reach_message words the answer's reach.
+  -- api_version 0.3: those additions, which a consumer can feature-detect.
+  version     = "0.6.1",
+  api_version = "0.3",
 }
